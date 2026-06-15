@@ -503,7 +503,12 @@ function parseStatementLine(line, metadata = {}) {
   const amountMatch = chooseTransactionAmount(line, amountMatches);
   let amount = parseStatementAmount(amountMatch.value, amountMatch.marker, amountMatch.context);
   if (!Number.isFinite(amount)) return null;
-  if (metadata.creditCard) {
+  const direction = inferStatementDirection(line, metadata);
+  if (direction > 0) {
+    amount = Math.abs(amount);
+  } else if (direction < 0) {
+    amount = -Math.abs(amount);
+  } else if (metadata.creditCard) {
     amount = /\b(?:pagamento|cr[eé]dito|estorno|cashback|devolu[çc][aã]o)\b/i.test(line)
       ? Math.abs(amount)
       : -Math.abs(amount);
@@ -518,6 +523,25 @@ function parseStatementLine(line, metadata = {}) {
     .trim();
   if (!memo || isBalanceLine(line)) return null;
   return { date, amount, memo: memo.slice(0, 255), type: amount < 0 ? "DEBIT" : "CREDIT" };
+}
+
+function inferStatementDirection(line, metadata = {}) {
+  const normalized = String(line)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  const incoming = /\b(?:recebimento|recebido|recebida|pix recebido|transferencia recebida|ted recebida|doc recebido|deposito|credito em conta|salario|proventos|rendimento|resgate|estorno|cashback|devolucao|reembolso)\b/;
+  if (incoming.test(normalized)) return 1;
+
+  if (metadata.creditCard && /\b(?:pagamento|credito|estorno|cashback|devolucao|reembolso)\b/.test(normalized)) {
+    return 1;
+  }
+
+  const outgoing = /\b(?:pix enviado|transferencia enviada|ted enviada|doc enviado|pagamento|compra|saque|tarifa|taxa|juros|multa|imposto|debito automatico|boleto)\b/;
+  if (outgoing.test(normalized)) return -1;
+
+  return 0;
 }
 
 function parseStatementLines(lines, metadata = {}) {
