@@ -534,11 +534,11 @@ function inferStatementDirection(line, metadata = {}) {
   const incoming = /\b(?:recebimento|recebido|recebida|pix recebido|transferencia recebida|ted recebida|doc recebido|deposito|credito em conta|salario|proventos|rendimento|resgate|estorno|cashback|devolucao|reembolso)\b/;
   if (incoming.test(normalized)) return 1;
 
-  if (metadata.creditCard && /\b(?:pagamento|credito|estorno|cashback|devolucao|reembolso)\b/.test(normalized)) {
+  if (metadata.creditCard && /\b(?:pagamento (?:de |da )?fatura|credito|estorno|cashback|devolucao|reembolso)\b/.test(normalized)) {
     return 1;
   }
 
-  const outgoing = /\b(?:pix enviado|transferencia enviada|ted enviada|doc enviado|pagamento|compra|saque|tarifa|taxa|juros|multa|imposto|debito automatico|boleto)\b/;
+  const outgoing = /\b(?:pagamento pix|pix enviado|transferencia enviada|ted enviada|doc enviado|pagamento|compra|saque|tarifa|taxa|juros|multa|imposto|debito automatico|boleto)\b/;
   if (outgoing.test(normalized)) return -1;
 
   return 0;
