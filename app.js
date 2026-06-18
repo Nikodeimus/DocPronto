@@ -172,7 +172,7 @@ function renderOptions(type) {
     delimiter: `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=",">Vírgula (,)</option><option value=";">Ponto e vírgula (;)</option><option value="tab">Tabulação</option></select>`,
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
-    "digital-sign": `<label for="signatureMode">Tipo de assinatura</label><select id="signatureMode"><option value="written">Escrita visível no PDF</option><option value="installed">Certificado instalado no Windows</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><label for="writtenSignature">Nome para assinatura escrita</label><input id="writtenSignature" maxlength="90" placeholder="Ex.: Altair Heitor Martins Palin"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>Certificado instalado usa o repositório do Windows pelo servidor local do DocPronto. Arquivo A1 ainda exige senha do .pfx/.p12.</small>`
+    "digital-sign": `<label for="signatureMode">Tipo de assinatura</label><select id="signatureMode"><option value="installed">Certificado instalado no Windows</option><option value="written">Escrita visível no PDF</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><label for="writtenSignature">Nome/aparência da assinatura</label><input id="writtenSignature" maxlength="90" placeholder="Ex.: Altair Heitor Martins Palin"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>Com PDF + certificado instalado, o DocPronto gera um PDF assinado com aparência visível, parecido com o Adobe. Para outros arquivos, gera .p7s.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
   if (type === "digital-sign") bindDigitalSignOptions();
@@ -367,18 +367,24 @@ async function signWithInstalledCertificate(file) {
   if (!thumbprint) throw new Error("Selecione um certificado instalado no Windows.");
   const apiBase = localSignerApiBase();
   const fileBytes = new Uint8Array(await file.arrayBuffer());
-  const response = await fetch(`${apiBase}/api/sign-installed`, {
+  const pdfMode = /\.pdf$/i.test(file.name);
+  const response = await fetch(`${apiBase}/api/${pdfMode ? "sign-pdf-installed" : "sign-installed"}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       filename: file.name,
       thumbprint,
-      contentBase64: base64FromBytes(fileBytes)
+      contentBase64: base64FromBytes(fileBytes),
+      signerName: document.querySelector("#writtenSignature")?.value?.trim() || select?.selectedOptions?.[0]?.textContent || ""
     })
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || "Não foi possível assinar com o certificado instalado.");
-  download(bytesFromBase64(result.signatureBase64), `${file.name}.p7s`, "application/pkcs7-signature");
+  if (pdfMode) {
+    download(bytesFromBase64(result.contentBase64), result.filename || `${baseName(file.name)}-assinado.pdf`, "application/pdf");
+  } else {
+    download(bytesFromBase64(result.signatureBase64), `${file.name}.p7s`, "application/pkcs7-signature");
+  }
 }
 
 async function loadWindowsCertificates() {
