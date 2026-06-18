@@ -1,7 +1,9 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { extname, isAbsolute, relative, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
@@ -79,10 +81,87 @@ async function handleApi(request, response, requested) {
       writeJson(response, 200, { signatureBase64: await signWithWindowsCertificate(await readJsonBody(request)) });
       return;
     }
+    if (request.method === "POST" && requested === "/api/word-to-pdf") {
+      writeJson(response, 200, await convertOfficeDocument(await readJsonBody(request), "pdf"));
+      return;
+    }
+    if (request.method === "POST" && requested === "/api/pdf-to-word") {
+      writeJson(response, 200, await convertOfficeDocument(await readJsonBody(request), "docx"));
+      return;
+    }
     writeJson(response, 404, { error: "API nao encontrada." });
   } catch (error) {
     writeJson(response, 400, { error: error.message || "Falha ao processar assinatura local." });
   }
+}
+
+async function convertOfficeDocument({ filename, contentBase64 }, target) {
+  if (!contentBase64 || typeof contentBase64 !== "string") throw new Error("Arquivo nao informado para conversao.");
+  const sourceExt = target === "pdf" ? ".docx" : ".pdf";
+  const targetExt = target === "pdf" ? ".pdf" : ".docx";
+  if (!String(filename || "").toLowerCase().endsWith(sourceExt)) throw new Error(`Arquivo precisa estar em formato ${sourceExt}.`);
+
+  const tempDir = await mkdtemp(join(tmpdir(), "docpronto-"));
+  const inputPath = join(tempDir, `entrada${sourceExt}`);
+  const outputPath = join(tempDir, `saida${targetExt}`);
+  try {
+    await writeFile(inputPath, Buffer.from(contentBase64, "base64"));
+    if (target === "pdf") await wordToPdfWithMicrosoftWord(inputPath, outputPath);
+    else await pdfToWordWithMicrosoftWord(inputPath, outputPath);
+    const converted = await readFile(outputPath);
+    return {
+      filename: `${baseName(filename)}${targetExt}`,
+      contentBase64: converted.toString("base64")
+    };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function wordToPdfWithMicrosoftWord(inputPath, outputPath) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$inputPath = $env:DOCPRONTO_INPUT
+$outputPath = $env:DOCPRONTO_OUTPUT
+$word = New-Object -ComObject Word.Application
+$word.Visible = $false
+$word.DisplayAlerts = 0
+try {
+  $doc = $word.Documents.Open($inputPath, $false, $true, $false)
+  try {
+    $doc.ExportAsFixedFormat($outputPath, 17)
+  } finally {
+    $doc.Close($false)
+  }
+} finally {
+  $word.Quit()
+  [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+}
+`;
+  await runPowerShell(script, { DOCPRONTO_INPUT: inputPath, DOCPRONTO_OUTPUT: outputPath }, 120000);
+}
+
+async function pdfToWordWithMicrosoftWord(inputPath, outputPath) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$inputPath = $env:DOCPRONTO_INPUT
+$outputPath = $env:DOCPRONTO_OUTPUT
+$word = New-Object -ComObject Word.Application
+$word.Visible = $false
+$word.DisplayAlerts = 0
+try {
+  $doc = $word.Documents.Open($inputPath, $false, $true, $false)
+  try {
+    $doc.SaveAs2($outputPath, 16)
+  } finally {
+    $doc.Close($false)
+  }
+} finally {
+  $word.Quit()
+  [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+}
+`;
+  await runPowerShell(script, { DOCPRONTO_INPUT: inputPath, DOCPRONTO_OUTPUT: outputPath }, 45000);
 }
 
 function writeJson(response, status, payload) {
@@ -91,6 +170,10 @@ function writeJson(response, status, payload) {
     "X-Content-Type-Options": "nosniff"
   });
   response.end(JSON.stringify(payload));
+}
+
+function baseName(filename) {
+  return String(filename || "arquivo").replace(/\.[^.]+$/, "").replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").slice(0, 160);
 }
 
 function readJsonBody(request) {
@@ -165,7 +248,7 @@ try {
   })).trim();
 }
 
-function runPowerShell(script, env = {}) {
+function runPowerShell(script, env = {}, timeoutMs = 30000) {
   return new Promise((resolveOutput, reject) => {
     const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
       windowsHide: true,
@@ -173,10 +256,18 @@ function runPowerShell(script, env = {}) {
     });
     let stdout = "";
     let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Operacao local demorou demais e foi cancelada."));
+    }, timeoutMs);
     child.stdout.on("data", chunk => { stdout += chunk.toString("utf8"); });
     child.stderr.on("data", chunk => { stderr += chunk.toString("utf8"); });
-    child.on("error", reject);
+    child.on("error", error => {
+      clearTimeout(timer);
+      reject(error);
+    });
     child.on("close", code => {
+      clearTimeout(timer);
       if (code === 0) resolveOutput(stdout);
       else reject(new Error(stderr.trim() || "PowerShell retornou erro ao acessar certificados."));
     });

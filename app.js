@@ -293,16 +293,43 @@ async function textToPdf([file]) {
 }
 
 async function wordToPdf([file]) {
-  const text = await extractTextFromDocx(file);
-  if (!text.trim()) throw new Error("O DOCX não contém texto principal para converter.");
-  download(await createTextPdf(text), `${baseName(file.name)}.pdf`, "application/pdf");
+  try {
+    const converted = await convertWithLocalOffice(file, "word-to-pdf");
+    download(bytesFromBase64(converted.contentBase64), converted.filename || `${baseName(file.name)}.pdf`, "application/pdf");
+  } catch (error) {
+    const text = await extractTextFromDocx(file);
+    if (!text.trim()) throw new Error("O DOCX não contém texto principal para converter.");
+    showStatus("Servidor local do Word indisponível. Gerando PDF simples somente com o texto principal...", true);
+    download(await createTextPdf(text), `${baseName(file.name)}.pdf`, "application/pdf");
+  }
 }
 
 async function pdfToWord([file]) {
-  const pages = await extractTextFromPdf(file);
-  const text = pages.map(lines => lines.join("\n")).join("\n\n");
-  if (!text.trim()) throw new Error("Não encontramos texto selecionável neste PDF. Se ele for escaneado, use OCR antes de converter.");
-  download(await createDocxFromText(text), `${baseName(file.name)}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  try {
+    const converted = await convertWithLocalOffice(file, "pdf-to-word");
+    download(bytesFromBase64(converted.contentBase64), converted.filename || `${baseName(file.name)}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  } catch (error) {
+    const pages = await extractTextFromPdf(file);
+    const text = pages.map(lines => lines.join("\n")).join("\n\n");
+    if (!text.trim()) throw new Error("Não encontramos texto selecionável neste PDF. Se ele for escaneado, use OCR antes de converter.");
+    showStatus("Servidor local do Word indisponível. Gerando DOCX simples somente com o texto pesquisável...", true);
+    download(await createDocxFromText(text), `${baseName(file.name)}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  }
+}
+
+async function convertWithLocalOffice(file, endpoint) {
+  const fileBytes = new Uint8Array(await file.arrayBuffer());
+  const response = await fetch(`${localSignerApiBase()}/api/${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name,
+      contentBase64: base64FromBytes(fileBytes)
+    })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Não foi possível converter com o Microsoft Word local.");
+  return result;
 }
 
 async function signWithDigitalCertificate([file]) {
