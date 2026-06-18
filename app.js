@@ -368,6 +368,7 @@ async function signWithInstalledCertificate(file) {
   const apiBase = localSignerApiBase();
   const fileBytes = new Uint8Array(await file.arrayBuffer());
   const pdfMode = /\.pdf$/i.test(file.name);
+  const placement = pdfMode ? await chooseSignaturePlacement(file) : null;
   const response = await fetch(`${apiBase}/api/${pdfMode ? "sign-pdf-installed" : "sign-installed"}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -375,7 +376,8 @@ async function signWithInstalledCertificate(file) {
       filename: file.name,
       thumbprint,
       contentBase64: base64FromBytes(fileBytes),
-      signerName: document.querySelector("#writtenSignature")?.value?.trim() || select?.selectedOptions?.[0]?.textContent || ""
+      signerName: document.querySelector("#writtenSignature")?.value?.trim() || select?.selectedOptions?.[0]?.textContent || "",
+      placement
     })
   });
   const result = await response.json().catch(() => ({}));
@@ -385,6 +387,129 @@ async function signWithInstalledCertificate(file) {
   } else {
     download(bytesFromBase64(result.signatureBase64), `${file.name}.p7s`, "application/pkcs7-signature");
   }
+}
+
+async function chooseSignaturePlacement(file) {
+  const dialog = document.querySelector("#signaturePlacementDialog");
+  const preview = document.querySelector("#signaturePreview");
+  const canvas = document.querySelector("#signatureCanvas");
+  const box = document.querySelector("#signatureBox");
+  const pageLabel = document.querySelector("#signaturePageLabel");
+  const previous = document.querySelector("#signaturePrevPage");
+  const next = document.querySelector("#signatureNextPage");
+  if (!dialog || !preview || !canvas || !box) return null;
+
+  const pdfjs = await loadPdfJs();
+  const pdfBytes = new Uint8Array(await file.arrayBuffer());
+  const pdf = await pdfjs.getDocument({ data: pdfBytes, isEvalSupported: false }).promise;
+  let pageNumber = pdf.numPages;
+  let scale = 1;
+  let viewport = null;
+  const context = canvas.getContext("2d", { alpha: false });
+
+  const renderPage = async () => {
+    const page = await pdf.getPage(pageNumber);
+    const baseViewport = page.getViewport({ scale: 1 });
+    scale = Math.min(1.35, Math.max(0.7, Math.min(820 / baseViewport.width, 900 / baseViewport.height)));
+    viewport = page.getViewport({ scale });
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    canvas.style.width = `${canvas.width}px`;
+    canvas.style.height = `${canvas.height}px`;
+    await page.render({ canvasContext: context, viewport }).promise;
+    pageLabel.textContent = `Página ${pageNumber} de ${pdf.numPages}`;
+    previous.disabled = pageNumber <= 1;
+    next.disabled = pageNumber >= pdf.numPages;
+    placeDefaultSignatureBox(box, canvas);
+  };
+
+  previous.onclick = async () => {
+    if (pageNumber > 1) {
+      pageNumber -= 1;
+      await renderPage();
+    }
+  };
+  next.onclick = async () => {
+    if (pageNumber < pdf.numPages) {
+      pageNumber += 1;
+      await renderPage();
+    }
+  };
+
+  makeSignatureBoxInteractive(box, preview);
+  await renderPage();
+
+  const closeValue = await new Promise(resolve => {
+    const onClose = () => {
+      dialog.removeEventListener("close", onClose);
+      resolve(dialog.returnValue);
+    };
+    dialog.addEventListener("close", onClose);
+    dialog.showModal();
+  });
+  if (closeValue !== "confirm") throw new Error("Posicionamento da assinatura cancelado.");
+
+  const boxRect = box.getBoundingClientRect();
+  const canvasRect = canvas.getBoundingClientRect();
+  const left = clamp(boxRect.left - canvasRect.left, 0, canvasRect.width - boxRect.width);
+  const top = clamp(boxRect.top - canvasRect.top, 0, canvasRect.height - boxRect.height);
+  return {
+    page: pageNumber,
+    x: left / scale,
+    y: (canvasRect.height - top - boxRect.height) / scale,
+    width: boxRect.width / scale,
+    height: boxRect.height / scale
+  };
+}
+
+function placeDefaultSignatureBox(box, canvas) {
+  const width = Math.min(290, Math.max(210, canvas.width * 0.34));
+  const height = 78;
+  box.style.width = `${width}px`;
+  box.style.height = `${height}px`;
+  box.style.left = `${Math.max(24, canvas.width - width - 46)}px`;
+  box.style.top = `${Math.max(24, canvas.height - height - 86)}px`;
+}
+
+function makeSignatureBoxInteractive(box, container) {
+  if (box.dataset.bound === "true") return;
+  box.dataset.bound = "true";
+  let action = null;
+  let start = null;
+  box.addEventListener("pointerdown", event => {
+    event.preventDefault();
+    box.setPointerCapture(event.pointerId);
+    const isResize = event.target.tagName === "I";
+    action = isResize ? "resize" : "move";
+    start = {
+      x: event.clientX,
+      y: event.clientY,
+      left: box.offsetLeft,
+      top: box.offsetTop,
+      width: box.offsetWidth,
+      height: box.offsetHeight
+    };
+  });
+  box.addEventListener("pointermove", event => {
+    if (!action || !start) return;
+    const dx = event.clientX - start.x;
+    const dy = event.clientY - start.y;
+    const maxLeft = container.clientWidth - box.offsetWidth;
+    const maxTop = container.clientHeight - box.offsetHeight;
+    if (action === "move") {
+      box.style.left = `${clamp(start.left + dx, 0, maxLeft)}px`;
+      box.style.top = `${clamp(start.top + dy, 0, maxTop)}px`;
+      return;
+    }
+    const width = clamp(start.width + dx, 180, container.clientWidth - start.left);
+    const height = clamp(start.height + dy, 58, container.clientHeight - start.top);
+    box.style.width = `${width}px`;
+    box.style.height = `${height}px`;
+  });
+  box.addEventListener("pointerup", () => {
+    action = null;
+    start = null;
+  });
 }
 
 async function loadWindowsCertificates() {
@@ -1237,6 +1362,10 @@ function validateArchive(zip, requiredPath) {
   });
   if (expandedSize > MAX_ARCHIVE_EXPANDED_SIZE) throw new Error("O arquivo se expande além do limite seguro.");
   if (!zip.file(requiredPath)) throw new Error("O arquivo não possui a estrutura esperada para este formato.");
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
 }
 
 function worksheetXml(rows) {

@@ -269,7 +269,7 @@ try {
   }
 }
 
-async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase64, signerName }) {
+async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase64, signerName, placement }) {
   debugLog("sign-pdf-installed:start");
   const cleanThumbprint = String(thumbprint || "").replace(/\s/g, "");
   if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione um certificado instalado valido.");
@@ -281,7 +281,8 @@ async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase
   debugLog("sign-pdf-installed:certificate-ok");
   const prepared = appendPdfSignaturePlaceholder(pdf, {
     signerName: signerName || certificate.label || certificate.subject || "Assinatura digital",
-    reason: "Assinado digitalmente pelo DocPronto"
+    reason: "Assinado digitalmente pelo DocPronto",
+    placement
   });
   debugLog(`sign-pdf-installed:prepared:${prepared.pdf.length}`);
   const signedBytes = Buffer.concat([
@@ -315,10 +316,13 @@ async function getWindowsCertificate(thumbprint) {
   return found;
 }
 
-function appendPdfSignaturePlaceholder(pdf, { signerName, reason }) {
+function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placement }) {
   const source = pdf.toString("latin1");
   const rootMatch = source.match(/1 0 obj\s*<<(.*?)>>\s*endobj/s);
-  const pageMatch = source.match(/3 0 obj\s*<<(.*?)>>\s*endobj/s);
+  const pageMatches = [...source.matchAll(/(\d+)\s+0\s+obj\s*<<([\s\S]*?)>>\s*endobj/g)]
+    .filter(match => /\/Type\s*\/Page\b/.test(match[2]) && !/\/Type\s*\/Pages\b/.test(match[2]));
+  const pageIndex = Math.max(0, Math.min(pageMatches.length - 1, Number(placement?.page || 1) - 1));
+  const pageMatch = pageMatches[pageIndex];
   const prevStart = Number((source.match(/startxref\s+(\d+)\s+%%EOF\s*$/s) || [])[1]);
   const trailerMatch = source.match(/trailer\s*<<(.*?)>>\s*startxref\s+\d+\s+%%EOF\s*$/s);
   if (!rootMatch || !pageMatch || !Number.isFinite(prevStart) || !trailerMatch) {
@@ -338,7 +342,11 @@ function appendPdfSignaturePlaceholder(pdf, { signerName, reason }) {
   const fontObj = size + 4;
   const newSize = size + 5;
   const rootBody = addPdfDictionaryEntry(rootMatch[1], `/AcroForm ${acroFormObj} 0 R`);
-  const pageBody = addPdfDictionaryEntry(pageMatch[1], `/Annots[${widgetObj} 0 R]`);
+  const pageObject = Number(pageMatch[1]);
+  const pageBody = addPdfDictionaryEntry(pageMatch[2], `/Annots[${widgetObj} 0 R]`);
+  const rect = normalizeSignaturePlacement(placement);
+  const appearanceWidth = Math.max(120, rect.width);
+  const appearanceHeight = Math.max(42, rect.height);
   const now = pdfDate(new Date());
   const visibleText = [
     `Assinado de forma digital por`,
@@ -347,9 +355,9 @@ function appendPdfSignaturePlaceholder(pdf, { signerName, reason }) {
   ];
   const appearanceStream = [
     "q",
-    "1 1 1 rg 0 0 290 78 re f",
-    "0.1 0.1 0.1 RG 0.8 w 0 0 290 78 re S",
-    "BT /Helv 10 Tf 0 0 0 rg 10 54 Td",
+    `1 1 1 rg 0 0 ${formatPdfNumber(appearanceWidth)} ${formatPdfNumber(appearanceHeight)} re f`,
+    `0.1 0.1 0.1 RG 0.8 w 0 0 ${formatPdfNumber(appearanceWidth)} ${formatPdfNumber(appearanceHeight)} re S`,
+    `BT /Helv 10 Tf 0 0 0 rg 10 ${formatPdfNumber(appearanceHeight - 24)} Td`,
     `(${escapePdfString(visibleText[0])}) Tj`,
     "0 -16 Td",
     `(${escapePdfString(visibleText[1])}) Tj`,
@@ -362,18 +370,18 @@ function appendPdfSignaturePlaceholder(pdf, { signerName, reason }) {
   const byteRangePlaceholder = "[0000000000 0000000000 0000000000 0000000000]";
   const objects = [
     `1 0 obj\n<<${rootBody}>>\nendobj\n`,
-    `3 0 obj\n<<${pageBody}>>\nendobj\n`,
+    `${pageObject} 0 obj\n<<${pageBody}>>\nendobj\n`,
     `${acroFormObj} 0 obj\n<</Fields[${widgetObj} 0 R]/SigFlags 3>>\nendobj\n`,
-    `${widgetObj} 0 obj\n<</Type/Annot/Subtype/Widget/FT/Sig/Rect[300 92 590 170]/T(Signature1)/V ${signatureObj} 0 R/P 3 0 R/F 132/AP<</N ${appearanceObj} 0 R>>>>\nendobj\n`,
+    `${widgetObj} 0 obj\n<</Type/Annot/Subtype/Widget/FT/Sig/Rect[${formatPdfNumber(rect.x)} ${formatPdfNumber(rect.y)} ${formatPdfNumber(rect.x + rect.width)} ${formatPdfNumber(rect.y + rect.height)}]/T(Signature1)/V ${signatureObj} 0 R/P ${pageObject} 0 R/F 132/AP<</N ${appearanceObj} 0 R>>>>\nendobj\n`,
     `${signatureObj} 0 obj\n<</Type/Sig/Filter/Adobe.PPKLite/SubFilter/adbe.pkcs7.detached/ByteRange ${byteRangePlaceholder}/Contents <${"0".repeat(placeholderHexLength)}>/Reason(${escapePdfString(reason)})/M(${now})/Name(${escapePdfString(cleanPdfText(signerName))})>>\nendobj\n`,
-    `${appearanceObj} 0 obj\n<</Type/XObject/Subtype/Form/BBox[0 0 290 78]/Resources<</Font<</Helv ${fontObj} 0 R>>>>/Length ${Buffer.byteLength(appearanceStream, "latin1")}>>\nstream\n${appearanceStream}\nendstream\nendobj\n`,
+    `${appearanceObj} 0 obj\n<</Type/XObject/Subtype/Form/BBox[0 0 ${formatPdfNumber(appearanceWidth)} ${formatPdfNumber(appearanceHeight)}]/Resources<</Font<</Helv ${fontObj} 0 R>>>>/Length ${Buffer.byteLength(appearanceStream, "latin1")}>>\nstream\n${appearanceStream}\nendstream\nendobj\n`,
     `${fontObj} 0 obj\n<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>\nendobj\n`
   ];
 
   const offsets = new Map();
   let incremental = "\n";
   let cursor = pdf.length + Buffer.byteLength(incremental, "latin1");
-  const objectNumbers = [1, 3, acroFormObj, widgetObj, signatureObj, appearanceObj, fontObj];
+  const objectNumbers = [1, pageObject, acroFormObj, widgetObj, signatureObj, appearanceObj, fontObj];
   objects.forEach((object, index) => {
     offsets.set(objectNumbers[index], cursor);
     incremental += object;
@@ -408,6 +416,23 @@ function addPdfDictionaryEntry(body, entry) {
     return clean.replace(/\/Annots\s*\[([^\]]*)\]/s, (match, refs) => `/Annots[${refs.trim()} ${entry.match(/\[(.*)\]/)?.[1] || ""}]`);
   }
   return `${clean}${entry}`;
+}
+
+function normalizeSignaturePlacement(placement) {
+  const x = Number(placement?.x);
+  const y = Number(placement?.y);
+  const width = Number(placement?.width);
+  const height = Number(placement?.height);
+  return {
+    x: Number.isFinite(x) ? Math.max(0, x) : 300,
+    y: Number.isFinite(y) ? Math.max(0, y) : 92,
+    width: Number.isFinite(width) ? Math.min(460, Math.max(120, width)) : 290,
+    height: Number.isFinite(height) ? Math.min(180, Math.max(42, height)) : 78
+  };
+}
+
+function formatPdfNumber(value) {
+  return Number(value).toFixed(2).replace(/\.?0+$/, "");
 }
 
 function pdfDate(date) {

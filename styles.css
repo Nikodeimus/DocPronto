@@ -208,7 +208,9 @@ dialog {
   box-shadow: var(--shadow);
 }
 dialog::backdrop { background: rgba(8, 19, 15, 0.7); backdrop-filter: blur(6px); }
+.placement-dialog { width: min(1040px, calc(100% - 22px)); }
 .dialog-shell { position: relative; padding: 34px; overflow: auto; }
+.placement-shell { position: relative; padding: 24px; overflow: auto; }
 .close-button {
   position: absolute;
   top: 18px;
@@ -224,6 +226,55 @@ dialog::backdrop { background: rgba(8, 19, 15, 0.7); backdrop-filter: blur(6px);
 .dialog-heading { display: flex; gap: 20px; padding-right: 40px; }
 .dialog-heading h2 { margin-bottom: 10px; font-size: 40px; }
 .dialog-heading p:last-child { margin: 0; color: var(--muted); line-height: 1.5; }
+.placement-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding-right: 46px; }
+.placement-header h2 { margin: 2px 0 0; font-size: 32px; }
+.placement-toolbar { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 18px 0; }
+.placement-toolbar span { min-width: 110px; text-align: center; color: var(--muted); font-size: 13px; font-weight: 750; }
+.signature-preview-wrap {
+  max-height: min(68vh, 760px);
+  overflow: auto;
+  padding: 18px;
+  background: #d9dfdc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.signature-preview {
+  position: relative;
+  width: fit-content;
+  margin: 0 auto;
+  background: var(--white);
+  box-shadow: 0 12px 30px rgba(19, 35, 28, 0.2);
+}
+.signature-preview canvas { display: block; max-width: none; }
+.signature-box {
+  position: absolute;
+  left: 58%;
+  top: 72%;
+  display: grid;
+  width: 290px;
+  height: 78px;
+  align-content: center;
+  padding: 10px 12px;
+  cursor: move;
+  user-select: none;
+  color: #111;
+  background: rgba(255, 255, 255, 0.92);
+  border: 2px solid #1d4ed8;
+  box-shadow: 0 0 0 9999px rgba(29, 78, 216, 0.04);
+  font-size: 14px;
+  line-height: 1.25;
+}
+.signature-box i {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background: #1d4ed8;
+  border: 2px solid #fff;
+  border-radius: 50%;
+}
 .drop-zone {
   display: grid;
   min-height: 220px;
@@ -295,7 +346,10 @@ dialog::backdrop { background: rgba(8, 19, 15, 0.7); backdrop-filter: blur(6px);
   .tool-card h3 { margin-top: 50px; }
   .trust-items { grid-template-columns: 1fr; margin-top: 40px; }
   .dialog-shell { padding: 26px 18px; }
+  .placement-shell { padding: 18px 12px; }
   .dialog-heading h2 { font-size: 34px; }
+  .placement-header h2 { font-size: 26px; }
+  .signature-preview-wrap { padding: 10px; }
   footer { gap: 15px; flex-direction: column; }
 }
 

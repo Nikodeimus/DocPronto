@@ -107,6 +107,36 @@
     </form>
   </dialog>
 
+  <dialog id="signaturePlacementDialog" aria-labelledby="signaturePlacementTitle" class="placement-dialog">
+    <form method="dialog" class="placement-shell">
+      <div class="placement-header">
+        <div>
+          <p class="eyebrow">assinatura</p>
+          <h2 id="signaturePlacementTitle">Posicionar assinatura</h2>
+        </div>
+        <button class="close-button" value="cancel" aria-label="Fechar">×</button>
+      </div>
+      <div class="placement-toolbar">
+        <button class="secondary-button compact-button" type="button" id="signaturePrevPage">Anterior</button>
+        <span id="signaturePageLabel"></span>
+        <button class="secondary-button compact-button" type="button" id="signatureNextPage">Próxima</button>
+      </div>
+      <div class="signature-preview-wrap">
+        <div class="signature-preview" id="signaturePreview">
+          <canvas id="signatureCanvas"></canvas>
+          <div class="signature-box" id="signatureBox">
+            <span>Assinado digitalmente</span>
+            <i></i>
+          </div>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button class="secondary-button" value="cancel">Voltar</button>
+        <button class="primary-button" value="confirm" id="signatureConfirmButton">Assinar aqui</button>
+      </div>
+    </form>
+  </dialog>
+
   <footer>
     <span>DocPronto MVP</span>
     <span>Feito para documentos do dia a dia.</span>
