@@ -258,6 +258,15 @@ dialog::backdrop { background: rgba(8, 19, 15, 0.7); backdrop-filter: blur(6px);
   border: 1px solid var(--line);
   border-radius: 8px;
 }
+.inline-option {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+.compact-button {
+  padding: 10px 13px;
+  border-radius: 8px;
+}
 .notice, .status-message { display: none; margin-top: 14px; padding: 12px 14px; border-radius: 8px; font-size: 13px; line-height: 1.45; }
 .notice.visible { display: block; color: #5e4a10; background: #fff1bc; }
 .status-message.visible { display: block; color: #245d31; background: #dff2df; }

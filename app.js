@@ -172,9 +172,16 @@ function renderOptions(type) {
     delimiter: `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=",">Vírgula (,)</option><option value=";">Ponto e vírgula (;)</option><option value="tab">Tabulação</option></select>`,
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
-    "digital-sign": `<label for="signatureMode">Tipo de assinatura</label><select id="signatureMode"><option value="written">Escrita visível no PDF</option><option value="certificate">Certificado A1 (.p7s)</option></select><label for="writtenSignature">Nome para assinatura escrita</label><input id="writtenSignature" maxlength="90" placeholder="Ex.: Altair Heitor Martins Palin"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12"><label for="certificatePassword">Senha do certificado</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A assinatura escrita gera um novo PDF assinado visualmente. O certificado A1 gera um .p7s destacado; guarde o arquivo original junto com a assinatura.</small>`
+    "digital-sign": `<label for="signatureMode">Tipo de assinatura</label><select id="signatureMode"><option value="written">Escrita visível no PDF</option><option value="installed">Certificado instalado no Windows</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><label for="writtenSignature">Nome para assinatura escrita</label><input id="writtenSignature" maxlength="90" placeholder="Ex.: Altair Heitor Martins Palin"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>Certificado instalado usa o repositório do Windows pelo servidor local do DocPronto. Arquivo A1 ainda exige senha do .pfx/.p12.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
+  if (type === "digital-sign") bindDigitalSignOptions();
+}
+
+function bindDigitalSignOptions() {
+  document.querySelector("#loadWindowsCertificates")?.addEventListener("click", () => {
+    loadWindowsCertificates().catch(error => showStatus(error.message, true));
+  });
 }
 
 async function processFiles() {
@@ -304,6 +311,10 @@ async function signWithDigitalCertificate([file]) {
     await signPdfWithWrittenSignature(file);
     return;
   }
+  if (mode === "installed") {
+    await signWithInstalledCertificate(file);
+    return;
+  }
   if (!window.forge) throw new Error("O módulo de assinatura digital não foi carregado.");
   const certificateInput = document.querySelector("#certificateFile");
   const certificateFile = certificateInput?.files?.[0];
@@ -317,6 +328,51 @@ async function signWithDigitalCertificate([file]) {
   const { privateKey, certificate, chain } = parsePkcs12Certificate(certificateBytes, password);
   const signature = createDetachedPkcs7Signature(fileBytes, privateKey, certificate, chain);
   download(signature, `${file.name}.p7s`, "application/pkcs7-signature");
+}
+
+async function signWithInstalledCertificate(file) {
+  const select = document.querySelector("#windowsCertificate");
+  let thumbprint = select?.value || "";
+  if (!thumbprint) {
+    await loadWindowsCertificates();
+    thumbprint = select?.value || "";
+  }
+  if (!thumbprint) throw new Error("Selecione um certificado instalado no Windows.");
+  const apiBase = localSignerApiBase();
+  const fileBytes = new Uint8Array(await file.arrayBuffer());
+  const response = await fetch(`${apiBase}/api/sign-installed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name,
+      thumbprint,
+      contentBase64: base64FromBytes(fileBytes)
+    })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Não foi possível assinar com o certificado instalado.");
+  download(bytesFromBase64(result.signatureBase64), `${file.name}.p7s`, "application/pkcs7-signature");
+}
+
+async function loadWindowsCertificates() {
+  const select = document.querySelector("#windowsCertificate");
+  if (!select) return;
+  select.innerHTML = `<option value="">Carregando certificados...</option>`;
+  const response = await fetch(`${localSignerApiBase()}/api/certificates`);
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Não foi possível carregar certificados instalados.");
+  const certificates = result.certificates || [];
+  if (!certificates.length) {
+    select.innerHTML = `<option value="">Nenhum certificado com chave privada encontrado</option>`;
+    return;
+  }
+  select.innerHTML = certificates.map(certificate =>
+    `<option value="${escapeHtml(certificate.thumbprint)}">${escapeHtml(certificate.label)}</option>`
+  ).join("");
+}
+
+function localSignerApiBase() {
+  return ["localhost", "127.0.0.1"].includes(window.location.hostname) ? "" : "http://127.0.0.1:4174";
 }
 
 async function signPdfWithWrittenSignature(file) {
@@ -418,6 +474,14 @@ function bytesFromBinaryString(value) {
   const bytes = new Uint8Array(value.length);
   for (let index = 0; index < value.length; index += 1) bytes[index] = value.charCodeAt(index);
   return bytes;
+}
+
+function base64FromBytes(bytes) {
+  return btoa(binaryStringFromBytes(bytes));
+}
+
+function bytesFromBase64(value) {
+  return bytesFromBinaryString(atob(value));
 }
 
 async function createTextPdf(text) {
