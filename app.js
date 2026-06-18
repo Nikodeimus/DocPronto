@@ -172,7 +172,7 @@ function renderOptions(type) {
     delimiter: `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=",">Vírgula (,)</option><option value=";">Ponto e vírgula (;)</option><option value="tab">Tabulação</option></select>`,
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
-    "digital-sign": `<label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12"><label for="certificatePassword">Senha do certificado</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>Será gerado um arquivo .p7s destacado. Guarde o arquivo original junto com a assinatura.</small>`
+    "digital-sign": `<label for="signatureMode">Tipo de assinatura</label><select id="signatureMode"><option value="written">Escrita visível no PDF</option><option value="certificate">Certificado A1 (.p7s)</option></select><label for="writtenSignature">Nome para assinatura escrita</label><input id="writtenSignature" maxlength="90" placeholder="Ex.: Altair Heitor Martins Palin"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12"><label for="certificatePassword">Senha do certificado</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A assinatura escrita gera um novo PDF assinado visualmente. O certificado A1 gera um .p7s destacado; guarde o arquivo original junto com a assinatura.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
 }
@@ -299,6 +299,11 @@ async function pdfToWord([file]) {
 }
 
 async function signWithDigitalCertificate([file]) {
+  const mode = document.querySelector("#signatureMode")?.value || "written";
+  if (mode === "written") {
+    await signPdfWithWrittenSignature(file);
+    return;
+  }
   if (!window.forge) throw new Error("O módulo de assinatura digital não foi carregado.");
   const certificateInput = document.querySelector("#certificateFile");
   const certificateFile = certificateInput?.files?.[0];
@@ -312,6 +317,56 @@ async function signWithDigitalCertificate([file]) {
   const { privateKey, certificate, chain } = parsePkcs12Certificate(certificateBytes, password);
   const signature = createDetachedPkcs7Signature(fileBytes, privateKey, certificate, chain);
   download(signature, `${file.name}.p7s`, "application/pkcs7-signature");
+}
+
+async function signPdfWithWrittenSignature(file) {
+  if (!/\.pdf$/i.test(file.name)) throw new Error("A assinatura escrita está disponível para arquivos PDF. Converta o Word para PDF antes de assinar.");
+  const signerName = document.querySelector("#writtenSignature")?.value?.trim();
+  if (!signerName) throw new Error("Informe o nome que deve aparecer na assinatura escrita.");
+  const pdfDocument = await PDFLib.PDFDocument.load(await file.arrayBuffer());
+  const pages = pdfDocument.getPages();
+  const page = pages[pages.length - 1];
+  const regular = await pdfDocument.embedFont(PDFLib.StandardFonts.Helvetica);
+  const italic = await pdfDocument.embedFont(PDFLib.StandardFonts.TimesRomanItalic);
+  const { width } = page.getSize();
+  const signedAt = new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short"
+  }).format(new Date());
+  const boxWidth = Math.min(300, width - 80);
+  const x = width - boxWidth - 42;
+  const y = 54;
+  page.drawRectangle({
+    x,
+    y,
+    width: boxWidth,
+    height: 72,
+    borderColor: PDFLib.rgb(0.16, 0.2, 0.18),
+    borderWidth: 0.8,
+    color: PDFLib.rgb(1, 0.996, 0.965),
+    opacity: 0.92
+  });
+  page.drawText(toWinAnsi(signerName).slice(0, 52), {
+    x: x + 14,
+    y: y + 39,
+    size: 15,
+    font: italic,
+    color: PDFLib.rgb(0.08, 0.14, 0.12)
+  });
+  page.drawLine({
+    start: { x: x + 14, y: y + 32 },
+    end: { x: x + boxWidth - 14, y: y + 32 },
+    thickness: 0.6,
+    color: PDFLib.rgb(0.16, 0.2, 0.18)
+  });
+  page.drawText(toWinAnsi(`Assinado visualmente em ${signedAt}`), {
+    x: x + 14,
+    y: y + 15,
+    size: 8.5,
+    font: regular,
+    color: PDFLib.rgb(0.32, 0.38, 0.35)
+  });
+  download(await pdfDocument.save(), `${baseName(file.name)}-assinado.pdf`, "application/pdf");
 }
 
 function parsePkcs12Certificate(bytes, password) {
