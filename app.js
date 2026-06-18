@@ -515,10 +515,11 @@ function parseStatementLine(line, metadata = {}) {
   }
   const date = dateMatch.normalized;
   const withoutDate = line.replace(dateMatch.text, " ");
-  const memo = withoutDate
+  const memoSource = metadata.creditCard ? simplifyCreditCardMemo(withoutDate) : withoutDate;
+  const memo = memoSource
     .replace(amountMatch.full, " ")
     .replace(/(?:R\$\s*)?[+-]?(?:\d{1,3}(?:[.\s]\d{3})+|\d+)[,.]\d{2}\s*(?:saldo)?\s*$/i, " ")
-    .replace(/\b(?:cr[eé]dito|d[eé]bito|valor|lan[çc]amento)\b/gi, " ")
+    .replace(/\b(?:cr[eé]dito|credito|d[eé]bito|debito|valor|lan[çc]amento|lancamento)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (!memo || isBalanceLine(line)) return null;
@@ -534,7 +535,7 @@ function inferStatementDirection(line, metadata = {}) {
   const incoming = /\b(?:recebimento|recebido|recebida|pix recebido|transferencia recebida|ted recebida|doc recebido|deposito|credito em conta|salario|proventos|rendimento|resgate|estorno|cashback|devolucao|reembolso)\b/;
   if (incoming.test(normalized)) return 1;
 
-  if (metadata.creditCard && /\b(?:pagamento (?:de |da )?fatura|credito|estorno|cashback|devolucao|reembolso)\b/.test(normalized)) {
+  if (metadata.creditCard && /\b(?:pagamento(?:\s+(?:de |da )?fatura)?|credito|estorno|cashback|devolucao|reembolso)\b/.test(normalized)) {
     return 1;
   }
 
@@ -546,8 +547,19 @@ function inferStatementDirection(line, metadata = {}) {
 
 function parseStatementLines(lines, metadata = {}) {
   const transactions = [];
+  const useSectionGate = metadata.creditCard && lines.some(isCreditCardTransactionSection);
+  let inTransactionSection = !useSectionGate;
   for (let index = 0; index < lines.length; index += 1) {
     let candidate = lines[index];
+    if (isCreditCardTransactionSection(candidate)) {
+      inTransactionSection = true;
+      continue;
+    }
+    if (useSectionGate && isCreditCardSectionEnd(candidate)) {
+      inTransactionSection = false;
+      continue;
+    }
+    if (!inTransactionSection) continue;
     if (index > 0 && isDescriptionContinuation(lines[index - 1], candidate)) candidate = `${lines[index - 1]} ${candidate}`;
     const consumedTrailing = index + 1 < lines.length && isTrailingContinuation(lines[index + 1]);
     if (consumedTrailing) candidate = `${candidate} ${lines[index + 1]}`;
@@ -594,13 +606,17 @@ function findStatementDate(line, referenceDate = null) {
 
 function inferFinancialMetadata(lines) {
   const text = lines.join(" ");
-  const dueDate = text.match(/vencimento\s+(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/i);
-  const referenceDate = dueDate
-    ? new Date(Number(dueDate[3]), Number(dueDate[2]) - 1, Number(dueDate[1]))
+  const normalizedText = normalizeSearchText(text);
+  const dueDate = normalizedText.match(/vencimento[\s\S]{0,80}?(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/i);
+  const documentDate = normalizedText.match(/(?:data\s+do\s+documento|atualizados\s+em|fechamento\s+proxima\s+fatura)[\s\S]{0,40}?(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/i);
+  const anyDate = normalizedText.match(/\b(\d{1,2})[\/.-](\d{1,2})[\/.-](20\d{2}|19\d{2})\b/);
+  const referenceMatch = dueDate || documentDate || anyDate;
+  const referenceDate = referenceMatch
+    ? new Date(Number(referenceMatch[3]), Number(referenceMatch[2]) - 1, Number(referenceMatch[1]))
     : new Date();
-  const cardFinal = text.match(/(?:cart[aã]o.*?final|final)\s*(\d{4})/i);
-  const bankName = text.match(/\b(ita[uú]|bradesco|santander|sicredi|sicoob|nubank|inter|caixa|banco do brasil|btg|c6)\b/i);
-  const creditCard = /\b(?:fatura|cart[aã]o|mastercard|visa|elo|amex)\b/i.test(text);
+  const cardFinal = normalizedText.match(/(?:cartao\s*(?:n[\u00BAo.:?]*|numero)?\s*[:.-]?\s*\d{0,8}\*+|n[\u00BAo?]\s*|final\s*)(\d{4})/i) || normalizedText.match(/\b\d{4}\*{4,}(\d{4})\b/);
+  const bankName = normalizedText.match(/\b(itau|bradesco|santander|sicredi|sicoob|nubank|inter|caixa|banco do brasil|btg|c6)\b/i);
+  const creditCard = /\b(?:fatura|cartao|mastercard|visa|elo|amex)\b/i.test(normalizedText);
   return {
     referenceDate,
     currency: /\b(?:R\$|reais|BRL)\b/i.test(text) ? "BRL" : /\b(?:US\$|USD|d[oó]lar)\b/i.test(text) ? "USD" : "BRL",
@@ -630,7 +646,32 @@ function isTrailingContinuation(line) {
 }
 
 function isHeaderOrSummary(line) {
-  return /\b(?:transa[çc][oõ]es|data e hora|descri[çc][aã]o|valor em|total cart[aã]o|resumo da fatura|vencimento|limite|pagamento m[ií]nimo|op[çc][oõ]es de pagamento|legenda|fechamento da pr[oó]xima fatura|total de parcelas|\d+ de \d+)\b/i.test(line);
+  const normalized = normalizeSearchText(line);
+  return /\b(?:transacoes|data e hora|historico de despesas|descricao|valor em|valor origem|cotacao|total cartao|resumo da fatura|vencimento|limite|pagamento minimo|opcoes de pagamento|opcoes de parcelamento|programa de recompensa|encargos|legenda|fechamento da proxima fatura|total de parcelas|recibo do pagador|autenticacao|beneficiario|nosso numero|sacador|avalista|codigo de barra|local do pagamento|instrucoes|\d+ de \d+)\b/i.test(normalized);
+}
+
+function isCreditCardTransactionSection(line) {
+  const normalized = normalizeSearchText(line);
+  return /\b(?:despesas no brasil|despesas no exterior|lancamentos nacionais|lancamentos internacionais)\b/i.test(normalized);
+}
+
+function isCreditCardSectionEnd(line) {
+  const normalized = normalizeSearchText(line);
+  return /\b(?:subtotal|autenticacao|recibo do pagador|opcoes de parcelamento|encargos vigentes|programa de recompensa|sacador|avalista|codigo de barra)\b/i.test(normalized);
+}
+
+function simplifyCreditCardMemo(value) {
+  return String(value)
+    .replace(/\b(?:BRL|R\$|USD|US\$|EUR)\b[\s\S]*$/i, " ")
+    .replace(/\b\d{1,4}[,.]\d{2}\b(?:\s+\d{1,4}[,.]\d{2})*\s*$/i, " ");
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\u0000/g, " ")
+    .toLowerCase();
 }
 
 function simpleHash(value) {
