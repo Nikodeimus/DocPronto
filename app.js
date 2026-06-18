@@ -1,4 +1,4 @@
-/* global PDFLib, JSZip */
+/* global PDFLib, JSZip, forge */
 
 const MAX_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_ARCHIVE_SIZE = 12 * 1024 * 1024;
@@ -19,7 +19,10 @@ const tools = [
   { id: "ofx-csv", number: "11", category: "financeiro", title: "OFX para CSV", description: "Converta o extrato bancário em uma tabela compatível com planilhas.", accept: ".ofx", multiple: false, option: "ofx-delimiter", action: ofxToCsv },
   { id: "ofx-xlsx", number: "12", category: "financeiro", title: "OFX para XLSX", description: "Transforme as transações do OFX em uma planilha Excel.", accept: ".ofx", multiple: false, action: ofxToXlsx },
   { id: "ofx-summary", number: "13", category: "financeiro", title: "OFX para PDF", description: "Gere um PDF com saldos, entradas, saídas e transações.", accept: ".ofx", multiple: false, action: ofxToSummaryPdf },
-  { id: "pdf-ofx", number: "14", category: "financeiro", title: "PDF para OFX", description: "Converta faturas, extratos e outros PDFs financeiros em OFX.", accept: ".pdf", multiple: false, option: "pdf-ofx", warning: "O sistema detecta transações e metadados automaticamente e usa OCR em PDFs escaneados. Revise o resultado antes de importar.", action: pdfToOfx }
+  { id: "pdf-ofx", number: "14", category: "financeiro", title: "PDF para OFX", description: "Converta faturas, extratos e outros PDFs financeiros em OFX.", accept: ".pdf", multiple: false, option: "pdf-ofx", warning: "O sistema detecta transações e metadados automaticamente e usa OCR em PDFs escaneados. Revise o resultado antes de importar.", action: pdfToOfx },
+  { id: "word-pdf", number: "15", category: "documento", title: "Word para PDF", description: "Converta o texto principal de um DOCX em PDF.", accept: ".docx", multiple: false, warning: "A conversão preserva o texto principal. Imagens, cabeçalhos e layout avançado podem não aparecer no PDF.", action: wordToPdf },
+  { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Transforme o texto pesquisável de um PDF em DOCX editável.", accept: ".pdf", multiple: false, warning: "Funciona melhor em PDFs com texto selecionável. PDFs escaneados podem precisar de OCR antes da conversão.", action: pdfToWord },
+  { id: "digital-sign", number: "17", category: "documento", title: "Assinar com certificado", description: "Assine arquivos com certificado digital A1 e gere uma assinatura .p7s.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "Use certificado A1 em arquivo .pfx ou .p12. Certificados A3/token exigem aplicativo nativo e não podem ser acessados diretamente pelo navegador.", action: signWithDigitalCertificate }
 ];
 
 const elements = {
@@ -168,7 +171,8 @@ function renderOptions(type) {
     watermark: `<label for="watermark">Texto da marca d'água</label><input id="watermark" maxlength="80" value="CONFIDENCIAL"><label for="opacity">Opacidade</label><input id="opacity" type="range" min="0.1" max="0.8" step="0.1" value="0.25">`,
     delimiter: `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=",">Vírgula (,)</option><option value=";">Ponto e vírgula (;)</option><option value="tab">Tabulação</option></select>`,
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
-    "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`
+    "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
+    "digital-sign": `<label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12"><label for="certificatePassword">Senha do certificado</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>Será gerado um arquivo .p7s destacado. Guarde o arquivo original junto com a assinatura.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
 }
@@ -278,6 +282,90 @@ async function imagesToPdf(files) {
 
 async function textToPdf([file]) {
   const text = await file.text();
+  download(await createTextPdf(text), `${baseName(file.name)}.pdf`, "application/pdf");
+}
+
+async function wordToPdf([file]) {
+  const text = await extractTextFromDocx(file);
+  if (!text.trim()) throw new Error("O DOCX não contém texto principal para converter.");
+  download(await createTextPdf(text), `${baseName(file.name)}.pdf`, "application/pdf");
+}
+
+async function pdfToWord([file]) {
+  const pages = await extractTextFromPdf(file);
+  const text = pages.map(lines => lines.join("\n")).join("\n\n");
+  if (!text.trim()) throw new Error("Não encontramos texto selecionável neste PDF. Se ele for escaneado, use OCR antes de converter.");
+  download(await createDocxFromText(text), `${baseName(file.name)}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+}
+
+async function signWithDigitalCertificate([file]) {
+  if (!window.forge) throw new Error("O módulo de assinatura digital não foi carregado.");
+  const certificateInput = document.querySelector("#certificateFile");
+  const certificateFile = certificateInput?.files?.[0];
+  const password = document.querySelector("#certificatePassword")?.value || "";
+  if (!certificateFile) throw new Error("Selecione o certificado A1 em formato .pfx ou .p12.");
+  if (!/\.(pfx|p12)$/i.test(certificateFile.name)) throw new Error("O certificado precisa estar em formato .pfx ou .p12.");
+  if (!password) throw new Error("Informe a senha do certificado A1.");
+
+  const fileBytes = new Uint8Array(await file.arrayBuffer());
+  const certificateBytes = new Uint8Array(await certificateFile.arrayBuffer());
+  const { privateKey, certificate, chain } = parsePkcs12Certificate(certificateBytes, password);
+  const signature = createDetachedPkcs7Signature(fileBytes, privateKey, certificate, chain);
+  download(signature, `${file.name}.p7s`, "application/pkcs7-signature");
+}
+
+function parsePkcs12Certificate(bytes, password) {
+  try {
+    const p12Asn1 = forge.asn1.fromDer(binaryStringFromBytes(bytes));
+    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
+    const keyBag = firstPkcs12Bag(p12, forge.pki.oids.pkcs8ShroudedKeyBag) || firstPkcs12Bag(p12, forge.pki.oids.keyBag);
+    const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [];
+    const certificate = certBags[0]?.cert;
+    if (!keyBag?.key || !certificate) throw new Error("Certificado A1 incompleto.");
+    return { privateKey: keyBag.key, certificate, chain: certBags.map(bag => bag.cert).filter(Boolean) };
+  } catch (error) {
+    throw new Error("Não foi possível abrir o certificado. Verifique se o arquivo é A1 (.pfx/.p12) e se a senha está correta.");
+  }
+}
+
+function firstPkcs12Bag(p12, bagType) {
+  return (p12.getBags({ bagType })[bagType] || [])[0];
+}
+
+function createDetachedPkcs7Signature(fileBytes, privateKey, certificate, chain) {
+  const signedData = forge.pkcs7.createSignedData();
+  signedData.content = forge.util.createBuffer(binaryStringFromBytes(fileBytes));
+  chain.forEach(item => signedData.addCertificate(item));
+  signedData.addSigner({
+    key: privateKey,
+    certificate,
+    digestAlgorithm: forge.pki.oids.sha256,
+    authenticatedAttributes: [
+      { type: forge.pki.oids.contentType, value: forge.pki.oids.data },
+      { type: forge.pki.oids.messageDigest },
+      { type: forge.pki.oids.signingTime, value: new Date() }
+    ]
+  });
+  signedData.sign({ detached: true });
+  return bytesFromBinaryString(forge.asn1.toDer(signedData.toAsn1()).getBytes());
+}
+
+function binaryStringFromBytes(bytes) {
+  let result = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    result += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return result;
+}
+
+function bytesFromBinaryString(value) {
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) bytes[index] = value.charCodeAt(index);
+  return bytes;
+}
+
+async function createTextPdf(text) {
   const document = await PDFLib.PDFDocument.create();
   const font = await document.embedFont(PDFLib.StandardFonts.Helvetica);
   const size = 11;
@@ -297,10 +385,15 @@ async function textToPdf([file]) {
     page.drawText(toWinAnsi(line), { x: margin, y, size, font, color: PDFLib.rgb(0.08, 0.14, 0.12) });
     y -= lineHeight;
   }
-  download(await document.save(), `${baseName(file.name)}.pdf`, "application/pdf");
+  return document.save();
 }
 
 async function docxToText([file]) {
+  const text = await extractTextFromDocx(file);
+  download(new TextEncoder().encode(text), `${baseName(file.name)}.txt`, "text/plain;charset=utf-8");
+}
+
+async function extractTextFromDocx(file) {
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   validateArchive(zip, "word/document.xml");
   const entry = zip.file("word/document.xml");
@@ -311,7 +404,7 @@ async function docxToText([file]) {
   const text = paragraphs.map(paragraph =>
     [...paragraph.getElementsByTagNameNS("*", "t")].map(node => node.textContent).join("")
   ).join("\n");
-  download(new TextEncoder().encode(text), `${baseName(file.name)}.txt`, "text/plain;charset=utf-8");
+  return text;
 }
 
 async function csvToXlsx([file]) {
@@ -454,8 +547,7 @@ async function pdfToOfx([file]) {
 }
 
 async function extractTransactionsFromPdf(file) {
-  const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/build/pdf.min.mjs");
-  pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/build/pdf.worker.min.mjs";
+  const pdfjs = await loadPdfJs();
   const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false });
   const pdf = await loadingTask.promise;
   let transactions = [];
@@ -478,6 +570,27 @@ async function extractTransactionsFromPdf(file) {
   }
   await loadingTask.destroy();
   return { transactions: deduplicateTransactions(transactions), metadata };
+}
+
+async function extractTextFromPdf(file) {
+  const pdfjs = await loadPdfJs();
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false });
+  const pdf = await loadingTask.promise;
+  const pages = [];
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    pages.push(groupPdfTextLines(textContent.items));
+    page.cleanup();
+  }
+  await loadingTask.destroy();
+  return pages;
+}
+
+async function loadPdfJs() {
+  const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/build/pdf.min.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/build/pdf.worker.min.mjs";
+  return pdfjs;
 }
 
 function groupPdfTextLines(items) {
@@ -999,6 +1112,39 @@ function workbookRelsXml() {
 }
 function stylesXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf xfId="0"/></cellXfs></styleSheet>`;
+}
+
+async function createDocxFromText(text) {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", docxContentTypesXml());
+  zip.folder("_rels").file(".rels", docxRootRelsXml());
+  const word = zip.folder("word");
+  word.file("document.xml", wordDocumentXml(text));
+  word.folder("_rels").file("document.xml.rels", docxDocumentRelsXml());
+  return zip.generateAsync({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  });
+}
+
+function docxContentTypesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
+}
+
+function docxRootRelsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+}
+
+function docxDocumentRelsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>`;
+}
+
+function wordDocumentXml(text) {
+  const paragraphs = String(text || "").replace(/\r/g, "").split("\n").map(line => {
+    if (!line.trim()) return "<w:p/>";
+    return `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`;
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraphs}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`;
 }
 
 async function readSharedStrings(zip) {
