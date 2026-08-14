@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root { --background: #f3f1e8; --foreground: #10251f; }
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.app-shell { width: 100vw; height: 100dvh; }
+.docpronto-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--background); }
