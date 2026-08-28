@@ -543,7 +543,7 @@ async function createEditableLayoutDocx(file) {
           tessedit_pageseg_mode: "6",
           preserve_interword_spaces: "1",
           logger: message => showStatus(`Página ${pageNumber} de ${pdf.numPages}: ${message.status || "OCR"} ${Math.round((message.progress || 0) * 100)}%`)
-        }, { text: true, blocks: true, tsv: true });
+        }, { text: true, blocks: true, tsv: true, hocr: true });
       } catch (error) {
         throw new Error("Não foi possível executar o OCR. Verifique a conexão e tente novamente; o modelo em português é baixado somente na primeira utilização.");
       }
@@ -554,7 +554,7 @@ async function createEditableLayoutDocx(file) {
         bytes: new Uint8Array(await blob.arrayBuffer()),
         width: canvas.width,
         height: canvas.height,
-        lines: ocrLayoutLines(result.data, canvas.width, canvas.height, cropX, cropY)
+        lines: ocrLayoutLines(result.data, canvas.width, canvas.height, cropX, cropY, cropWidth, cropHeight)
       });
       page.cleanup();
     }
@@ -572,7 +572,7 @@ async function createEditableLayoutDocx(file) {
   return zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
 }
 
-function ocrLayoutLines(data, pageWidth, pageHeight, offsetX = 0, offsetY = 0) {
+function ocrLayoutLines(data, pageWidth, pageHeight, offsetX = 0, offsetY = 0, regionWidth = pageWidth, regionHeight = pageHeight) {
   const source = [];
   const collect = node => {
     if (!node || typeof node !== "object") return;
@@ -582,6 +582,18 @@ function ocrLayoutLines(data, pageWidth, pageHeight, offsetX = 0, offsetY = 0) {
     }
   };
   collect(data);
+  if (!source.length && typeof data?.hocr === "string") {
+    const parsed = new DOMParser().parseFromString(data.hocr, "text/html");
+    parsed.querySelectorAll(".ocr_line, .ocrx_line").forEach(node => {
+      const match = /bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/i.exec(node.getAttribute("title") || "");
+      if (!match) return;
+      source.push({
+        text: node.textContent.replace(/\s+/g, " ").trim(),
+        confidence: 80,
+        bbox: { x0: Number(match[1]), y0: Number(match[2]), x1: Number(match[3]), y1: Number(match[4]) }
+      });
+    });
+  }
   if (!source.length && typeof data?.tsv === "string") {
     const rows = data.tsv.split(/\r?\n/).slice(1).map(row => row.split("\t"));
     const grouped = new Map();
@@ -596,6 +608,15 @@ function ocrLayoutLines(data, pageWidth, pageHeight, offsetX = 0, offsetY = 0) {
       line.confidence = Math.min(line.confidence, Number(row[10]));
     });
     grouped.forEach(line => { line.text = line.words.join(" "); source.push(line); });
+  }
+  if (!source.length && String(data?.text || "").trim()) {
+    const lines = String(data.text).replace(/\r/g, "").split("\n").map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+    const step = Math.min(22, regionHeight / Math.max(lines.length + 2, 1));
+    lines.forEach((text, index) => source.push({
+      text,
+      confidence: 70,
+      bbox: { x0: 0, y0: index * step, x1: regionWidth, y1: index * step + step * 0.78 }
+    }));
   }
   return source.map(line => {
     const box = line.bbox || {};
@@ -618,7 +639,7 @@ function editableLayoutDocumentXml(pages) {
     const overlays = page.lines.map((line, lineIndex) => {
       const fontSize = Math.max(7, Math.min(18, line.height * 0.78));
       const bold = fontSize > 12 || /^[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ0-9ªº\s&–—.-]{8,}$/.test(line.text) ? "<w:b/>" : "";
-      return `<w:r><w:pict><v:shape id="ocr-${pageIndex}-${lineIndex}" type="#_x0000_t202" style="position:absolute;margin-left:${line.x.toFixed(2)}pt;margin-top:${line.y.toFixed(2)}pt;width:${line.width.toFixed(2)}pt;height:${Math.max(line.height + 2, 10).toFixed(2)}pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="t" fillcolor="white" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr>${bold}<w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t xml:space="preserve">${escapeXml(line.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+      return `<w:r><w:pict><v:rect id="ocr-${pageIndex}-${lineIndex}" style="position:absolute;margin-left:${line.x.toFixed(2)}pt;margin-top:${line.y.toFixed(2)}pt;width:${line.width.toFixed(2)}pt;height:${Math.max(line.height + 3, 11).toFixed(2)}pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="t" fillcolor="white" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr>${bold}<w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t xml:space="preserve">${escapeXml(line.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></w:pict></w:r>`;
     }).join("");
     const pageBreak = pageIndex < pages.length - 1 ? `<w:r><w:br w:type="page"/></w:r>` : "";
     return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>${background}${overlays}${pageBreak}</w:p>`;
