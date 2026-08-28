@@ -219,7 +219,7 @@ function renderOptions(type) {
     delimiter: `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=",">Vírgula (,)</option><option value=";">Ponto e vírgula (;)</option><option value="tab">Tabulação</option></select>`,
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
-    "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="fast">Texto realmente editável — OCR (recomendado)</option><option value="editable-layout">Layout visual + camada editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>No modo recomendado, PDFs escaneados são reconhecidos por OCR e transformados em parágrafos reais. Nenhuma página é inserida como imagem.</small>`,
+    "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="installed">Certificado instalado no Windows</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><div class="sign-mode-panel" data-sign-mode="installed"><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate" hidden><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`
   };
@@ -380,7 +380,7 @@ async function wordToPdf([file]) {
 }
 
 async function pdfToWord([file]) {
-  const mode = document.querySelector("#pdfWordMode")?.value || "fast";
+  const mode = document.querySelector("#pdfWordMode")?.value || "editable-layout";
   if (mode === "editable-layout") {
     showStatus("Reconstruindo o documento com OCR e preservação visual...");
     download(await createEditableLayoutDocx(file), `${baseName(file.name)}-editavel.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
@@ -515,7 +515,7 @@ async function createEditableLayoutDocx(file) {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const base = page.getViewport({ scale: 1 });
-      const viewport = page.getViewport({ scale: Math.min(2.4, 1900 / Math.max(base.width, base.height)) });
+      const viewport = page.getViewport({ scale: Math.min(3.2, 2700 / Math.max(base.width, base.height)) });
       const canvas = document.createElement("canvas");
       canvas.width = Math.ceil(viewport.width);
       canvas.height = Math.ceil(viewport.height);
@@ -523,24 +523,38 @@ async function createEditableLayoutDocx(file) {
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: context, viewport }).promise;
+      const cropX = Math.round(canvas.width * 0.085);
+      const cropY = Math.round(canvas.height * (pageNumber === 1 ? 0.195 : 0.185));
+      const cropWidth = Math.round(canvas.width * 0.825);
+      const cropHeight = Math.round(canvas.height * 0.755);
+      const ocrCanvas = document.createElement("canvas");
+      ocrCanvas.width = cropWidth;
+      ocrCanvas.height = cropHeight;
+      const ocrContext = ocrCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
+      ocrContext.drawImage(canvas, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+      improveOcrContrast(ocrContext, cropWidth, cropHeight);
       showStatus(`OCR e reconstrução: página ${pageNumber} de ${pdf.numPages}...`);
       let result;
       try {
-        result = await window.Tesseract.recognize(canvas, "por", {
+        result = await window.Tesseract.recognize(ocrCanvas, "por", {
           workerPath: "./vendor/tesseract-worker.min.js",
           corePath: "./vendor/tesseract-core/",
           langPath: "https://tessdata.projectnaptha.com/4.0.0/",
+          tessedit_pageseg_mode: "6",
+          preserve_interword_spaces: "1",
           logger: message => showStatus(`Página ${pageNumber} de ${pdf.numPages}: ${message.status || "OCR"} ${Math.round((message.progress || 0) * 100)}%`)
-        });
+        }, { text: true, blocks: true, tsv: true });
       } catch (error) {
         throw new Error("Não foi possível executar o OCR. Verifique a conexão e tente novamente; o modelo em português é baixado somente na primeira utilização.");
       }
+      context.fillStyle = "#ffffff";
+      context.fillRect(cropX - 4, cropY - 4, cropWidth + 8, cropHeight + 8);
       const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("Não foi possível renderizar a página.")), "image/png"));
       pages.push({
         bytes: new Uint8Array(await blob.arrayBuffer()),
         width: canvas.width,
         height: canvas.height,
-        lines: ocrLayoutLines(result.data, canvas.width, canvas.height)
+        lines: ocrLayoutLines(result.data, canvas.width, canvas.height, cropX, cropY)
       });
       page.cleanup();
     }
@@ -558,7 +572,7 @@ async function createEditableLayoutDocx(file) {
   return zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
 }
 
-function ocrLayoutLines(data, pageWidth, pageHeight) {
+function ocrLayoutLines(data, pageWidth, pageHeight, offsetX = 0, offsetY = 0) {
   const source = [];
   const collect = node => {
     if (!node || typeof node !== "object") return;
@@ -588,8 +602,8 @@ function ocrLayoutLines(data, pageWidth, pageHeight) {
     return {
       text: String(line.text || "").trim(),
       confidence: Number(line.confidence ?? line.conf ?? 100),
-      x: Number(box.x0 || 0) / pageWidth * 595,
-      y: Number(box.y0 || 0) / pageHeight * 842,
+      x: (Number(box.x0 || 0) + offsetX) / pageWidth * 595,
+      y: (Number(box.y0 || 0) + offsetY) / pageHeight * 842,
       width: Math.max(10, Number((box.x1 || 0) - (box.x0 || 0)) / pageWidth * 595),
       height: Math.max(7, Number((box.y1 || 0) - (box.y0 || 0)) / pageHeight * 842)
     };
