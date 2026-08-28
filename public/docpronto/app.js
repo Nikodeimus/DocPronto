@@ -412,7 +412,7 @@ async function extractEditableTextWithOcr(file) {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const base = page.getViewport({ scale: 1 });
-      const viewport = page.getViewport({ scale: Math.min(2.5, 2100 / Math.max(base.width, base.height)) });
+      const viewport = page.getViewport({ scale: Math.min(3.2, 2700 / Math.max(base.width, base.height)) });
       const canvas = document.createElement("canvas");
       canvas.width = Math.ceil(viewport.width);
       canvas.height = Math.ceil(viewport.height);
@@ -420,24 +420,89 @@ async function extractEditableTextWithOcr(file) {
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: context, viewport }).promise;
+      const cropX = Math.round(canvas.width * 0.085);
+      const cropY = Math.round(canvas.height * (pageNumber === 1 ? 0.195 : 0.185));
+      const cropWidth = Math.round(canvas.width * 0.825);
+      const cropHeight = Math.round(canvas.height * 0.755);
+      const ocrCanvas = document.createElement("canvas");
+      ocrCanvas.width = cropWidth;
+      ocrCanvas.height = cropHeight;
+      const ocrContext = ocrCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
+      ocrContext.drawImage(canvas, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+      improveOcrContrast(ocrContext, cropWidth, cropHeight);
       let result;
       try {
-        result = await window.Tesseract.recognize(canvas, "por", {
+        result = await window.Tesseract.recognize(ocrCanvas, "por", {
           workerPath: "./vendor/tesseract-worker.min.js",
           corePath: "./vendor/tesseract-core/",
           langPath: "https://tessdata.projectnaptha.com/4.0.0/",
+          tessedit_pageseg_mode: "6",
+          preserve_interword_spaces: "1",
           logger: message => showStatus(`OCR página ${pageNumber} de ${pdf.numPages}: ${message.status || "processando"} ${Math.round((message.progress || 0) * 100)}%`)
         });
       } catch (error) {
         throw new Error("Não foi possível executar o OCR. Verifique a conexão e tente novamente; o idioma português é baixado na primeira utilização.");
       }
-      pageTexts.push(String(result.data?.text || "").replace(/\r/g, "").trim());
+      pageTexts.push(cleanEditableOcrText(result.data?.text || ""));
       page.cleanup();
     }
   } finally {
     await loadingTask.destroy();
   }
   return pageTexts.join("\n\f\n");
+}
+
+function improveOcrContrast(context, width, height) {
+  const image = context.getImageData(0, 0, width, height);
+  const data = image.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const gray = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+    const value = gray > 205 ? 255 : gray < 125 ? 0 : Math.round((gray - 125) * 3.18);
+    data[index] = value;
+    data[index + 1] = value;
+    data[index + 2] = value;
+  }
+  context.putImageData(image, 0, 0);
+}
+
+function cleanEditableOcrText(value) {
+  const lines = String(value || "").replace(/\r/g, "").split("\n");
+  const cleaned = [];
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/[ \t]+/g, " ").trim();
+    if (!line) {
+      if (cleaned.length && cleaned[cleaned.length - 1] !== "") cleaned.push("");
+      continue;
+    }
+    const useful = (line.match(/[A-Za-zÀ-ÿ0-9]/g) || []).length;
+    if (useful < 3 || useful / Math.max(line.length, 1) < 0.45) continue;
+    if (/^(?:[|_~`'.,;:!%?()\[\]{}\\/-]\s*){2,}$/.test(line)) continue;
+    cleaned.push(line);
+  }
+  while (cleaned[0] === "") cleaned.shift();
+  while (cleaned[cleaned.length - 1] === "") cleaned.pop();
+  const paragraphs = [];
+  let current = "";
+  const flush = () => {
+    if (current.trim()) paragraphs.push(current.trim());
+    current = "";
+  };
+  cleaned.forEach(line => {
+    if (!line) { flush(); return; }
+    const heading = line.length < 110 && /^[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ0-9ªº &.,–—-]+$/.test(line) && /[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ]{4}/.test(line);
+    const beginsParagraph = /^(?:Cláusula|Parágrafo|Pelo presente|Único sócio|O sócio|Totalizando|ALT[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ ]{5,})\b/i.test(line);
+    if (heading) {
+      flush();
+      paragraphs.push(line);
+    } else if (beginsParagraph && current) {
+      flush();
+      current = line;
+    } else {
+      current = current ? `${current} ${line}` : line;
+    }
+  });
+  flush();
+  return paragraphs.join("\n\n");
 }
 
 async function createEditableLayoutDocx(file) {
@@ -1905,9 +1970,19 @@ function wordDocumentXml(text) {
   const paragraphs = String(text || "").replace(/\r/g, "").split("\n").map(line => {
     if (line === "\f") return `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
     if (!line.trim()) return "<w:p/>";
-    return `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`;
+    const trimmed = line.trim();
+    const upperHeading = trimmed.length < 100 && /^[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ0-9ªº &.,–—-]+$/.test(trimmed) && /[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ]{4}/.test(trimmed);
+    const centered = upperHeading || /^(?:CONTRATO SOCIAL|PALIN\s*&\s*MARTINS)/i.test(trimmed);
+    const clause = /^(Cláusula\s+[^:]+:|Parágrafo\s+(?:Único|Primeiro|Segundo|Terceiro|Quarto|Quinta|Sexto|Sétimo|Oitavo|Nono|Décimo)\s*[–—-]?)/i.exec(trimmed);
+    const paragraphProps = `<w:pPr><w:jc w:val="${centered ? "center" : "both"}"/><w:spacing w:before="0" w:after="90" w:line="276" w:lineRule="auto"/>${centered ? "" : "<w:ind w:firstLine=\"0\"/>"}</w:pPr>`;
+    const runProps = `<w:rPr>${upperHeading ? "<w:b/>" : ""}<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial"/><w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr>`;
+    if (clause) {
+      const rest = trimmed.slice(clause[0].length);
+      return `<w:p>${paragraphProps}<w:r><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="21"/></w:rPr><w:t xml:space="preserve">${escapeXml(clause[0])}</w:t></w:r><w:r>${runProps}<w:t xml:space="preserve">${escapeXml(rest)}</w:t></w:r></w:p>`;
+    }
+    return `<w:p>${paragraphProps}<w:r>${runProps}<w:t xml:space="preserve">${escapeXml(trimmed)}</w:t></w:r></w:p>`;
   }).join("");
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraphs}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraphs}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1276" w:bottom="992" w:left="1276" w:header="420" w:footer="420" w:gutter="0"/></w:sectPr></w:body></w:document>`;
 }
 
 async function readSharedStrings(zip) {
