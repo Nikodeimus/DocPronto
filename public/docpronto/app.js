@@ -219,7 +219,7 @@ function renderOptions(type) {
     delimiter: `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=",">Vírgula (,)</option><option value=";">Ponto e vírgula (;)</option><option value="tab">Tabulação</option></select>`,
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
-    "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="fast">Automático — rápido quando houver texto</option><option value="layout">Preservar mais o layout — Microsoft Word</option></select><small>No modo automático, PDFs formados por imagens são enviados somente ao Microsoft Word local deste computador.</small>`,
+    "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Alta fidelidade + texto editável (recomendado)</option><option value="fast">Somente texto editável</option><option value="visual">Cópia visual exata (não editável)</option></select><small>A conversão acontece no navegador. Em PDFs escaneados, o modo recomendado usa OCR e preserva carimbos, assinaturas, logotipos e a aparência de cada página.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="installed">Certificado instalado no Windows</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><div class="sign-mode-panel" data-sign-mode="installed"><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate" hidden><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`
   };
@@ -380,11 +380,15 @@ async function wordToPdf([file]) {
 }
 
 async function pdfToWord([file]) {
-  const mode = document.querySelector("#pdfWordMode")?.value || "fast";
-  if (mode === "layout") {
-    showStatus("O Microsoft Word está reconstruindo o documento. PDFs complexos podem demorar.");
-    const converted = await convertWithLocalOffice(file, "pdf-to-word");
-    download(bytesFromBase64(converted.contentBase64), converted.filename || `${baseName(file.name)}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  const mode = document.querySelector("#pdfWordMode")?.value || "editable-layout";
+  if (mode === "editable-layout") {
+    showStatus("Reconstruindo o documento com OCR e preservação visual...");
+    download(await createEditableLayoutDocx(file), `${baseName(file.name)}-editavel.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    return;
+  }
+  if (mode === "visual") {
+    showStatus("Preservando cada página exatamente como aparece no PDF...");
+    download(await createDocxFromPdfImages(file), `${baseName(file.name)}-copia-visual.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     return;
   }
   const pages = await extractTextFromPdf(file, true);
@@ -396,6 +400,113 @@ async function pdfToWord([file]) {
   }
   showStatus("Montando o arquivo Word editável...");
   download(await createDocxFromText(text), `${baseName(file.name)}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+}
+
+async function createEditableLayoutDocx(file) {
+  if (!window.Tesseract) throw new Error("O módulo de OCR não foi carregado. Atualize a página e tente novamente.");
+  const pdfjs = await loadPdfJs();
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false });
+  const pdf = await loadingTask.promise;
+  const pages = [];
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const base = page.getViewport({ scale: 1 });
+      const viewport = page.getViewport({ scale: Math.min(2.4, 1900 / Math.max(base.width, base.height)) });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const context = canvas.getContext("2d", { alpha: false });
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: context, viewport }).promise;
+      showStatus(`OCR e reconstrução: página ${pageNumber} de ${pdf.numPages}...`);
+      let result;
+      try {
+        result = await window.Tesseract.recognize(canvas, "por", {
+          workerPath: "./vendor/tesseract-worker.min.js",
+          corePath: "./vendor/tesseract-core/",
+          langPath: "https://tessdata.projectnaptha.com/4.0.0/",
+          logger: message => showStatus(`Página ${pageNumber} de ${pdf.numPages}: ${message.status || "OCR"} ${Math.round((message.progress || 0) * 100)}%`)
+        });
+      } catch (error) {
+        throw new Error("Não foi possível executar o OCR. Verifique a conexão e tente novamente; o modelo em português é baixado somente na primeira utilização.");
+      }
+      const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("Não foi possível renderizar a página.")), "image/png"));
+      pages.push({
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+        width: canvas.width,
+        height: canvas.height,
+        lines: ocrLayoutLines(result.data, canvas.width, canvas.height)
+      });
+      page.cleanup();
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", docxImageContentTypesXml());
+  zip.folder("_rels").file(".rels", docxRootRelsXml());
+  const word = zip.folder("word");
+  word.file("document.xml", editableLayoutDocumentXml(pages));
+  word.folder("_rels").file("document.xml.rels", docxImageRelsXml(pages.length));
+  const media = word.folder("media");
+  pages.forEach((page, index) => media.file(`page-${index + 1}.png`, page.bytes));
+  return zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+}
+
+function ocrLayoutLines(data, pageWidth, pageHeight) {
+  const source = [];
+  const collect = node => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node.lines)) node.lines.forEach(line => source.push(line));
+    for (const key of ["blocks", "paragraphs"]) {
+      if (Array.isArray(node[key])) node[key].forEach(collect);
+    }
+  };
+  collect(data);
+  if (!source.length && typeof data?.tsv === "string") {
+    const rows = data.tsv.split(/\r?\n/).slice(1).map(row => row.split("\t"));
+    const grouped = new Map();
+    rows.filter(row => row[0] === "5" && row.length >= 12).forEach(row => {
+      const key = row.slice(1, 5).join("-");
+      if (!grouped.has(key)) grouped.set(key, { words: [], bbox: { x0: Infinity, y0: Infinity, x1: 0, y1: 0 }, confidence: 100 });
+      const line = grouped.get(key);
+      const x = Number(row[6]), y = Number(row[7]), width = Number(row[8]), height = Number(row[9]);
+      line.words.push(row.slice(11).join("\t"));
+      line.bbox.x0 = Math.min(line.bbox.x0, x); line.bbox.y0 = Math.min(line.bbox.y0, y);
+      line.bbox.x1 = Math.max(line.bbox.x1, x + width); line.bbox.y1 = Math.max(line.bbox.y1, y + height);
+      line.confidence = Math.min(line.confidence, Number(row[10]));
+    });
+    grouped.forEach(line => { line.text = line.words.join(" "); source.push(line); });
+  }
+  return source.map(line => {
+    const box = line.bbox || {};
+    return {
+      text: String(line.text || "").trim(),
+      confidence: Number(line.confidence ?? line.conf ?? 100),
+      x: Number(box.x0 || 0) / pageWidth * 595,
+      y: Number(box.y0 || 0) / pageHeight * 842,
+      width: Math.max(10, Number((box.x1 || 0) - (box.x0 || 0)) / pageWidth * 595),
+      height: Math.max(7, Number((box.y1 || 0) - (box.y0 || 0)) / pageHeight * 842)
+    };
+  }).filter(line => line.text && line.confidence >= 35 && line.width > 12 && line.height < 45);
+}
+
+function editableLayoutDocumentXml(pages) {
+  const pageXml = pages.map((page, pageIndex) => {
+    const imageWidth = 7560945;
+    const imageHeight = 10693440;
+    const background = `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="1" locked="1" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="${imageWidth}" cy="${imageHeight}"/><wp:wrapNone/><wp:docPr id="${pageIndex + 1}" name="Página original ${pageIndex + 1}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${pageIndex + 1}" name="page-${pageIndex + 1}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId${pageIndex + 1}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${imageWidth}" cy="${imageHeight}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+    const overlays = page.lines.map((line, lineIndex) => {
+      const fontSize = Math.max(7, Math.min(18, line.height * 0.78));
+      const bold = fontSize > 12 || /^[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ0-9ªº\s&–—.-]{8,}$/.test(line.text) ? "<w:b/>" : "";
+      return `<w:r><w:pict><v:shape id="ocr-${pageIndex}-${lineIndex}" type="#_x0000_t202" style="position:absolute;margin-left:${line.x.toFixed(2)}pt;margin-top:${line.y.toFixed(2)}pt;width:${line.width.toFixed(2)}pt;height:${Math.max(line.height + 2, 10).toFixed(2)}pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="t" fillcolor="white" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr>${bold}<w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t xml:space="preserve">${escapeXml(line.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+    }).join("");
+    const pageBreak = pageIndex < pages.length - 1 ? `<w:r><w:br w:type="page"/></w:r>` : "";
+    return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>${background}${overlays}${pageBreak}</w:p>`;
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:v="urn:schemas-microsoft-com:vml"><w:body>${pageXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0"/></w:sectPr></w:body></w:document>`;
 }
 
 async function convertWithLocalOffice(file, endpoint) {
