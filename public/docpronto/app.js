@@ -21,7 +21,7 @@ const tools = [
   { id: "ofx-summary", number: "13", category: "financeiro", title: "OFX para PDF", description: "Gere um PDF com saldos, entradas, saídas e transações.", accept: ".ofx", multiple: false, action: ofxToSummaryPdf },
   { id: "pdf-ofx", number: "14", category: "financeiro", title: "PDF para OFX", description: "Extraia movimentações e confira cada lançamento antes de gerar o OFX.", accept: ".pdf", multiple: false, option: "pdf-ofx", warning: "A detecção automática pode errar datas, valores ou natureza do lançamento. A geração só acontece após sua conferência.", action: pdfToOfx },
   { id: "word-pdf", number: "15", category: "documento", title: "Word para PDF", description: "Converta DOCX em PDF preservando tabelas, fontes, margens e paginação.", accept: ".docx", multiple: false, warning: "Conversão de alta fidelidade pelo Microsoft Word instalado. Abra o DocPronto pelo iniciador para manter o layout original.", action: wordToPdf },
-  { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDF em DOCX editável no modo rápido ou com o Microsoft Word.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "O modo rápido prioriza velocidade e texto editável. O modo com Word tenta preservar mais o layout, mas pode demorar.", action: pdfToWord },
+  { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDFs, inclusive digitalizações, em texto editável no Word usando OCR.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "Em documentos escaneados, o OCR pode demorar alguns minutos. O modo de texto editável nunca insere a página como imagem.", action: pdfToWord },
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
   { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature }
 ];
@@ -219,7 +219,7 @@ function renderOptions(type) {
     delimiter: `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=",">Vírgula (,)</option><option value=";">Ponto e vírgula (;)</option><option value="tab">Tabulação</option></select>`,
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
-    "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Alta fidelidade + texto editável (recomendado)</option><option value="fast">Somente texto editável</option><option value="visual">Cópia visual exata (não editável)</option></select><small>A conversão acontece no navegador. Em PDFs escaneados, o modo recomendado usa OCR e preserva carimbos, assinaturas, logotipos e a aparência de cada página.</small>`,
+    "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="fast">Texto realmente editável — OCR (recomendado)</option><option value="editable-layout">Layout visual + camada editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>No modo recomendado, PDFs escaneados são reconhecidos por OCR e transformados em parágrafos reais. Nenhuma página é inserida como imagem.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="installed">Certificado instalado no Windows</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><div class="sign-mode-panel" data-sign-mode="installed"><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate" hidden><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`
   };
@@ -380,7 +380,7 @@ async function wordToPdf([file]) {
 }
 
 async function pdfToWord([file]) {
-  const mode = document.querySelector("#pdfWordMode")?.value || "editable-layout";
+  const mode = document.querySelector("#pdfWordMode")?.value || "fast";
   if (mode === "editable-layout") {
     showStatus("Reconstruindo o documento com OCR e preservação visual...");
     download(await createEditableLayoutDocx(file), `${baseName(file.name)}-editavel.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
@@ -392,14 +392,52 @@ async function pdfToWord([file]) {
     return;
   }
   const pages = await extractTextFromPdf(file, true);
-  const text = pages.map(lines => lines.join("\n")).join("\n\n");
+  let text = pages.map(lines => lines.map(stripLayoutMarkers).join("\n")).join("\n\f\n");
   if (!text.trim()) {
-    showStatus("Este PDF contém somente imagens. Preservando cada página no arquivo Word...");
-    download(await createDocxFromPdfImages(file), `${baseName(file.name)}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    return;
+    showStatus("PDF escaneado detectado. Executando OCR para gerar texto realmente editável...");
+    text = await extractEditableTextWithOcr(file);
   }
+  if (!text.trim()) throw new Error("O OCR não conseguiu reconhecer texto neste PDF. Tente uma digitalização com maior resolução.");
   showStatus("Montando o arquivo Word editável...");
   download(await createDocxFromText(text), `${baseName(file.name)}.docx`, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+}
+
+async function extractEditableTextWithOcr(file) {
+  if (!window.Tesseract) throw new Error("O módulo de OCR não foi carregado. Atualize a página e tente novamente.");
+  const pdfjs = await loadPdfJs();
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false });
+  const pdf = await loadingTask.promise;
+  const pageTexts = [];
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const base = page.getViewport({ scale: 1 });
+      const viewport = page.getViewport({ scale: Math.min(2.5, 2100 / Math.max(base.width, base.height)) });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const context = canvas.getContext("2d", { alpha: false });
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: context, viewport }).promise;
+      let result;
+      try {
+        result = await window.Tesseract.recognize(canvas, "por", {
+          workerPath: "./vendor/tesseract-worker.min.js",
+          corePath: "./vendor/tesseract-core/",
+          langPath: "https://tessdata.projectnaptha.com/4.0.0/",
+          logger: message => showStatus(`OCR página ${pageNumber} de ${pdf.numPages}: ${message.status || "processando"} ${Math.round((message.progress || 0) * 100)}%`)
+        });
+      } catch (error) {
+        throw new Error("Não foi possível executar o OCR. Verifique a conexão e tente novamente; o idioma português é baixado na primeira utilização.");
+      }
+      pageTexts.push(String(result.data?.text || "").replace(/\r/g, "").trim());
+      page.cleanup();
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  return pageTexts.join("\n\f\n");
 }
 
 async function createEditableLayoutDocx(file) {
@@ -1865,6 +1903,7 @@ function docxDocumentRelsXml() {
 
 function wordDocumentXml(text) {
   const paragraphs = String(text || "").replace(/\r/g, "").split("\n").map(line => {
+    if (line === "\f") return `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
     if (!line.trim()) return "<w:p/>";
     return `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`;
   }).join("");
