@@ -628,7 +628,13 @@ function ocrLayoutLines(data, pageWidth, pageHeight, offsetX = 0, offsetY = 0, r
       width: Math.max(10, Number((box.x1 || 0) - (box.x0 || 0)) / pageWidth * 595),
       height: Math.max(7, Number((box.y1 || 0) - (box.y0 || 0)) / pageHeight * 842)
     };
-  }).filter(line => line.text && line.confidence >= 35 && line.width > 12 && line.height < 45);
+  }).filter(line => {
+    if (!line.text || line.confidence < 50 || line.width <= 12 || line.height >= 45) return false;
+    const useful = (line.text.match(/[A-Za-zÀ-ÿ0-9]/g) || []).length;
+    const words = line.text.split(/\s+/).filter(Boolean);
+    const suspicious = words.length >= 7 && words.filter(word => /^[A-Z]{1,3}$/i.test(word)).length / words.length > 0.72;
+    return useful >= 3 && useful / Math.max(line.text.length, 1) >= 0.48 && !suspicious;
+  });
 }
 
 function editableLayoutDocumentXml(pages) {
@@ -637,9 +643,14 @@ function editableLayoutDocumentXml(pages) {
     const imageHeight = 10693440;
     const background = `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="1" locked="1" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="${imageWidth}" cy="${imageHeight}"/><wp:wrapNone/><wp:docPr id="${pageIndex + 1}" name="Página original ${pageIndex + 1}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${pageIndex + 1}" name="page-${pageIndex + 1}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId${pageIndex + 1}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${imageWidth}" cy="${imageHeight}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
     const overlays = page.lines.map((line, lineIndex) => {
-      const fontSize = Math.max(7, Math.min(18, line.height * 0.78));
+      // OCR boxes report the black-pixel height, which is smaller than the
+      // typographic point size. Using that height directly condensed the
+      // JUCESP contract into tiny text. Reconstruct the font's em size while
+      // keeping a conservative ceiling for large stamps/headings.
+      const fontSize = Math.max(8.5, Math.min(18, line.height * 1.08));
       const bold = fontSize > 12 || /^[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ0-9ªº\s&–—.-]{8,}$/.test(line.text) ? "<w:b/>" : "";
-      return `<w:r><w:pict><v:rect id="ocr-${pageIndex}-${lineIndex}" style="position:absolute;margin-left:${line.x.toFixed(2)}pt;margin-top:${line.y.toFixed(2)}pt;width:${line.width.toFixed(2)}pt;height:${Math.max(line.height + 3, 11).toFixed(2)}pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="t" fillcolor="white" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr>${bold}<w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t xml:space="preserve">${escapeXml(line.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></w:pict></w:r>`;
+      const boxHeight = Math.max(line.height * 1.55, fontSize * 1.35, 14);
+      return `<w:r><w:pict><v:rect id="ocr-${pageIndex}-${lineIndex}" style="position:absolute;margin-left:${line.x.toFixed(2)}pt;margin-top:${Math.max(0, line.y - fontSize * 0.12).toFixed(2)}pt;width:${Math.max(line.width + 3, 14).toFixed(2)}pt;height:${boxHeight.toFixed(2)}pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="t" fillcolor="white" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:keepLines/></w:pPr><w:r><w:rPr>${bold}<w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t xml:space="preserve">${escapeXml(line.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></w:pict></w:r>`;
     }).join("");
     const pageBreak = pageIndex < pages.length - 1 ? `<w:r><w:br w:type="page"/></w:r>` : "";
     return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>${background}${overlays}${pageBreak}</w:p>`;
