@@ -20,7 +20,7 @@ const tools = [
   { id: "ofx-xlsx", number: "12", category: "financeiro", title: "OFX para XLSX", description: "Transforme as transações do OFX em uma planilha Excel.", accept: ".ofx", multiple: false, action: ofxToXlsx },
   { id: "ofx-summary", number: "13", category: "financeiro", title: "OFX para PDF", description: "Gere um PDF com saldos, entradas, saídas e transações.", accept: ".ofx", multiple: false, action: ofxToSummaryPdf },
   { id: "pdf-ofx", number: "14", category: "financeiro", title: "PDF para OFX", description: "Extraia movimentações e confira cada lançamento antes de gerar o OFX.", accept: ".pdf", multiple: false, option: "pdf-ofx", warning: "A detecção automática pode errar datas, valores ou natureza do lançamento. A geração só acontece após sua conferência.", action: pdfToOfx },
-  { id: "word-pdf", number: "15", category: "documento", title: "Word para PDF", description: "Converta DOCX em PDF preservando tabelas, fontes, margens e paginação.", accept: ".docx", multiple: false, warning: "Conversão de alta fidelidade pelo Microsoft Word instalado. Abra o DocPronto pelo iniciador para manter o layout original.", action: wordToPdf },
+  { id: "word-pdf", number: "15", category: "documento", title: "Word para PDF", description: "Converta DOCX em PDF com texto, parágrafos e tabelas.", accept: ".docx", multiple: false, option: "word-pdf", warning: "O modo online funciona pelo navegador. Para fidelidade idêntica ao Word, use o modo Microsoft Word no aplicativo local.", action: wordToPdf },
   { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDFs, inclusive digitalizações, em texto editável no Word usando OCR.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "Em documentos escaneados, o OCR pode demorar alguns minutos. O modo de texto editável nunca insere a página como imagem.", action: pdfToWord },
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
   { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature }
@@ -220,6 +220,7 @@ function renderOptions(type) {
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
     "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
+    "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — texto e tabelas (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>O modo online funciona para qualquer pessoa com o link e mantém o arquivo no navegador.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="installed">Certificado instalado no Windows</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><div class="sign-mode-panel" data-sign-mode="installed"><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate" hidden><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`
   };
@@ -372,6 +373,12 @@ async function textToPdf([file]) {
 }
 
 async function wordToPdf([file]) {
+  const mode = document.querySelector("#wordPdfMode")?.value || "online";
+  if (mode === "online") {
+    showStatus("Lendo texto, parágrafos e tabelas do Word no navegador...");
+    download(await createOnlineDocxPdf(file), `${baseName(file.name)}.pdf`, "application/pdf");
+    return;
+  }
   try {
     showStatus("Convertendo com o Microsoft Word para preservar o layout original...");
     const converted = await convertWithLocalOffice(file, "word-to-pdf");
@@ -381,6 +388,78 @@ async function wordToPdf([file]) {
       "Não foi possível fazer a conversão com qualidade. Abra o DocPronto pelo arquivo ‘ABRIR DOCPRONTO.cmd’, confirme que o Microsoft Word está instalado e tente novamente. Nenhum PDF incompleto foi gerado."
     );
   }
+}
+
+async function createOnlineDocxPdf(file) {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  validateArchive(zip, "word/document.xml");
+  const xml = await requireZipEntry(zip, "word/document.xml").async("string");
+  const parsed = new DOMParser().parseFromString(xml, "application/xml");
+  const body = parsed.getElementsByTagNameNS("*", "body")[0];
+  if (!body) throw new Error("O DOCX não contém um corpo de documento reconhecível.");
+  const blocks = [];
+  [...body.children].forEach(node => {
+    if (node.localName === "p") {
+      const text = [...node.getElementsByTagNameNS("*", "t")].map(item => item.textContent).join("");
+      const alignment = node.getElementsByTagNameNS("*", "jc")[0]?.getAttribute("w:val") || node.getElementsByTagNameNS("*", "jc")[0]?.getAttribute("val") || "left";
+      const bold = node.getElementsByTagNameNS("*", "b").length > 0;
+      const pageBreak = [...node.getElementsByTagNameNS("*", "br")].some(item => (item.getAttribute("w:type") || item.getAttribute("type")) === "page");
+      if (text.trim() || pageBreak) blocks.push({ type: "paragraph", text, alignment, bold, pageBreak });
+    } else if (node.localName === "tbl") {
+      const rows = [...node.children].filter(item => item.localName === "tr").map(row =>
+        [...row.children].filter(item => item.localName === "tc").map(cell =>
+          [...cell.getElementsByTagNameNS("*", "p")].map(paragraph =>
+            [...paragraph.getElementsByTagNameNS("*", "t")].map(item => item.textContent).join("")
+          ).filter(Boolean).join("\n")
+        )
+      );
+      if (rows.length) blocks.push({ type: "table", rows });
+    }
+  });
+  if (!blocks.length) throw new Error("Nenhum texto ou tabela foi encontrado no DOCX.");
+
+  const pdf = await PDFLib.PDFDocument.create();
+  const regular = await pdf.embedFont(PDFLib.StandardFonts.Helvetica);
+  const boldFont = await pdf.embedFont(PDFLib.StandardFonts.HelveticaBold);
+  const pageWidth = 595.28, pageHeight = 841.89, margin = 42, contentWidth = pageWidth - margin * 2;
+  let page, y;
+  const newPage = () => { page = pdf.addPage([pageWidth, pageHeight]); y = pageHeight - margin; };
+  const ensure = height => { if (!page || y - height < margin) newPage(); };
+  const drawParagraph = block => {
+    if (block.pageBreak && page) newPage();
+    const size = block.bold ? 11 : 10;
+    const font = block.bold ? boldFont : regular;
+    const lines = wrapText(block.text || " ", Math.max(20, Math.floor(contentWidth / (size * 0.52))));
+    ensure(Math.max(18, lines.length * 14 + 5));
+    lines.forEach(line => {
+      const safe = toWinAnsi(line);
+      const measured = font.widthOfTextAtSize(safe, size);
+      const x = block.alignment === "center" ? margin + Math.max(0, (contentWidth - measured) / 2)
+        : block.alignment === "right" ? pageWidth - margin - measured : margin;
+      page.drawText(safe, { x, y, size, font, color: PDFLib.rgb(0.06, 0.09, 0.08) });
+      y -= 14;
+    });
+    y -= 5;
+  };
+  const drawTable = block => {
+    const columnCount = Math.max(...block.rows.map(row => row.length), 1);
+    const cellWidth = contentWidth / columnCount;
+    for (const row of block.rows) {
+      const wrapped = Array.from({ length: columnCount }, (_, index) => wrapText(row[index] || "", Math.max(8, Math.floor((cellWidth - 8) / 5))));
+      const rowHeight = Math.max(22, ...wrapped.map(lines => lines.length * 11 + 8));
+      ensure(rowHeight);
+      wrapped.forEach((lines, column) => {
+        const x = margin + column * cellWidth;
+        page.drawRectangle({ x, y: y - rowHeight, width: cellWidth, height: rowHeight, borderWidth: 0.6, borderColor: PDFLib.rgb(0.55, 0.58, 0.56) });
+        lines.forEach((line, index) => page.drawText(toWinAnsi(line), { x: x + 4, y: y - 12 - index * 11, size: 8, font: regular, color: PDFLib.rgb(0.06, 0.09, 0.08) }));
+      });
+      y -= rowHeight;
+    }
+    y -= 8;
+  };
+  newPage();
+  blocks.forEach(block => block.type === "table" ? drawTable(block) : drawParagraph(block));
+  return pdf.save();
 }
 
 async function pdfToWord([file]) {
