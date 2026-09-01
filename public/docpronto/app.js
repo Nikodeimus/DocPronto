@@ -425,6 +425,7 @@ async function createRenderedDocxPdf(file) {
     for (let index = 0; index < renderedPages.length; index += 1) {
       showStatus(`Renderizando página ${index + 1} de ${renderedPages.length} com alta fidelidade...`);
       const section = renderedPages[index];
+      normalizeRenderedDocxPage(section);
       const canvas = await window.html2canvas(section, {
         backgroundColor: "#ffffff",
         scale: 2,
@@ -448,6 +449,51 @@ async function createRenderedDocxPdf(file) {
   } finally {
     host.remove();
   }
+}
+
+function normalizeRenderedDocxPage(section) {
+  const normalizedText = value => String(value || "").replace(/\s+/g, " ").trim();
+  const pageText = normalizedText(section.innerText);
+  const isFinancialCover = /MOVIMENTO FINANCEIRO/i.test(pageText) && /PER[IÍ]ODO/i.test(pageText) && /Assinatura/i.test(pageText);
+  if (!isFinancialCover) return;
+
+  section.style.position = "relative";
+  const candidates = [...section.querySelectorAll("p, div")].filter(element => normalizedText(element.innerText));
+  const findSmallest = pattern => candidates
+    .filter(element => pattern.test(normalizedText(element.innerText)))
+    .sort((a, b) => a.querySelectorAll("p, div").length - b.querySelectorAll("p, div").length)[0];
+  const place = (pattern, top, options = {}) => {
+    const element = findSmallest(pattern);
+    if (!element) return;
+    const style = element.style;
+    style.setProperty("position", "absolute", "important");
+    style.setProperty("top", `${top}%`, "important");
+    style.setProperty("left", options.left || "0", "important");
+    style.setProperty("right", options.right || "0", "important");
+    style.setProperty("width", options.width || "auto", "important");
+    style.setProperty("margin", "0", "important");
+    style.setProperty("text-align", options.align || "center", "important");
+    style.setProperty("z-index", "3", "important");
+  };
+  place(/^MOVIMENTO FINANCEIRO$/i, 20.5);
+  place(/^Pessoa F[ií]sica$/i, 34.5);
+  place(/^Conta(?:s)?\s+a?\s*Paga(?:r|s)?$/i, 45.2);
+  place(/^PER[IÍ]ODO:?$/i, 55.5);
+  place(/^\d{2}\/\d{4}$/i, 62.0);
+  place(/^Assinatura/i, 82.0, { left: "26%", right: "auto", width: "50%", align: "left" });
+
+  // Word stores the watermark as a floating drawing with transparency. Some
+  // browser renderers preserve its geometry but drop the alpha value. Restore
+  // that alpha only for large graphics in the central body, never for logos.
+  const pageRect = section.getBoundingClientRect();
+  [...section.querySelectorAll("img, svg")].forEach(graphic => {
+    const rect = graphic.getBoundingClientRect();
+    const relativeTop = (rect.top - pageRect.top) / Math.max(pageRect.height, 1);
+    if (rect.width > pageRect.width * 0.42 && rect.height > pageRect.height * 0.24 && relativeTop > 0.08 && relativeTop < 0.68) {
+      graphic.style.setProperty("opacity", "0.1", "important");
+      graphic.style.setProperty("z-index", "1", "important");
+    }
+  });
 }
 
 async function createOnlineDocxPdf(file) {
