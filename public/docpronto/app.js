@@ -221,7 +221,7 @@ function renderOptions(type) {
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
     "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
     "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
-    "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — funciona online</option><option value="installed">Certificado instalado no Windows — requer conector local</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">O Chrome mostra certificados no gov.br porque aquele serviço solicita autenticação por certificado. Para assinar arquivos, o DOCPronto precisa do conector local aberto neste computador.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em conectar e carregar</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Conectar e carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
+    "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — funciona online</option><option value="installed">Certificado instalado no Windows — requer conector local</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">O Chrome mostra certificados no gov.br porque aquele serviço solicita autenticação por certificado. Para assinar qualquer arquivo com o certificado do Windows, mantenha o conector do DOCPronto aberto e atualizado. <a href="/docpronto/downloads/DOCPronto-Conector-Windows.zip" download>Baixar ou atualizar o conector</a>.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em conectar e carregar</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Conectar e carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
@@ -1207,9 +1207,10 @@ async function signWithInstalledCertificate(file) {
   }
   if (!thumbprint) throw new Error("Selecione um certificado instalado no Windows.");
   const apiBase = localSignerApiBase();
-  const fileBytes = new Uint8Array(await file.arrayBuffer());
+  let fileBytes = new Uint8Array(await file.arrayBuffer());
   const pdfMode = /\.pdf$/i.test(file.name);
   const placement = pdfMode ? await chooseSignaturePlacement(file) : null;
+  if (pdfMode) fileBytes = await normalizePdfForEmbeddedSignature(fileBytes);
   const response = await fetch(`${apiBase}/api/${pdfMode ? "sign-pdf-installed" : "sign-installed"}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1227,6 +1228,28 @@ async function signWithInstalledCertificate(file) {
     download(bytesFromBase64(result.contentBase64), result.filename || `${baseName(file.name)}-assinado.pdf`, "application/pdf");
   } else {
     download(bytesFromBase64(result.signatureBase64), `${file.name}.p7s`, "application/pkcs7-signature");
+  }
+}
+
+async function normalizePdfForEmbeddedSignature(fileBytes) {
+  if (!window.PDFLib?.PDFDocument) throw new Error("O módulo de preparação de PDF não foi carregado.");
+  try {
+    const document = await PDFLib.PDFDocument.load(fileBytes, {
+      ignoreEncryption: false,
+      throwOnInvalidObject: false,
+      updateMetadata: false
+    });
+    return new Uint8Array(await document.save({
+      useObjectStreams: false,
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+      objectsPerTick: 50
+    }));
+  } catch (error) {
+    if (/encrypt|password/i.test(String(error?.message || ""))) {
+      throw new Error("Este PDF está protegido por senha. Remova a proteção antes de assinar.");
+    }
+    throw new Error("Não foi possível normalizar este PDF para assinatura. Verifique se o arquivo abre normalmente e tente novamente.");
   }
 }
 
