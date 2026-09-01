@@ -357,7 +357,11 @@ async function imagesToPdf(files) {
     const width = image.width * scale;
     const height = image.height * scale;
     const page = document.addPage([pageWidth, pageHeight]);
-    page.drawImage(image, { x: (pageWidth - width) / 2, y: (pageHeight - height) / 2, width, height });
+    // Documents are read from the top down. Keep the image horizontally
+    // centered, but anchor it to the top margin instead of floating it in the
+    // vertical middle of the sheet.
+    const topMargin = 28;
+    page.drawImage(image, { x: (pageWidth - width) / 2, y: pageHeight - topMargin - height, width, height });
   }
   download(await document.save(), "imagens-convertidas.pdf", "application/pdf");
 }
@@ -422,7 +426,10 @@ async function extractEditableTextWithOcr(file) {
       await page.render({ canvasContext: context, viewport }).promise;
       const cropX = Math.round(canvas.width * 0.085);
       const cropY = Math.round(canvas.height * (pageNumber === 1 ? 0.195 : 0.185));
-      const cropWidth = Math.round(canvas.width * 0.825);
+      // The editable body ends before the JUCESP validation strip. Keeping
+      // that vertical strip in the OCR region produced isolated letters and
+      // symbols that Word placed between the legal paragraphs.
+      const cropWidth = Math.round(canvas.width * 0.79);
       const cropHeight = Math.round(canvas.height * 0.755);
       const ocrCanvas = document.createElement("canvas");
       ocrCanvas.width = cropWidth;
@@ -507,12 +514,25 @@ function cleanEditableOcrText(value) {
 
 async function createEditableLayoutDocx(file) {
   if (!window.Tesseract) throw new Error("O módulo de OCR não foi carregado. Atualize a página e tente novamente.");
+  const rasterPages = await pdfRasterEngine(file);
+  const extractedPages = await textExtractionEngine(rasterPages);
+  const analyzedPages = documentDecisionEngine(extractedPages);
+  const pages = await graphicPreservationEngine(analyzedPages);
+  validateDocumentPipeline(pages);
+  showStatus("Motor Word: montando o documento a partir dos dados já validados...");
+  return wordConversionEngine(pages);
+}
+
+// MOTOR 1 — produces immutable page images and OCR regions. It never reads,
+// erases or writes text.
+async function pdfRasterEngine(file) {
   const pdfjs = await loadPdfJs();
   const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false });
   const pdf = await loadingTask.promise;
   const pages = [];
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      showStatus(`Motor de imagem: página ${pageNumber} de ${pdf.numPages}...`);
       const page = await pdf.getPage(pageNumber);
       const base = page.getViewport({ scale: 1 });
       const viewport = page.getViewport({ scale: Math.min(3.2, 2700 / Math.max(base.width, base.height)) });
@@ -523,44 +543,137 @@ async function createEditableLayoutDocx(file) {
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: context, viewport }).promise;
-      const cropX = Math.round(canvas.width * 0.085);
-      const cropY = Math.round(canvas.height * (pageNumber === 1 ? 0.195 : 0.185));
-      const cropWidth = Math.round(canvas.width * 0.825);
-      const cropHeight = Math.round(canvas.height * 0.755);
-      const ocrCanvas = document.createElement("canvas");
-      ocrCanvas.width = cropWidth;
-      ocrCanvas.height = cropHeight;
-      const ocrContext = ocrCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
-      ocrContext.drawImage(canvas, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-      improveOcrContrast(ocrContext, cropWidth, cropHeight);
-      showStatus(`OCR e reconstrução: página ${pageNumber} de ${pdf.numPages}...`);
-      let result;
-      try {
-        result = await window.Tesseract.recognize(ocrCanvas, "por", {
-          workerPath: "./vendor/tesseract-worker.min.js",
-          corePath: "./vendor/tesseract-core/",
-          langPath: "https://tessdata.projectnaptha.com/4.0.0/",
-          tessedit_pageseg_mode: "6",
-          preserve_interword_spaces: "1",
-          logger: message => showStatus(`Página ${pageNumber} de ${pdf.numPages}: ${message.status || "OCR"} ${Math.round((message.progress || 0) * 100)}%`)
-        }, { text: true, blocks: true, tsv: true, hocr: true });
-      } catch (error) {
-        throw new Error("Não foi possível executar o OCR. Verifique a conexão e tente novamente; o modelo em português é baixado somente na primeira utilização.");
-      }
-      context.fillStyle = "#ffffff";
-      context.fillRect(cropX - 4, cropY - 4, cropWidth + 8, cropHeight + 8);
-      const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("Não foi possível renderizar a página.")), "image/png"));
-      pages.push({
-        bytes: new Uint8Array(await blob.arrayBuffer()),
-        width: canvas.width,
-        height: canvas.height,
-        lines: ocrLayoutLines(result.data, canvas.width, canvas.height, cropX, cropY, cropWidth, cropHeight)
-      });
+      const region = {
+        x: Math.round(canvas.width * 0.085),
+        y: Math.round(canvas.height * (pageNumber === 1 ? 0.195 : 0.185)),
+        // Stop before the vertical JUCESP validation strip. The strip is an
+        // official graphic layer, not editable body text.
+        width: Math.round(canvas.width * 0.79),
+        height: Math.round(canvas.height * 0.755)
+      };
+      pages.push({ pageNumber, pageCount: pdf.numPages, canvas, region });
       page.cleanup();
     }
   } finally {
     await loadingTask.destroy();
   }
+  return pages;
+}
+
+// MOTOR 2 — extracts candidates only. It cannot modify the original image or
+// create Word objects.
+async function textExtractionEngine(rasterPages) {
+  const pages = [];
+  for (const rasterPage of rasterPages) {
+    const { canvas, region, pageNumber, pageCount } = rasterPage;
+    const ocrCanvas = document.createElement("canvas");
+    ocrCanvas.width = region.width;
+    ocrCanvas.height = region.height;
+    const context = ocrCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
+    context.drawImage(canvas, region.x, region.y, region.width, region.height, 0, 0, region.width, region.height);
+    improveOcrContrast(context, region.width, region.height);
+    showStatus(`Motor de extração: página ${pageNumber} de ${pageCount}...`);
+    let result;
+    try {
+      result = await window.Tesseract.recognize(ocrCanvas, "por", {
+        workerPath: "./vendor/tesseract-worker.min.js",
+        corePath: "./vendor/tesseract-core/",
+        langPath: "https://tessdata.projectnaptha.com/4.0.0/",
+        tessedit_pageseg_mode: "6",
+        preserve_interword_spaces: "1",
+        logger: message => showStatus(`Motor de extração ${pageNumber}/${pageCount}: ${message.status || "OCR"} ${Math.round((message.progress || 0) * 100)}%`)
+      }, { text: true, blocks: true, tsv: true, hocr: true });
+    } catch (error) {
+      throw new Error(`Motor de extração, página ${pageNumber}: não foi possível executar o OCR.`);
+    }
+    pages.push({
+      ...rasterPage,
+      candidates: ocrLayoutLines(result.data, canvas.width, canvas.height, region.x, region.y, region.width, region.height)
+    });
+  }
+  return pages;
+}
+
+// MOTOR 3 — decides what is editable legal text, protected official artwork or
+// OCR noise. It returns a data model; it does not touch pixels or OOXML.
+function documentDecisionEngine(extractedPages) {
+  return extractedPages.map(page => {
+    const accepted = [];
+    const protectedGraphics = [];
+    const rejectedNoise = [];
+    for (const candidate of page.candidates) {
+      const decision = classifyOcrCandidate(candidate, page.pageNumber);
+      if (decision === "protected") protectedGraphics.push(candidate);
+      else if (decision === "noise") rejectedNoise.push(candidate);
+      else accepted.push(candidate);
+    }
+    const blocks = documentAssemblyEngine(accepted);
+    return { ...page, lines: accepted, blocks, protectedGraphics, rejectedNoise };
+  });
+}
+
+function classifyOcrCandidate(candidate, pageNumber) {
+  const text = cleanOcrLine(candidate.text);
+  const letters = (text.match(/[A-Za-zÀ-ÿ]/g) || []).length;
+  const useful = (text.match(/[A-Za-zÀ-ÿ0-9]/g) || []).length;
+  const suspicious = (text.match(/[|_=<>~`^*{}\[\]\\]/g) || []).length;
+  if (!text || useful < 3 || candidate.confidence < 58) return "noise";
+  // Never place editable text over the official validation strip.
+  if (candidate.x >= 515) return "protected";
+  if (text.length <= 3 && !/^\d{1,3}[ªº]?$/i.test(text)) return "noise";
+  if (suspicious > 1 || useful / Math.max(text.length, 1) < 0.55) return "noise";
+  const legalAnchor = /\b(?:cláusula|parágrafo|contrato|sócio|sociedade|assinad[oa]|alteração|capital|administração|foro|responsabilidade)\b/i.test(text);
+  const wordLikeTokens = text.split(/\s+/).filter(token => /^[A-Za-zÀ-ÿ]{4,}$/.test(token)).length;
+  if (text.length < 24 && !legalAnchor && wordLikeTokens < 2) return "noise";
+  // These are visual/authentication objects in official registry documents.
+  // Keeping them in the background prevents stamps and signatures from being
+  // erased and prevents their dots/lines from becoming editable gibberish.
+  if (/\b(?:JUCESP|ICP\s*Brasil|MANIFESTO DE ASSINATURAS|SECRETARIA GERAL|PROTOCOLO)\b/i.test(text)) return "protected";
+  // The lower half of page 4 is the signature/authentication zone. It contains
+  // a handwritten signature, registry stamps and seals; none of it is legal
+  // body text and it must survive pixel-for-pixel.
+  if (pageNumber === 4 && candidate.y > 500) return "protected";
+  return letters || /\d/.test(text) ? "editable" : "noise";
+}
+
+// MOTOR 4 — removes only approved editable text rectangles. The previous
+// implementation erased the whole central region and destroyed JUCESP stamps.
+async function graphicPreservationEngine(analyzedPages) {
+  const output = [];
+  for (const page of analyzedPages) {
+    showStatus(`Motor gráfico: protegendo selos e reconstruindo a página ${page.pageNumber}...`);
+    const canvas = document.createElement("canvas");
+    canvas.width = page.canvas.width;
+    canvas.height = page.canvas.height;
+    const context = canvas.getContext("2d", { alpha: false });
+    context.drawImage(page.canvas, 0, 0);
+    context.fillStyle = "#ffffff";
+    // The graphics motor owns deterministic document zones. OCR geometry is
+    // deliberately not used as an eraser: missed lines would remain duplicated.
+    // Page 4 stops before its signature/authentication zone; all other pages
+    // clear only the configured legal-text region, outside official margins.
+    const zoneBottom = page.pageNumber === 4
+      ? Math.min(page.region.y + page.region.height, 500 / 842 * canvas.height)
+      : page.region.y + page.region.height;
+    context.fillRect(page.region.x, page.region.y, page.region.width, Math.max(0, zoneBottom - page.region.y));
+    const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("Não foi possível produzir a camada gráfica.")), "image/png"));
+    output.push({
+      pageNumber: page.pageNumber,
+      width: canvas.width,
+      height: canvas.height,
+      bytes: new Uint8Array(await blob.arrayBuffer()),
+      lines: page.lines,
+      blocks: page.blocks,
+      protectedGraphics: page.protectedGraphics,
+      rejectedNoise: page.rejectedNoise
+    });
+  }
+  return output;
+}
+
+// MOTOR 5 — serializes an already-approved page model. No OCR or classification
+// is allowed from this point forward.
+async function wordConversionEngine(pages) {
   const zip = new JSZip();
   zip.file("[Content_Types].xml", docxImageContentTypesXml());
   zip.folder("_rels").file(".rels", docxRootRelsXml());
@@ -572,42 +685,179 @@ async function createEditableLayoutDocx(file) {
   return zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
 }
 
+function validateDocumentPipeline(pages) {
+  if (!pages.length) throw new Error("Nenhuma página foi processada.");
+  pages.forEach((page, index) => {
+    if (!page.bytes?.length) throw new Error(`Página ${index + 1}: a camada gráfica não foi produzida.`);
+    if (!page.blocks?.length) throw new Error(`Página ${index + 1}: nenhum bloco de texto editável foi reconhecido.`);
+    const readable = page.blocks.filter(block => block.text.length >= 3 && block.confidence >= 55);
+    if (!readable.length) throw new Error(`Página ${index + 1}: o OCR não atingiu confiança mínima.`);
+    const firstY = Math.min(...readable.map(block => block.y));
+    const lastY = Math.max(...readable.map(block => block.y + block.height));
+    if (readable.length >= 8 && lastY - firstY < 842 * 0.18) {
+      throw new Error(`Página ${index + 1}: o texto ficou comprimido e a conversão foi bloqueada.`);
+    }
+    const invalid = page.blocks.filter(block => !Number.isFinite(block.x) || !Number.isFinite(block.y) || !Number.isFinite(block.width) || !Number.isFinite(block.height));
+    if (invalid.length) throw new Error(`Página ${index + 1}: o motor de decisão produziu coordenadas inválidas.`);
+    const outOfPage = page.blocks.filter(block => block.x < 0 || block.y < 0 || block.x >= 595 || block.y >= 842);
+    if (outOfPage.length) throw new Error(`Página ${index + 1}: há texto fora da área válida da página.`);
+    const suspiciousBlocks = page.blocks.filter(block => isSuspiciousEditableText(block.text));
+    if (suspiciousBlocks.length) throw new Error(`Página ${index + 1}: o motor de auditoria encontrou texto suspeito e bloqueou a conversão.`);
+  });
+}
+
+function isSuspiciousEditableText(text) {
+  const value = String(text || "").trim();
+  const useful = (value.match(/[A-Za-zÀ-ÿ0-9]/g) || []).length;
+  const punctuation = (value.match(/[|_=<>~`^*{}\[\]\\]/g) || []).length;
+  if (!value || useful < 3) return true;
+  if (value.length <= 3 && !/^\d{1,3}[ªº]?$/i.test(value)) return true;
+  return punctuation > Math.max(1, Math.floor(value.length * 0.04));
+}
+
+// PDF -> Word production line. Each engine consumes a normalized model and
+// returns a stricter model for the next stage instead of writing OOXML early.
+function documentAssemblyEngine(lines) {
+  const cleaned = lines.map(line => ({ ...line, text: cleanOcrLine(line.text) })).filter(line => line.text);
+  const heights = cleaned.map(line => line.height).sort((a, b) => a - b);
+  const medianHeight = heights[Math.floor(heights.length / 2)] || 9;
+  const classified = cleaned.map(line => ({ ...line, role: classifyDocumentLine(line, medianHeight) }));
+  const blocks = [];
+  for (const line of classified) {
+    const previous = blocks[blocks.length - 1];
+    const lineBottom = line.y + line.height;
+    const startsParagraph = /^(?:Cláusula|Parágrafo|Pelo presente|Único sócio|O sócio|Totalizando|Assinado|JUCESP)\b/i.test(line.text);
+    const canJoin = previous && line.role === "body" && previous.role === "body" && !startsParagraph &&
+      line.y - previous.bottom < Math.max(medianHeight * 2.3, 18);
+    if (canJoin) {
+      previous.lines.push(line);
+      previous.text = `${previous.text} ${line.text}`.replace(/\s+/g, " ").trim();
+      previous.bottom = Math.max(previous.bottom, lineBottom);
+      previous.width = Math.max(previous.width, line.x + line.width - previous.x);
+      previous.confidence = Math.min(previous.confidence, line.confidence);
+    } else {
+      blocks.push({
+        role: line.role,
+        text: line.text,
+        lines: [line],
+        x: line.role === "heading" ? 58 : line.role === "financial-row" ? 38 : line.x,
+        y: line.y,
+        width: line.role === "heading" ? 479 : line.role === "financial-row" ? 477 : Math.min(510, line.width),
+        bottom: lineBottom,
+        confidence: line.confidence
+      });
+    }
+  }
+  return blocks.map(block => ({
+    ...block,
+    height: Math.max(14, block.bottom - block.y + (block.role === "body" ? medianHeight * 0.65 : 4)),
+    fontSize: block.role === "heading" ? 11.5 : block.role === "footer" ? 7.5 : block.role === "financial-row" ? 9 : 9.2,
+    alignment: block.role === "heading" ? "center" : block.role === "footer" ? "center" : block.role === "financial-row" ? "left" : "both",
+    financial: block.role === "financial-row" ? parseFinancialRow(block.text) : null
+  }));
+}
+
+function parseFinancialRow(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const amount = (text.match(/R\$\s*[\d.]+,\d{2}/i) || [""])[0].replace(/\s+/g, " ");
+  const percentage = (text.match(/\d{1,3},\d{2}\s*%/i) || [""])[0].replace(/\s+/g, " ");
+  let label = text;
+  if (amount) label = label.slice(0, Math.max(0, label.indexOf(amount)));
+  label = label.replace(/[.·_\s]+$/g, "").replace(/[^\p{L}\p{N}\s–—-]+$/gu, "").trim();
+  if (/^Totalizando/i.test(text)) label = "Totalizando";
+  return { label, amount, percentage };
+}
+
+function cleanOcrLine(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+[|$+]{1,2}$/g, "")
+    .replace(/^[:;|]+\s*/, "")
+    .replace(/\s+([,.;:])/g, "$1")
+    .replace(/\.\s*\?\s*$/g, ".")
+    .replace(/\bda\s+lel\b/gi, "da lei")
+    .replace(/\bde\s+z\s+exercer\b/gi, "de exercer")
+    .replace(/\bE\s+ação\b/g, "ação")
+    .trim();
+}
+
+function classifyDocumentLine(line, medianHeight) {
+  const text = line.text.trim();
+  if (/^(?:Totalizando|[-–—]?\s*[\d.]+\s+Quotas?\b)/i.test(text) || (/R\$\s*[\d.]+,\d{2}/i.test(text) && /\d{1,3},\d{2}\s*%/i.test(text))) return "financial-row";
+  const uppercase = /^[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ0-9ªº\s&.,:()–—-]+$/.test(text) && /[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ]{4}/.test(text);
+  if (uppercase && (text.length < 110 || line.height > medianHeight * 1.12)) return "heading";
+  if (line.y > 780 || /^(?:Fone:|R: Bernardino|Documento assinado|Registro de Imóveis)/i.test(text)) return "footer";
+  return "body";
+}
+
 function ocrLayoutLines(data, pageWidth, pageHeight, offsetX = 0, offsetY = 0, regionWidth = pageWidth, regionHeight = pageHeight) {
   const source = [];
+  // Tesseract may run the recognition on an internally rescaled bitmap. Its
+  // word boxes are then expressed in that bitmap's coordinate system, not in
+  // the canvas dimensions we supplied. Read the authoritative OCR page bbox
+  // and convert every box back to the original crop before placing it in Word.
+  let ocrWidth = regionWidth;
+  let ocrHeight = regionHeight;
+  if (typeof data?.hocr === "string") {
+    // Attribute order in hOCR is not stable. Parsing the page node is more
+    // reliable than a regular expression and fixes the coordinate compression
+    // seen in the five-page JUCESP regression document.
+    const hocrDocument = new DOMParser().parseFromString(data.hocr, "text/html");
+    const pageTitle = hocrDocument.querySelector(".ocr_page")?.getAttribute("title") || "";
+    const pageMatch = /bbox\s+\d+\s+\d+\s+(\d+)\s+(\d+)/i.exec(pageTitle);
+    if (pageMatch) {
+      const detectedWidth = Number(pageMatch[1]);
+      const detectedHeight = Number(pageMatch[2]);
+      if (detectedWidth > 0 && detectedHeight > 0) {
+        ocrWidth = detectedWidth;
+        ocrHeight = detectedHeight;
+      }
+    }
+  }
+  const scaleX = regionWidth / Math.max(ocrWidth, 1);
+  let scaleY = regionHeight / Math.max(ocrHeight, 1);
   const collect = node => {
     if (!node || typeof node !== "object") return;
-    if (Array.isArray(node.lines)) node.lines.forEach(line => source.push(line));
-    for (const key of ["blocks", "paragraphs"]) {
+    // A whole OCR line inside one Word text box is unstable: Word recalculates
+    // its metrics and wraps the line, which caused the overlapping text seen
+    // in the JUCESP test. Keep each OCR word as an independent positioned
+    // object. A word cannot reflow into the next visual line.
+    if (Array.isArray(node.words)) node.words.forEach(word => source.push(word));
+    for (const key of ["blocks", "paragraphs", "lines"]) {
       if (Array.isArray(node[key])) node[key].forEach(collect);
     }
   };
-  collect(data);
-  if (!source.length && typeof data?.hocr === "string") {
+  // hOCR preserves the actual line geometry of the recognition canvas. The
+  // convenient data.blocks tree can contain coordinates from Tesseract's
+  // internally reduced analysis image, which compressed the lower half of
+  // the document in Word. Prefer hOCR lines and use blocks only as fallback.
+  if (typeof data?.hocr === "string") {
     const parsed = new DOMParser().parseFromString(data.hocr, "text/html");
-    parsed.querySelectorAll(".ocr_line, .ocrx_line").forEach(node => {
+    parsed.querySelectorAll(".ocr_line").forEach(node => {
       const match = /bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/i.exec(node.getAttribute("title") || "");
       if (!match) return;
+      const wordConfidences = Array.from(node.querySelectorAll(".ocrx_word")).map(word => {
+        const confidence = /x_wconf\s+(\d+)/i.exec(word.getAttribute("title") || "");
+        return confidence ? Number(confidence[1]) : 80;
+      });
       source.push({
         text: node.textContent.replace(/\s+/g, " ").trim(),
-        confidence: 80,
+        confidence: wordConfidences.length ? wordConfidences.reduce((sum, value) => sum + value, 0) / wordConfidences.length : 80,
         bbox: { x0: Number(match[1]), y0: Number(match[2]), x1: Number(match[3]), y1: Number(match[4]) }
       });
     });
   }
+  if (!source.length) collect(data);
   if (!source.length && typeof data?.tsv === "string") {
     const rows = data.tsv.split(/\r?\n/).slice(1).map(row => row.split("\t"));
-    const grouped = new Map();
     rows.filter(row => row[0] === "5" && row.length >= 12).forEach(row => {
-      const key = row.slice(1, 5).join("-");
-      if (!grouped.has(key)) grouped.set(key, { words: [], bbox: { x0: Infinity, y0: Infinity, x1: 0, y1: 0 }, confidence: 100 });
-      const line = grouped.get(key);
       const x = Number(row[6]), y = Number(row[7]), width = Number(row[8]), height = Number(row[9]);
-      line.words.push(row.slice(11).join("\t"));
-      line.bbox.x0 = Math.min(line.bbox.x0, x); line.bbox.y0 = Math.min(line.bbox.y0, y);
-      line.bbox.x1 = Math.max(line.bbox.x1, x + width); line.bbox.y1 = Math.max(line.bbox.y1, y + height);
-      line.confidence = Math.min(line.confidence, Number(row[10]));
+      source.push({
+        text: row.slice(11).join("\t").trim(),
+        confidence: Number(row[10]),
+        bbox: { x0: x, y0: y, x1: x + width, y1: y + height }
+      });
     });
-    grouped.forEach(line => { line.text = line.words.join(" "); source.push(line); });
   }
   if (!source.length && String(data?.text || "").trim()) {
     const lines = String(data.text).replace(/\r/g, "").split("\n").map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean);
@@ -618,22 +868,29 @@ function ocrLayoutLines(data, pageWidth, pageHeight, offsetX = 0, offsetY = 0, r
       bbox: { x0: 0, y0: index * step, x1: regionWidth, y1: index * step + step * 0.78 }
     }));
   }
+  // Some Tesseract.js builds report the page at full height while line boxes
+  // still use the reduced recognition bitmap. Detect that mismatch from the
+  // occupied vertical range and restore it before converting pixels to points.
+  const maximumSourceY = source.reduce((maximum, item) => Math.max(maximum, Number(item?.bbox?.y1 || 0)), 0);
+  const normalizedMaximumY = maximumSourceY * scaleY;
+  if (maximumSourceY > 0 && normalizedMaximumY < regionHeight * 0.72) {
+    scaleY *= (regionHeight * 0.9) / normalizedMaximumY;
+  }
   return source.map(line => {
     const box = line.bbox || {};
     return {
       text: String(line.text || "").trim(),
       confidence: Number(line.confidence ?? line.conf ?? 100),
-      x: (Number(box.x0 || 0) + offsetX) / pageWidth * 595,
-      y: (Number(box.y0 || 0) + offsetY) / pageHeight * 842,
-      width: Math.max(10, Number((box.x1 || 0) - (box.x0 || 0)) / pageWidth * 595),
-      height: Math.max(7, Number((box.y1 || 0) - (box.y0 || 0)) / pageHeight * 842)
+      x: (Number(box.x0 || 0) * scaleX + offsetX) / pageWidth * 595,
+      y: (Number(box.y0 || 0) * scaleY + offsetY) / pageHeight * 842,
+      width: Math.max(10, Number((box.x1 || 0) - (box.x0 || 0)) * scaleX / pageWidth * 595),
+      height: Math.max(7, Number((box.y1 || 0) - (box.y0 || 0)) * scaleY / pageHeight * 842)
     };
   }).filter(line => {
-    if (!line.text || line.confidence < 50 || line.width <= 12 || line.height >= 45) return false;
+    if (!line.text || line.confidence < 55 || line.width <= 2 || line.height >= 45) return false;
     const useful = (line.text.match(/[A-Za-zÀ-ÿ0-9]/g) || []).length;
-    const words = line.text.split(/\s+/).filter(Boolean);
-    const suspicious = words.length >= 7 && words.filter(word => /^[A-Z]{1,3}$/i.test(word)).length / words.length > 0.72;
-    return useful >= 3 && useful / Math.max(line.text.length, 1) >= 0.48 && !suspicious;
+    if (line.text.length <= 2 && useful <= 1) return false;
+    return useful >= 1 && useful / Math.max(line.text.length, 1) >= 0.4;
   });
 }
 
@@ -642,15 +899,30 @@ function editableLayoutDocumentXml(pages) {
     const imageWidth = 7560945;
     const imageHeight = 10693440;
     const background = `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="1" locked="1" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="${imageWidth}" cy="${imageHeight}"/><wp:wrapNone/><wp:docPr id="${pageIndex + 1}" name="Página original ${pageIndex + 1}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${pageIndex + 1}" name="page-${pageIndex + 1}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId${pageIndex + 1}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${imageWidth}" cy="${imageHeight}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
-    const overlays = page.lines.map((line, lineIndex) => {
-      // OCR boxes report the black-pixel height, which is smaller than the
-      // typographic point size. Using that height directly condensed the
-      // JUCESP contract into tiny text. Reconstruct the font's em size while
-      // keeping a conservative ceiling for large stamps/headings.
-      const fontSize = Math.max(8.5, Math.min(18, line.height * 1.08));
+    const overlays = (page.blocks || page.lines).map((line, lineIndex) => {
+      if (page.blocks) {
+        const fontSize = line.fontSize;
+        const bold = line.role === "heading" ? "<w:b/>" : "";
+        const italic = line.role === "heading" && /PALIN|CONTRATO SOCIAL/i.test(line.text) ? "<w:i/>" : "";
+        const justification = line.alignment === "center" ? "center" : line.alignment === "both" ? "both" : "left";
+        const legalTextRightEdge = 515;
+        const safeX = Math.min(line.x, legalTextRightEdge - 40);
+        const availableWidth = Math.max(40, legalTextRightEdge - safeX);
+        const boxWidth = Math.min(availableWidth, Math.max(80, line.width));
+        const boxHeight = Math.max(line.height * 1.08, fontSize * 1.5);
+        const runProperties = `<w:rPr>${bold}${italic}<w:noProof/><w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr>`;
+        const financialContent = line.role === "financial-row" && line.financial
+          ? `<w:r>${runProperties}<w:t xml:space="preserve">${escapeXml(line.financial.label)}</w:t><w:tab/><w:t>${escapeXml(line.financial.amount)}</w:t><w:tab/><w:t>${escapeXml(line.financial.percentage)}</w:t></w:r>`
+          : `<w:r>${runProperties}<w:t xml:space="preserve">${escapeXml(line.text)}</w:t></w:r>`;
+        const tabs = line.role === "financial-row" ? `<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="6100"/><w:tab w:val="right" w:pos="9000"/></w:tabs>` : "";
+        return `<w:r><w:pict><v:rect id="block-${pageIndex}-${lineIndex}" style="position:absolute;margin-left:${safeX.toFixed(2)}pt;margin-top:${line.y.toFixed(2)}pt;width:${boxWidth.toFixed(2)}pt;height:${boxHeight.toFixed(2)}pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="t" fillcolor="white" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr>${tabs}<w:jc w:val="${justification}"/><w:spacing w:before="0" w:after="0" w:line="${Math.round(fontSize * 24)}" w:lineRule="auto"/></w:pPr>${financialContent}</w:p></w:txbxContent></v:textbox></v:rect></w:pict></w:r>`;
+      }
+      const fontSize = Math.max(7.5, Math.min(18, line.height * 0.96));
       const bold = fontSize > 12 || /^[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ0-9ªº\s&–—.-]{8,}$/.test(line.text) ? "<w:b/>" : "";
-      const boxHeight = Math.max(line.height * 1.55, fontSize * 1.35, 14);
-      return `<w:r><w:pict><v:rect id="ocr-${pageIndex}-${lineIndex}" style="position:absolute;margin-left:${line.x.toFixed(2)}pt;margin-top:${Math.max(0, line.y - fontSize * 0.12).toFixed(2)}pt;width:${Math.max(line.width + 3, 14).toFixed(2)}pt;height:${boxHeight.toFixed(2)}pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="t" fillcolor="white" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:keepLines/></w:pPr><w:r><w:rPr>${bold}<w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t xml:space="preserve">${escapeXml(line.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></w:pict></w:r>`;
+      const boxHeight = Math.max(line.height * 1.35, fontSize * 1.25, 11);
+      const availableWidth = Math.max(24, 595 - line.x - 18);
+      const boxWidth = Math.min(availableWidth, Math.max(line.width * 1.06 + 2, fontSize * 0.7, 6));
+      return `<w:r><w:pict><v:rect id="ocr-${pageIndex}-${lineIndex}" style="position:absolute;margin-left:${line.x.toFixed(2)}pt;margin-top:${Math.max(0, line.y - fontSize * 0.08).toFixed(2)}pt;width:${boxWidth.toFixed(2)}pt;height:${boxHeight.toFixed(2)}pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="t" fillcolor="white" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:keepLines/></w:pPr><w:r><w:rPr>${bold}<w:noProof/><w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t xml:space="preserve">${escapeXml(line.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></w:pict></w:r>`;
     }).join("");
     const pageBreak = pageIndex < pages.length - 1 ? `<w:r><w:br w:type="page"/></w:r>` : "";
     return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>${background}${overlays}${pageBreak}</w:p>`;
