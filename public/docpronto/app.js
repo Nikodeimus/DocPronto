@@ -494,6 +494,21 @@ function normalizeRenderedDocxPage(section) {
       graphic.style.setProperty("z-index", "1", "important");
     }
   });
+
+  // A layout table in this cover can become a pale, page-wide rule above the
+  // footer. It is not the signature rule: the genuine signature line is short.
+  [...section.querySelectorAll("hr, p, div, table, tr, td")].forEach(element => {
+    const rect = element.getBoundingClientRect();
+    const relativeTop = (rect.top - pageRect.top) / Math.max(pageRect.height, 1);
+    const computed = getComputedStyle(element);
+    const thinRule = rect.height <= 8 || element.tagName.toLowerCase() === "hr";
+    const hasBorder = parseFloat(computed.borderTopWidth) > 0 || parseFloat(computed.borderBottomWidth) > 0 || element.tagName.toLowerCase() === "hr";
+    if (thinRule && hasBorder && rect.width > pageRect.width * 0.62 && relativeTop > 0.68 && relativeTop < 0.92) {
+      element.style.setProperty("border-top", "0", "important");
+      element.style.setProperty("border-bottom", "0", "important");
+      element.style.setProperty("background", "transparent", "important");
+    }
+  });
 }
 
 async function createOnlineDocxPdf(file) {
