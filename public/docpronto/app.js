@@ -1,4 +1,4 @@
-/* global PDFLib, JSZip, forge */
+/* global PDFLib, JSZip, forge, docx, html2canvas */
 
 const MAX_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_ARCHIVE_SIZE = 12 * 1024 * 1024;
@@ -20,7 +20,7 @@ const tools = [
   { id: "ofx-xlsx", number: "12", category: "financeiro", title: "OFX para XLSX", description: "Transforme as transações do OFX em uma planilha Excel.", accept: ".ofx", multiple: false, action: ofxToXlsx },
   { id: "ofx-summary", number: "13", category: "financeiro", title: "OFX para PDF", description: "Gere um PDF com saldos, entradas, saídas e transações.", accept: ".ofx", multiple: false, action: ofxToSummaryPdf },
   { id: "pdf-ofx", number: "14", category: "financeiro", title: "PDF para OFX", description: "Extraia movimentações e confira cada lançamento antes de gerar o OFX.", accept: ".pdf", multiple: false, option: "pdf-ofx", warning: "A detecção automática pode errar datas, valores ou natureza do lançamento. A geração só acontece após sua conferência.", action: pdfToOfx },
-  { id: "word-pdf", number: "15", category: "documento", title: "Word para PDF", description: "Converta DOCX em PDF com texto, parágrafos e tabelas.", accept: ".docx", multiple: false, option: "word-pdf", warning: "O modo online funciona pelo navegador. Para fidelidade idêntica ao Word, use o modo Microsoft Word no aplicativo local.", action: wordToPdf },
+  { id: "word-pdf", number: "15", category: "documento", title: "Word para PDF", description: "Reconstrua visualmente cada página do DOCX em PDF.", accept: ".docx", multiple: false, option: "word-pdf", warning: "O motor online preserva imagens, cabeçalhos, rodapés, tabelas e posições. Fontes que não existirem no dispositivo podem ser substituídas.", action: wordToPdf },
   { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDFs, inclusive digitalizações, em texto editável no Word usando OCR.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "Em documentos escaneados, o OCR pode demorar alguns minutos. O modo de texto editável nunca insere a página como imagem.", action: pdfToWord },
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
   { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature }
@@ -220,7 +220,7 @@ function renderOptions(type) {
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
     "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
-    "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — texto e tabelas (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>O modo online funciona para qualquer pessoa com o link e mantém o arquivo no navegador.</small>`,
+    "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="installed">Certificado instalado no Windows</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><div class="sign-mode-panel" data-sign-mode="installed"><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate" hidden><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`
   };
@@ -375,8 +375,8 @@ async function textToPdf([file]) {
 async function wordToPdf([file]) {
   const mode = document.querySelector("#wordPdfMode")?.value || "online";
   if (mode === "online") {
-    showStatus("Lendo texto, parágrafos e tabelas do Word no navegador...");
-    download(await createOnlineDocxPdf(file), `${baseName(file.name)}.pdf`, "application/pdf");
+    showStatus("Montando as páginas do Word com imagens, cabeçalhos e posições originais...");
+    download(await createRenderedDocxPdf(file), `${baseName(file.name)}.pdf`, "application/pdf");
     return;
   }
   try {
@@ -387,6 +387,66 @@ async function wordToPdf([file]) {
     throw new Error(
       "Não foi possível fazer a conversão com qualidade. Abra o DocPronto pelo arquivo ‘ABRIR DOCPRONTO.cmd’, confirme que o Microsoft Word está instalado e tente novamente. Nenhum PDF incompleto foi gerado."
     );
+  }
+}
+
+async function createRenderedDocxPdf(file) {
+  if (!window.docx?.renderAsync || !window.html2canvas) {
+    throw new Error("O motor visual do Word não foi carregado. Atualize a página com Ctrl + F5 e tente novamente.");
+  }
+  const host = document.createElement("div");
+  host.setAttribute("aria-hidden", "true");
+  Object.assign(host.style, {
+    position: "fixed",
+    left: "-20000px",
+    top: "0",
+    width: "1000px",
+    background: "white",
+    zIndex: "-1"
+  });
+  document.body.appendChild(host);
+  try {
+    await window.docx.renderAsync(await file.arrayBuffer(), host, null, {
+      inWrapper: true,
+      breakPages: true,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      ignoreWidth: false,
+      ignoreHeight: false,
+      ignoreFonts: false,
+      useBase64URL: true
+    });
+    await document.fonts?.ready;
+    const renderedPages = [...host.querySelectorAll("section.docx")];
+    if (!renderedPages.length) throw new Error("O Word não produziu páginas renderizáveis.");
+    const pdf = await PDFLib.PDFDocument.create();
+    for (let index = 0; index < renderedPages.length; index += 1) {
+      showStatus(`Renderizando página ${index + 1} de ${renderedPages.length} com alta fidelidade...`);
+      const section = renderedPages[index];
+      const canvas = await window.html2canvas(section, {
+        backgroundColor: "#ffffff",
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        width: section.scrollWidth,
+        height: section.scrollHeight,
+        windowWidth: Math.max(1200, section.scrollWidth + 100),
+        windowHeight: Math.max(1000, section.scrollHeight + 100)
+      });
+      const png = await pdf.embedPng(canvas.toDataURL("image/png"));
+      const pageWidth = 595.28;
+      const pageHeight = 841.89;
+      const scale = Math.min(pageWidth / png.width, pageHeight / png.height);
+      const width = png.width * scale;
+      const height = png.height * scale;
+      const page = pdf.addPage([pageWidth, pageHeight]);
+      page.drawImage(png, { x: (pageWidth - width) / 2, y: pageHeight - height, width, height });
+    }
+    return pdf.save();
+  } finally {
+    host.remove();
   }
 }
 
