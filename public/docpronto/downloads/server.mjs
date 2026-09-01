@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
+import vm from "node:vm";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
@@ -283,11 +284,19 @@ async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase
   debugLog(`sign-pdf-installed:pdf-bytes:${pdf.length}`);
   const certificate = await getWindowsCertificate(cleanThumbprint);
   debugLog("sign-pdf-installed:certificate-ok");
-  const prepared = appendPdfSignaturePlaceholder(pdf, {
+  const signatureOptions = {
     signerName: signerName || certificate.label || certificate.subject || "Assinatura digital",
     reason: "Assinado digitalmente pelo DocPronto",
     placement
-  });
+  };
+  let prepared;
+  try {
+    prepared = appendPdfSignaturePlaceholder(pdf, signatureOptions);
+  } catch (initialError) {
+    debugLog(`sign-pdf-installed:normalizing:${initialError.message}`);
+    const normalizedPdf = await normalizePdfForSignature(pdf);
+    prepared = appendPdfSignaturePlaceholder(normalizedPdf, signatureOptions);
+  }
   debugLog(`sign-pdf-installed:prepared:${prepared.pdf.length}`);
   const signedBytes = Buffer.concat([
     prepared.pdf.subarray(0, prepared.byteRange[1]),
@@ -306,6 +315,41 @@ async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase
     filename: `${baseName(filename)}-assinado.pdf`,
     contentBase64: output.toString("base64")
   };
+}
+
+async function normalizePdfForSignature(pdf) {
+  const libraryPath = join(root, "vendor", "pdf-lib.min.js");
+  if (!existsSync(libraryPath)) throw new Error("O normalizador local de PDF não foi encontrado. Atualize o conector do DOCPronto.");
+  try {
+    const code = await readFile(libraryPath, "utf8");
+    const sandbox = {
+      exports: {}, module: { exports: {} }, console,
+      setTimeout, clearTimeout, Uint8Array, ArrayBuffer, TextEncoder, TextDecoder
+    };
+    sandbox.globalThis = sandbox;
+    sandbox.window = sandbox;
+    sandbox.self = sandbox;
+    vm.runInNewContext(code, sandbox, { filename: "pdf-lib.min.js" });
+    const PDFLib = sandbox.exports;
+    if (!PDFLib?.PDFDocument) throw new Error("Biblioteca de PDF indisponível.");
+    const document = await PDFLib.PDFDocument.load(pdf, {
+      ignoreEncryption: false,
+      throwOnInvalidObject: false,
+      updateMetadata: false
+    });
+    const normalized = await document.save({
+      useObjectStreams: false,
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+      objectsPerTick: 50
+    });
+    return Buffer.from(normalized);
+  } catch (error) {
+    if (/encrypt|password/i.test(String(error?.message || ""))) {
+      throw new Error("Este PDF está protegido por senha. Remova a proteção antes de assinar.");
+    }
+    throw new Error(`Não foi possível normalizar este PDF para assinatura: ${error.message || "estrutura inválida"}.`);
+  }
 }
 
 function debugLog(message) {
@@ -560,4 +604,4 @@ function runPowerShell(script, env = {}, timeoutMs = 30000) {
   });
 }
 
-export { appendPdfSignaturePlaceholder };
+export { appendPdfSignaturePlaceholder, normalizePdfForSignature };
