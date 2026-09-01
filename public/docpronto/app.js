@@ -465,14 +465,21 @@ function normalizeRenderedDocxPage(section) {
   const place = (pattern, top, options = {}) => {
     const element = findSmallest(pattern);
     if (!element) return;
+    // DOCX text boxes have different local coordinate systems. Absolute
+    // positioning a paragraph inside its original box centers it against that
+    // box, not against the page. Move the final text node to the page layer so
+    // every cover label shares one axis.
+    section.appendChild(element);
     const style = element.style;
     style.setProperty("position", "absolute", "important");
     style.setProperty("top", `${top}%`, "important");
     style.setProperty("left", options.left || "0", "important");
-    style.setProperty("right", options.right || "0", "important");
-    style.setProperty("width", options.width || "auto", "important");
+    style.setProperty("right", options.right || "auto", "important");
+    style.setProperty("width", options.width || "100%", "important");
     style.setProperty("margin", "0", "important");
     style.setProperty("text-align", options.align || "center", "important");
+    style.setProperty("box-sizing", "border-box", "important");
+    style.setProperty("transform", "none", "important");
     style.setProperty("z-index", "3", "important");
   };
   place(/^MOVIMENTO FINANCEIRO$/i, 20.5);
