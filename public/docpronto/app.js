@@ -221,7 +221,7 @@ function renderOptions(type) {
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
     "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
     "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
-    "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="installed">Certificado instalado no Windows</option><option value="certificate">Arquivo A1 (.pfx/.p12)</option></select><div class="sign-mode-panel" data-sign-mode="installed"><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate" hidden><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
+    "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — funciona online</option><option value="installed" disabled>Windows — verificando aplicativo local…</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Aplicativo local não conectado</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
@@ -247,6 +247,7 @@ function isMimeCompatible(file, extension) {
 
 function bindDigitalSignOptions() {
   const mode = document.querySelector("#signatureMode");
+  const installedOption = mode?.querySelector('option[value="installed"]');
   const updateMode = () => {
     document.querySelectorAll("[data-sign-mode]").forEach(panel => {
       panel.hidden = panel.dataset.signMode !== mode?.value;
@@ -258,6 +259,12 @@ function bindDigitalSignOptions() {
     loadWindowsCertificates().catch(error => showStatus(error.message, true));
   });
   document.querySelector("#certificateSearch")?.addEventListener("input", filterCertificateOptions);
+  detectLocalCertificateBridge().then(certificates => {
+    if (!installedOption || !certificates) return;
+    installedOption.disabled = false;
+    installedOption.textContent = "Certificado instalado no Windows — aplicativo conectado";
+    populateWindowsCertificates(certificates);
+  });
 }
 
 async function processFiles() {
@@ -1167,7 +1174,7 @@ async function convertWithLocalOffice(file, endpoint) {
 }
 
 async function signWithDigitalCertificate([file]) {
-  const mode = document.querySelector("#signatureMode")?.value || "installed";
+  const mode = document.querySelector("#signatureMode")?.value || "certificate";
   if (mode === "installed") {
     await signWithInstalledCertificate(file);
     return;
@@ -1350,12 +1357,25 @@ function makeSignatureBoxInteractive(box, container) {
 
 async function loadWindowsCertificates() {
   const select = document.querySelector("#windowsCertificate");
+  const button = document.querySelector("#loadWindowsCertificates");
   if (!select) return;
   select.innerHTML = `<option value="">Carregando certificados...</option>`;
-  const response = await fetch(`${localSignerApiBase()}/api/certificates`);
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || "Não foi possível carregar certificados instalados.");
-  const certificates = result.certificates || [];
+  if (button) button.disabled = true;
+  let certificates;
+  try {
+    certificates = await fetchWindowsCertificates(3500);
+  } catch (error) {
+    select.innerHTML = `<option value="">Aplicativo local não conectado</option>`;
+    throw new Error("O site não encontrou o aplicativo local do DOCPronto. Use um certificado A1 (.pfx/.p12) ou abra o DOCPronto pelo iniciador do Windows.");
+  } finally {
+    if (button) button.disabled = false;
+  }
+  populateWindowsCertificates(certificates);
+}
+
+function populateWindowsCertificates(certificates) {
+  const select = document.querySelector("#windowsCertificate");
+  if (!select) return;
   if (!certificates.length) {
     select.innerHTML = `<option value="">Nenhum certificado com chave privada encontrado</option>`;
     return;
@@ -1364,6 +1384,27 @@ async function loadWindowsCertificates() {
   select.innerHTML = certificates.map(certificate =>
     `<option value="${escapeHtml(certificate.thumbprint)}">${escapeHtml(maskCertificateLabel(certificate))}</option>`
   ).join("");
+}
+
+async function fetchWindowsCertificates(timeoutMs = 2500) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${localSignerApiBase()}/api/certificates`, { signal: controller.signal });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Serviço local indisponível.");
+    return result.certificates || [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function detectLocalCertificateBridge() {
+  try {
+    return await fetchWindowsCertificates(1400);
+  } catch (error) {
+    return null;
+  }
 }
 
 function maskCertificateLabel(certificate) {
