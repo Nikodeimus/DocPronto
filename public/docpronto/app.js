@@ -475,22 +475,26 @@ function normalizeRenderedDocxPage(section) {
     style.setProperty("text-align", options.align || "center", "important");
     style.setProperty("z-index", "3", "important");
   };
-  place(/^MOVIMENTO FINANCEIRO$/i, 20.5);
-  place(/^Pessoa F[ií]sica$/i, 34.5);
-  place(/^Conta(?:s)?\s+a?\s*Paga(?:r|s)?$/i, 45.2);
-  place(/^PER[IÍ]ODO:?$/i, 55.5);
-  place(/^\d{2}\/\d{4}$/i, 62.0);
-  place(/^Assinatura/i, 82.0, { left: "26%", right: "auto", width: "50%", align: "left" });
+  place(/^MOVIMENTO FINANCEIRO$/i, 22.0);
+  place(/^Pessoa F[ií]sica$/i, 36.5);
+  place(/^Conta(?:s)?\s+a?\s*Paga(?:r|s)?$/i, 48.0);
+  place(/^PER[IÍ]ODO:?$/i, 59.0);
+  place(/^\d{2}\/\d{4}$/i, 65.5);
+  place(/^Assinatura/i, 88.0, { left: "26%", right: "auto", width: "50%", align: "left" });
 
   // Word stores the watermark as a floating drawing with transparency. Some
   // browser renderers preserve its geometry but drop the alpha value. Restore
   // that alpha only for large graphics in the central body, never for logos.
   const pageRect = section.getBoundingClientRect();
-  [...section.querySelectorAll("img, svg")].forEach(graphic => {
+  [...section.querySelectorAll("*")].forEach(graphic => {
     const rect = graphic.getBoundingClientRect();
     const relativeTop = (rect.top - pageRect.top) / Math.max(pageRect.height, 1);
-    if (rect.width > pageRect.width * 0.42 && rect.height > pageRect.height * 0.24 && relativeTop > 0.08 && relativeTop < 0.68) {
-      graphic.style.setProperty("opacity", "0.1", "important");
+    const tag = graphic.tagName.toLowerCase();
+    const computed = getComputedStyle(graphic);
+    const isGraphic = ["img", "svg", "canvas", "v:shape", "v:imagedata"].includes(tag) || computed.backgroundImage !== "none";
+    const hasReadableText = normalizedText(graphic.innerText).length > 2;
+    if (isGraphic && !hasReadableText && rect.width > pageRect.width * 0.42 && rect.height > pageRect.height * 0.24 && relativeTop > 0.05 && relativeTop < 0.72) {
+      graphic.style.setProperty("opacity", "0.08", "important");
       graphic.style.setProperty("z-index", "1", "important");
     }
   });
