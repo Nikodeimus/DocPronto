@@ -372,7 +372,7 @@ function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placement }) {
   const rootObject = Number(rootRef?.[1]);
   const rootGeneration = Number(rootRef?.[2] || 0);
   const rootBody = findPdfDictionaryObject(source, rootObject, rootGeneration);
-  const pageMatches = findPdfPageObjects(source);
+  const pageMatches = findPdfPageObjectsInOrder(source, rootBody);
   const pageIndex = Math.max(0, Math.min(pageMatches.length - 1, Number(placement?.page || 1) - 1));
   const pageMatch = pageMatches[pageIndex];
   if (!rootBody || !pageMatch || !Number.isFinite(prevStart) || !trailerMatch) {
@@ -398,23 +398,31 @@ function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placement }) {
   const pageGeneration = pageMatch.generation;
   const pageBody = addPdfDictionaryEntry(pageMatch.body, `/Annots[${widgetObj} 0 R]`);
   const rect = normalizeSignaturePlacement(placement);
-  const appearanceWidth = Math.max(120, rect.width);
-  const appearanceHeight = Math.max(42, rect.height);
+  const appearanceWidth = rect.width;
+  const appearanceHeight = rect.height;
   const now = pdfDate(new Date());
   const visibleText = [
     `Assinado de forma digital por`,
     cleanPdfText(signerName).slice(0, 54),
     `Dados: ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })} -03'00'`
   ];
+  const appearanceMargin = Math.max(3, Math.min(8, appearanceWidth * 0.04, appearanceHeight * 0.12));
+  const longestLine = Math.max(...visibleText.map(text => estimateHelveticaWidth(text)));
+  const fontByWidth = (appearanceWidth - appearanceMargin * 2) / Math.max(1, longestLine);
+  const fontByHeight = (appearanceHeight - appearanceMargin * 2) / (visibleText.length * 1.25);
+  const appearanceFontSize = Math.max(4, Math.min(10, fontByWidth, fontByHeight));
+  const appearanceLineHeight = appearanceFontSize * 1.25;
+  const firstBaseline = appearanceHeight - appearanceMargin - appearanceFontSize;
   const appearanceStream = [
     "q",
+    `0 0 ${formatPdfNumber(appearanceWidth)} ${formatPdfNumber(appearanceHeight)} re W n`,
     `1 1 1 rg 0 0 ${formatPdfNumber(appearanceWidth)} ${formatPdfNumber(appearanceHeight)} re f`,
     `0.1 0.1 0.1 RG 0.8 w 0 0 ${formatPdfNumber(appearanceWidth)} ${formatPdfNumber(appearanceHeight)} re S`,
-    `BT /Helv 10 Tf 0 0 0 rg 10 ${formatPdfNumber(appearanceHeight - 24)} Td`,
+    `BT /Helv ${formatPdfNumber(appearanceFontSize)} Tf 0 0 0 rg ${formatPdfNumber(appearanceMargin)} ${formatPdfNumber(firstBaseline)} Td`,
     `(${escapePdfString(visibleText[0])}) Tj`,
-    "0 -16 Td",
+    `0 -${formatPdfNumber(appearanceLineHeight)} Td`,
     `(${escapePdfString(visibleText[1])}) Tj`,
-    "0 -16 Td",
+    `0 -${formatPdfNumber(appearanceLineHeight)} Td`,
     `(${escapePdfString(visibleText[2])}) Tj`,
     "ET",
     "Q"
@@ -468,6 +476,10 @@ function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placement }) {
   return { pdf: output, byteRange, contentsHexStart, placeholderHexLength };
 }
 
+function estimateHelveticaWidth(text) {
+  return [...String(text || "")].reduce((width, char) => width + (/[MW@#%&]/.test(char) ? 0.9 : /[ilI1.,:;' ]/.test(char) ? 0.28 : 0.55), 0);
+}
+
 function findPdfDictionaryObject(source, objectNumber, generation = 0) {
   if (!Number.isFinite(objectNumber)) return null;
   const header = new RegExp(`(?:^|[\\r\\n])${objectNumber}\\s+${generation}\\s+obj\\s*<<`, "g");
@@ -500,6 +512,28 @@ function findPdfPageObjects(source) {
     header.lastIndex = dictionaryEnd;
   }
   return pages;
+}
+
+function findPdfPageObjectsInOrder(source, rootBody) {
+  const pagesRef = rootBody.match(/\/Pages\s+(\d+)\s+(\d+)\s+R/);
+  if (!pagesRef) return findPdfPageObjects(source);
+  const ordered = [];
+  const visited = new Set();
+  const walk = (objectNumber, generation) => {
+    const key = `${objectNumber}:${generation}`;
+    if (visited.has(key)) return;
+    visited.add(key);
+    const body = findPdfDictionaryObject(source, objectNumber, generation);
+    if (!body) return;
+    if (/\/Type\s*\/Page\b/.test(body) && !/\/Type\s*\/Pages\b/.test(body)) {
+      ordered.push({ objectNumber, generation, body });
+      return;
+    }
+    const kids = body.match(/\/Kids\s*\[([\s\S]*?)\]/)?.[1] || "";
+    for (const ref of kids.matchAll(/(\d+)\s+(\d+)\s+R/g)) walk(Number(ref[1]), Number(ref[2]));
+  };
+  walk(Number(pagesRef[1]), Number(pagesRef[2]));
+  return ordered.length ? ordered : findPdfPageObjects(source);
 }
 
 function findBalancedPdfDictionaryEnd(source, start) {
@@ -556,8 +590,8 @@ function normalizeSignaturePlacement(placement) {
   return {
     x: Number.isFinite(x) ? Math.max(0, x) : 300,
     y: Number.isFinite(y) ? Math.max(0, y) : 92,
-    width: Number.isFinite(width) ? Math.min(460, Math.max(120, width)) : 290,
-    height: Number.isFinite(height) ? Math.min(180, Math.max(42, height)) : 78
+    width: Number.isFinite(width) ? Math.min(460, Math.max(60, width)) : 290,
+    height: Number.isFinite(height) ? Math.min(180, Math.max(24, height)) : 78
   };
 }
 
