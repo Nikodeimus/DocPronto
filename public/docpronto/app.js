@@ -1207,6 +1207,7 @@ async function signWithInstalledCertificate(file) {
   }
   if (!thumbprint) throw new Error("Selecione um certificado instalado no Windows.");
   const apiBase = localSignerApiBase();
+  await ensureLocalSignerCompatible(apiBase);
   let fileBytes = new Uint8Array(await file.arrayBuffer());
   const pdfMode = /\.pdf$/i.test(file.name);
   const placement = pdfMode ? await chooseSignaturePlacement(file) : null;
@@ -1228,6 +1229,19 @@ async function signWithInstalledCertificate(file) {
     download(bytesFromBase64(result.contentBase64), result.filename || `${baseName(file.name)}-assinado.pdf`, "application/pdf");
   } else {
     download(bytesFromBase64(result.signatureBase64), `${file.name}.p7s`, "application/pkcs7-signature");
+  }
+}
+
+async function ensureLocalSignerCompatible(apiBase) {
+  let health;
+  try {
+    const response = await fetch(`${apiBase}/api/health`, { cache: "no-store" });
+    health = await response.json();
+  } catch {
+    throw new Error("O conector local do DOCPronto não está aberto. Baixe o conector atualizado, execute o atualizador e tente novamente.");
+  }
+  if (Number(health?.pdfSigningEngine || 0) < 2) {
+    throw new Error("O conector local está desatualizado e pode corromper PDFs. Baixe o conector atualizado nesta tela, execute o atualizador e tente novamente.");
   }
 }
 
