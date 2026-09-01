@@ -480,7 +480,21 @@ function normalizeRenderedDocxPage(section) {
     style.setProperty("text-align", options.align || "center", "important");
     style.setProperty("box-sizing", "border-box", "important");
     style.setProperty("transform", "none", "important");
+    style.setProperty("padding-left", "0", "important");
+    style.setProperty("padding-right", "0", "important");
+    style.setProperty("text-indent", "0", "important");
+    style.setProperty("max-width", "none", "important");
     style.setProperty("z-index", "3", "important");
+    [...element.querySelectorAll("span")].forEach(span => {
+      span.style.setProperty("position", "static", "important");
+      span.style.setProperty("left", "auto", "important");
+      span.style.setProperty("right", "auto", "important");
+      span.style.setProperty("margin-left", "0", "important");
+      span.style.setProperty("margin-right", "0", "important");
+      span.style.setProperty("padding-left", "0", "important");
+      span.style.setProperty("padding-right", "0", "important");
+      span.style.setProperty("transform", "none", "important");
+    });
   };
   place(/^MOVIMENTO FINANCEIRO$/i, 20.5);
   place(/^Pessoa F[ií]sica$/i, 34.5);
