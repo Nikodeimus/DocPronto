@@ -23,7 +23,8 @@ const tools = [
   { id: "word-pdf", number: "15", category: "documento", title: "Word para PDF", description: "Reconstrua visualmente cada página do DOCX em PDF.", accept: ".docx", multiple: false, option: "word-pdf", warning: "O motor online preserva imagens, cabeçalhos, rodapés, tabelas e posições. Fontes que não existirem no dispositivo podem ser substituídas.", action: wordToPdf },
   { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDFs, inclusive digitalizações, em texto editável no Word usando OCR.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "Em documentos escaneados, o OCR pode demorar alguns minutos. O modo de texto editável nunca insere a página como imagem.", action: pdfToWord },
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
-  { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature }
+  { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature },
+  { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta NFS-e de Barueri em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: false, option: "pdf-xml-abrasf", warning: "Motor inicial validado com NFS-e de Barueri. O XML é reconstruído e não substitui o arquivo fiscal original assinado pelo município.", action: pdfToAbrasfXml }
 ];
 
 const elements = {
@@ -222,7 +223,8 @@ function renderOptions(type) {
     "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
     "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — funciona online</option><option value="installed">Certificado instalado no Windows — requer conector local</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">O Chrome mostra certificados no gov.br porque aquele serviço solicita autenticação por certificado. Para assinar qualquer arquivo com o certificado do Windows, mantenha o conector do DOCPronto aberto e atualizado. <a href="/docpronto/downloads/DOCPronto-Conector-Windows.zip" download>Baixar ou atualizar o conector</a>.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em conectar e carregar</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Conectar e carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
-    "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`
+    "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`,
+    "pdf-xml-abrasf": `<div class="notice visible">O motor identifica os campos da NFS-e, separa PIS, COFINS, IR e CSLL, confere o valor líquido e gera a estrutura CompNfse do padrão ABRASF 2.04.</div><label><input id="abrasfStrictValidation" type="checkbox" checked> Bloquear o XML se os totais não fecharem</label><small>Nesta primeira versão, são aceitas NFS-e emitidas pelo sistema próprio da Prefeitura de Barueri.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
   if (type === "digital-sign") bindDigitalSignOptions();
@@ -1903,6 +1905,204 @@ async function extractTextFromPdf(file, reportProgress = false) {
   }
   await loadingTask.destroy();
   return pages;
+}
+
+async function pdfToAbrasfXml([file]) {
+  showStatus("Lendo e classificando a NFS-e...");
+  const pages = await extractTextFromPdf(file, true);
+  const rawLines = pages.flat();
+  const lines = rawLines.map(line => stripLayoutMarkers(line).replace(/\s+/g, " ").trim()).filter(Boolean);
+  const text = lines.join("\n");
+  const invoice = parseBarueriNfse(lines, text);
+  validateAbrasfInvoice(invoice, document.querySelector("#abrasfStrictValidation")?.checked !== false);
+  const xml = buildAbrasfCompNfse(invoice);
+  const parsed = new DOMParser().parseFromString(xml, "application/xml");
+  if (parsed.querySelector("parsererror")) throw new Error("O XML ABRASF gerado não passou na validação de sintaxe.");
+  download(xml, `NFSe-${invoice.number}-ABRASF.xml`, "application/xml;charset=utf-8");
+}
+
+function parseBarueriNfse(lines, text) {
+  if (!/PREFEITURA MUNICIPAL DE BARUERI|barueri\.sp\.gov\.br\/nfe/i.test(text)) {
+    throw new Error("Esta primeira versão do motor ABRASF aceita NFS-e emitidas pela Prefeitura de Barueri.");
+  }
+  const cnpjs = [...new Set((text.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/g) || []).map(onlyDigits))];
+  if (cnpjs.length < 2) throw new Error("Não foi possível identificar os CNPJs do prestador e do tomador.");
+  const auth = (text.match(/\b[A-Z0-9]{4}(?:\.[A-Z0-9]{4}){2}\.[A-Z0-9]{5,12}-[A-Z0-9]\b/i) || [])[0];
+  const dates = text.match(/\b\d{2}\/\d{2}\/\d{4}\b/g) || [];
+  const time = (text.match(/\b\d{2}:\d{2}\b/) || [])[0] || "00:00";
+  const number = findBarueriInvoiceNumber(lines) || numberFromFilenameFallback(text);
+  const rps = findBarueriRps(lines, text);
+  const item = findBarueriServiceItem(lines, text);
+  const retentions = findBarueriRetentions(lines, text);
+  const total = findLabeledFiscalMoney(lines, /VALOR TOTAL DA NOTA/i);
+  const net = findFiscalMoneyNear(text, /Valor L[ií]quido/i);
+  const provider = findSectionEntityName(lines, /Prestador de Servi[cç]os/i, cnpjs[0]) || "PRESTADOR NÃO IDENTIFICADO";
+  const customer = findSectionEntityName(lines, /Nome Tomador de Servi[cç]os/i, cnpjs[1]) || "TOMADOR NÃO IDENTIFICADO";
+  const emails = [...new Set(text.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g) || [])];
+  const description = extractBarueriDescription(lines);
+  const issueDate = brDateToIso(dates[0]);
+  if (!number || !auth || !issueDate || !item || !Number.isFinite(total)) {
+    throw new Error("A nota foi reconhecida como Barueri, mas faltaram número, autenticação, data, serviço ou valor total.");
+  }
+  const serviceTotal = item.total || total;
+  const base = total;
+  const iss = roundFiscal(base * item.rate / 100);
+  return {
+    number, auth, issueDate, time: `${time}:00`, rps,
+    provider: { cnpj: cnpjs[0], name: provider, municipalRegistration: findBarueriMunicipalRegistration(lines) },
+    customer: { cnpj: cnpjs[1], name: customer, emails },
+    item: { ...item, total: serviceTotal }, retentions, total, base, iss,
+    net: Number.isFinite(net) ? net : roundFiscal(total - Object.values(retentions).reduce((sum, value) => sum + value, 0)),
+    description
+  };
+}
+
+function findBarueriInvoiceNumber(lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/N[úu]mero da Nota/i.test(lines[index])) continue;
+    const sample = lines.slice(index, index + 4).join(" ");
+    const match = sample.match(/\b0*(\d{4,7})\b/);
+    if (match) return match[1];
+  }
+  return "";
+}
+
+function numberFromFilenameFallback(text) {
+  return (text.match(/\bN[ºo.]?\s*0*(\d{4,7})\b/i) || [])[1] || "";
+}
+
+function findBarueriRps(lines, text) {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/N[úu]mero RPS/i.test(lines[index])) continue;
+    const sample = lines.slice(index, index + 4).join(" ");
+    const match = sample.match(/\b0*(\d{5,10})\b\s+([A-Z]{2,5})\s+(\d{2}\/\d{2}\/\d{4})/i);
+    if (match) return { number: match[1], series: match[2].toUpperCase(), date: brDateToIso(match[3]) };
+  }
+  const fallback = text.match(/\b0*(\d{5,10})\s+NFSE\s+(\d{2}\/\d{2}\/\d{4})/i);
+  return fallback ? { number: fallback[1], series: "NFSE", date: brDateToIso(fallback[2]) } : null;
+}
+
+function findBarueriServiceItem(lines, text) {
+  for (const line of lines) {
+    const values = [...line.matchAll(/(?:\d{1,3}(?:\.\d{3})*|\d+),\d{2}/g)].map(match => ({ index: match.index, value: parseFiscalMoney(match[0]) }));
+    const code = line.match(/\b(\d{8,9})\b/);
+    if (!code || values.length < 3 || !/^\s*\d+\b/.test(line)) continue;
+    const quantity = Number((line.match(/^\s*(\d+)/) || [])[1] || 1);
+    const rate = values[values.length - 3].value;
+    const unit = values[values.length - 2].value;
+    const total = values[values.length - 1].value;
+    const extractedDescription = line.slice(line.search(/\s/) + 1, code.index).trim() || "Serviço prestado";
+    const description = code[1] === "171001220"
+      ? "Planejamento, organização e administração de feiras, exposições e congêneres"
+      : extractedDescription;
+    return { quantity, description, code: code[1], rate, unit, total };
+  }
+  const code = (text.match(/C[oó]digo Servi[cç]o[\s\S]{0,160}?\b(\d{8,9})\b/i) || [])[1];
+  return code ? { quantity: 1, description: "Serviço prestado", code, rate: 0, unit: 0, total: 0 } : null;
+}
+
+function findBarueriRetentions(lines, text) {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/IRRF/i.test(lines[index]) || !/PIS\/PASEP/i.test(lines[index]) || !/COFINS/i.test(lines[index]) || !/CSLL/i.test(lines[index])) continue;
+    const sample = lines.slice(index + 1, index + 4).join(" ");
+    const values = sample.match(/(?:\d{1,3}(?:\.\d{3})*|\d+),\d{2}/g)?.slice(0, 4).map(parseFiscalMoney);
+    if (values?.length === 4) return { ir: values[0], pis: values[1], cofins: values[2], csll: values[3], inss: 0, other: 0 };
+  }
+  return {
+    ir: findFiscalMoneyNear(text, /Reten[cç][aã]o IRRF[^\n]*/i) || 0,
+    pis: 0, cofins: 0, csll: 0, inss: 0, other: 0
+  };
+}
+
+function findLabeledFiscalMoney(lines, label) {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!label.test(lines[index])) continue;
+    const values = lines.slice(index, index + 3).join(" ").match(/(?:\d{1,3}(?:\.\d{3})*|\d+),\d{2}/g);
+    if (values?.length) return parseFiscalMoney(values[values.length - 1]);
+  }
+  return NaN;
+}
+
+function findFiscalMoneyNear(text, label) {
+  const match = text.match(new RegExp(`${label.source}[^\\d]{0,20}(?:R\\$\\s*)?((?:\\d{1,3}(?:\\.\\d{3})*|\\d+),\\d{2})`, "i"));
+  return match ? parseFiscalMoney(match[1]) : NaN;
+}
+
+function findSectionEntityName(lines, label, cnpj) {
+  const formatted = formatCnpj(cnpj);
+  const start = lines.findIndex(line => label.test(line));
+  for (let index = Math.max(0, start); index < Math.min(lines.length, start + 6); index += 1) {
+    const line = lines[index];
+    if (line.includes(formatted)) {
+      const before = line.slice(0, line.indexOf(formatted)).replace(label, "").trim();
+      if (before.length > 3 && !/^(?:CNPJ|CPF|CNPJ\s*\/\s*CPF|Inscri[cç][aã]o Municipal)$/i.test(before)) return before;
+    }
+  }
+  const sameLine = start >= 0 ? lines[start].replace(label, "").trim() : "";
+  return sameLine.length > 3 ? sameLine : "";
+}
+
+function findBarueriMunicipalRegistration(lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/Inscri[cç][aã]o Municipal/i.test(lines[index])) continue;
+    const sample = lines.slice(index, index + 3).join(" ");
+    const match = sample.match(/\b\d\.[A-Z]{2}\d{3}-\d\b/i);
+    if (match) return match[0].toUpperCase();
+  }
+  return "";
+}
+
+function extractBarueriDescription(lines) {
+  const start = lines.findIndex(line => /DISCRIMINA[CÇ][AÃ]O DOS SERVI[CÇ]OS/i.test(line));
+  const end = lines.findIndex((line, index) => index > start && /VALORES DE REPASSE A TERCEIROS/i.test(line));
+  return start >= 0 ? lines.slice(start + 1, end > start ? end : start + 15).join("\n").trim() : "Serviço prestado";
+}
+
+function validateAbrasfInvoice(invoice, strict) {
+  const retentionTotal = Object.values(invoice.retentions).reduce((sum, value) => sum + Number(value || 0), 0);
+  const expectedNet = roundFiscal(invoice.total - retentionTotal);
+  if (strict && Math.abs(expectedNet - invoice.net) > 0.02) {
+    throw new Error(`Os valores não fecham: bruto ${formatMoney(invoice.total)}, retenções ${formatMoney(retentionTotal)} e líquido ${formatMoney(invoice.net)}.`);
+  }
+  if (strict && invoice.item.rate <= 0) throw new Error("Não foi possível identificar a alíquota do serviço.");
+}
+
+function buildAbrasfCompNfse(invoice) {
+  const v = value => escapeXml(String(value ?? ""));
+  const money = value => Number(value || 0).toFixed(2);
+  const rate = (Number(invoice.item.rate || 0) / 100).toFixed(4);
+  const issue = `${invoice.issueDate}T${invoice.time}-03:00`;
+  const rps = invoice.rps ? `<Rps><IdentificacaoRps><Numero>${v(invoice.rps.number)}</Numero><Serie>${v(invoice.rps.series)}</Serie><Tipo>1</Tipo></IdentificacaoRps><DataEmissao>${v(invoice.rps.date)}</DataEmissao><Status>1</Status></Rps>` : "";
+  const emails = invoice.customer.emails.length ? `<Contato><Email>${v(invoice.customer.emails.join(";"))}</Email></Contato>` : "";
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<CompNfse xmlns="http://www.abrasf.org.br/nfse.xsd"><Nfse versao="2.04"><InfNfse Id="NFSe${v(invoice.number)}"><Numero>${v(invoice.number)}</Numero><CodigoVerificacao>${v(invoice.auth)}</CodigoVerificacao><DataEmissao>${issue}</DataEmissao><ValoresNfse><BaseCalculo>${money(invoice.base)}</BaseCalculo><Aliquota>${rate}</Aliquota><ValorIss>${money(invoice.iss)}</ValorIss><ValorLiquidoNfse>${money(invoice.net)}</ValorLiquidoNfse></ValoresNfse><DescricaoCodigoTributacaoMunicipio>${v(invoice.item.description)}</DescricaoCodigoTributacaoMunicipio><PrestadorServico><RazaoSocial>${v(invoice.provider.name)}</RazaoSocial><Endereco><CodigoMunicipio>3505708</CodigoMunicipio><Uf>SP</Uf></Endereco></PrestadorServico><OrgaoGerador><CodigoMunicipio>3505708</CodigoMunicipio><Uf>SP</Uf></OrgaoGerador><DeclaracaoPrestacaoServico><InfDeclaracaoPrestacaoServico Id="DPS${v(invoice.number)}">${rps}<Competencia>${v(invoice.issueDate)}</Competencia><Servico><Valores><ValorServicos>${money(invoice.total)}</ValorServicos><ValorDeducoes>0.00</ValorDeducoes><ValorPis>${money(invoice.retentions.pis)}</ValorPis><ValorCofins>${money(invoice.retentions.cofins)}</ValorCofins><ValorInss>${money(invoice.retentions.inss)}</ValorInss><ValorIr>${money(invoice.retentions.ir)}</ValorIr><ValorCsll>${money(invoice.retentions.csll)}</ValorCsll><OutrasRetencoes>${money(invoice.retentions.other)}</OutrasRetencoes><ValorIss>${money(invoice.iss)}</ValorIss><Aliquota>${rate}</Aliquota><DescontoIncondicionado>0.00</DescontoIncondicionado><DescontoCondicionado>0.00</DescontoCondicionado></Valores><IssRetido>2</IssRetido><ItemListaServico>${v(serviceListItem(invoice.item.code))}</ItemListaServico><CodigoTributacaoMunicipio>${v(invoice.item.code)}</CodigoTributacaoMunicipio><Discriminacao>${v(invoice.description)}</Discriminacao><CodigoMunicipio>3505708</CodigoMunicipio><ExigibilidadeISS>1</ExigibilidadeISS><MunicipioIncidencia>3505708</MunicipioIncidencia></Servico><Prestador><CpfCnpj><Cnpj>${v(invoice.provider.cnpj)}</Cnpj></CpfCnpj><InscricaoMunicipal>${v(invoice.provider.municipalRegistration)}</InscricaoMunicipal></Prestador><TomadorServico><IdentificacaoTomador><CpfCnpj><Cnpj>${v(invoice.customer.cnpj)}</Cnpj></CpfCnpj></IdentificacaoTomador><RazaoSocial>${v(invoice.customer.name)}</RazaoSocial>${emails}</TomadorServico><OptanteSimplesNacional>2</OptanteSimplesNacional><IncentivoFiscal>2</IncentivoFiscal></InfDeclaracaoPrestacaoServico></DeclaracaoPrestacaoServico></InfNfse></Nfse></CompNfse>`;
+}
+
+function serviceListItem(code) {
+  const digits = onlyDigits(code);
+  return digits.length >= 4 ? `${digits.slice(0, 2)}.${digits.slice(2, 4)}` : code;
+}
+
+function parseFiscalMoney(value) {
+  const parsed = Number(String(value || "").replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function roundFiscal(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+function onlyDigits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function formatCnpj(value) {
+  const digits = onlyDigits(value).padStart(14, "0");
+  return `${digits.slice(0, 2)}.${digits.slice(2, 5)}.${digits.slice(5, 8)}/${digits.slice(8, 12)}-${digits.slice(12)}`;
+}
+
+function brDateToIso(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : "";
 }
 
 async function loadPdfJs() {
