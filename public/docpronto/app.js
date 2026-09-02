@@ -1240,7 +1240,7 @@ async function ensureLocalSignerCompatible(apiBase) {
   } catch {
     throw new Error("O conector local do DOCPronto não está aberto. Baixe o conector atualizado, execute o atualizador e tente novamente.");
   }
-  if (Number(health?.pdfSigningEngine || 0) < 2) {
+  if (Number(health?.pdfSigningEngine || 0) < 3) {
     throw new Error("O conector local está desatualizado e pode corromper PDFs. Baixe o conector atualizado nesta tela, execute o atualizador e tente novamente.");
   }
 }
@@ -1332,12 +1332,19 @@ async function chooseSignaturePlacement(file, label = "Assinatura digital") {
   const canvasRect = canvas.getBoundingClientRect();
   const left = clamp(boxRect.left - canvasRect.left, 0, canvasRect.width - boxRect.width);
   const top = clamp(boxRect.top - canvasRect.top, 0, canvasRect.height - boxRect.height);
+  const viewportLeft = left * viewport.width / canvasRect.width;
+  const viewportTop = top * viewport.height / canvasRect.height;
+  const viewportRight = (left + boxRect.width) * viewport.width / canvasRect.width;
+  const viewportBottom = (top + boxRect.height) * viewport.height / canvasRect.height;
+  const firstPoint = viewport.convertToPdfPoint(viewportLeft, viewportTop);
+  const secondPoint = viewport.convertToPdfPoint(viewportRight, viewportBottom);
   return {
     page: pageNumber,
-    x: left / scale,
-    y: (canvasRect.height - top - boxRect.height) / scale,
-    width: boxRect.width / scale,
-    height: boxRect.height / scale
+    x: Math.min(firstPoint[0], secondPoint[0]),
+    y: Math.min(firstPoint[1], secondPoint[1]),
+    width: Math.abs(secondPoint[0] - firstPoint[0]),
+    height: Math.abs(secondPoint[1] - firstPoint[1]),
+    coordinateSystem: "pdf-points-v2"
   };
 }
 

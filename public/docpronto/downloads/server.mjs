@@ -75,7 +75,7 @@ async function handleApi(request, response, requested) {
   }
   try {
     if (request.method === "GET" && requested === "/api/health") {
-      writeJson(response, 200, { ok: true, service: "DocPronto local", version: "2.0.0", pdfSigningEngine: 2 });
+      writeJson(response, 200, { ok: true, service: "DocPronto local", version: "3.0.0", pdfSigningEngine: 3 });
       return;
     }
     if (request.method === "GET" && requested === "/api/certificates") {
@@ -279,6 +279,9 @@ async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase
   const cleanThumbprint = String(thumbprint || "").replace(/\s/g, "");
   if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione um certificado instalado valido.");
   if (!contentBase64 || typeof contentBase64 !== "string") throw new Error("Arquivo nao informado para assinatura.");
+  if (placement?.coordinateSystem !== "pdf-points-v2") {
+    throw new Error("A tela de posicionamento está desatualizada. Feche todas as abas do DOCPronto, abra novamente e escolha a posição da assinatura.");
+  }
   const pdf = Buffer.from(contentBase64, "base64");
   if (pdf.subarray(0, 5).toString("latin1") !== "%PDF-") throw new Error("A assinatura embutida esta disponivel para PDF.");
   debugLog(`sign-pdf-installed:pdf-bytes:${pdf.length}`);
@@ -410,7 +413,7 @@ function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placement }) {
   const longestLine = Math.max(...visibleText.map(text => estimateHelveticaWidth(text)));
   const fontByWidth = (appearanceWidth - appearanceMargin * 2) / Math.max(1, longestLine);
   const fontByHeight = (appearanceHeight - appearanceMargin * 2) / (visibleText.length * 1.25);
-  const appearanceFontSize = Math.max(4, Math.min(10, fontByWidth, fontByHeight));
+  const appearanceFontSize = Math.max(2.5, Math.min(10, fontByWidth, fontByHeight));
   const appearanceLineHeight = appearanceFontSize * 1.25;
   const firstBaseline = appearanceHeight - appearanceMargin - appearanceFontSize;
   const appearanceStream = [
@@ -590,8 +593,8 @@ function normalizeSignaturePlacement(placement) {
   return {
     x: Number.isFinite(x) ? Math.max(0, x) : 300,
     y: Number.isFinite(y) ? Math.max(0, y) : 92,
-    width: Number.isFinite(width) ? Math.min(460, Math.max(60, width)) : 290,
-    height: Number.isFinite(height) ? Math.min(180, Math.max(24, height)) : 78
+    width: Number.isFinite(width) ? Math.min(460, Math.max(1, width)) : 290,
+    height: Number.isFinite(height) ? Math.min(180, Math.max(1, height)) : 78
   };
 }
 
