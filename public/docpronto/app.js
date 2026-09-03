@@ -1978,10 +1978,11 @@ function parseNationalNfse(lines, text) {
   const auth = (text.match(/\bNFS\d{35,60}\b/) || [])[0] || findValueAfterLabel(lines, /C[oó]digo de Autenticidade/i, /^\d{20,70}$/);
   const issueRaw = findValueAfterLabel(lines, /Data e Hora da emiss[aã]o da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || findValueAfterLabel(lines, /Data e Hora da emiss[aã]o do DPS/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/);
   const competenceRaw = findValueAfterLabel(lines, /Compet[eê]ncia da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}$/);
-  const total = findFiscalLineValue(lines, /Valor do Servi[cç]o/i);
+  const municipalGrid = isCriciuma ? parseCriciumaMunicipalGrid(lines) : null;
+  const total = municipalGrid?.total ?? findFiscalLineValue(lines, /Valor do Servi[cç]o/i);
   const net = findFiscalLineValue(lines, /Valor L[ií]quido(?: da NFS-e)?/i);
-  let deductions = findFiscalLineValue(lines, /(?:Total Dedu[cç][oõ]es\/Redu[cç][oõ]es|Dedu[cç][oõ]es)/i, 0);
-  const base = findFiscalLineValue(lines, /BC ISSQN|Base de C[aá]lculo/i, total - deductions);
+  let deductions = municipalGrid?.deductions ?? findFiscalLineValue(lines, /(?:Total Dedu[cç][oõ]es\/Redu[cç][oõ]es|Dedu[cç][oõ]es)/i, 0);
+  const base = municipalGrid?.base ?? findFiscalLineValue(lines, /BC ISSQN|Base de C[aá]lculo/i, total - deductions);
   // DANFSe prints the labels in one row and their amounts in another. Some
   // browser/PDF combinations split those rows differently and can associate
   // the base amount with the deductions label. The base and service total are
@@ -1991,8 +1992,8 @@ function parseNationalNfse(lines, text) {
     if (!Number.isFinite(deductions) || Math.abs(roundFiscal(total - deductions) - base) > 0.02) deductions = derivedDeductions;
   }
   const taxes = isNovoHamburgo ? parseNationalTaxTable(lines) : parseCriciumaTaxes(lines);
-  const rate = Number.isFinite(taxes._issRate) ? taxes._issRate : findFiscalLineValue(lines, /Al[ií]quota (?:Aplicada|ISSQN)/i);
-  const iss = Number.isFinite(taxes._iss) ? taxes._iss : findFiscalLineValue(lines, /ISSQN (?:Apurado|Retido)|^ISSQN\b/i, roundFiscal(base * rate / 100));
+  const rate = municipalGrid?.rate ?? (Number.isFinite(taxes._issRate) ? taxes._issRate : findFiscalLineValue(lines, /Al[ií]quota (?:Aplicada|ISSQN)/i));
+  const iss = municipalGrid?.iss ?? (Number.isFinite(taxes._iss) ? taxes._iss : findFiscalLineValue(lines, /ISSQN (?:Apurado|Retido)|^ISSQN\b/i, roundFiscal(base * rate / 100)));
   delete taxes._issRate;
   delete taxes._iss;
   const code = (serviceSection.match(/C[oó]digo de Tributa[cç][aã]o Nacional[\s\S]{0,160}?\b(\d{2}[.]?\d{2}[.]?\d{2}|\d{6})\b/i) || serviceSection.match(/\b(\d{2}[.]\d{2}[.]\d{2}|\d{6})\b/) || [])[1] || "";
@@ -2007,6 +2008,58 @@ function parseNationalNfse(lines, text) {
     simple: /Simples Nacional[\s\S]{0,100}(?:Sim|Optante)/i.test(providerSection) && !/N[aã]o Optante/i.test(providerSection), exigibility: 1, incentive: false,
     substitutedNumber: null, rps: parseNationalRps(lines)
   };
+}
+
+function parseCriciumaMunicipalGrid(lines) {
+  const serviceHeader = lines.findIndex(line => {
+    const text = stripLayoutMarkers(line);
+    return /Valor\s+do\s+Servi[cç]o/i.test(text) && /Total\s+Dedu[cç][oõ]es\/Redu[cç][oõ]es/i.test(text);
+  });
+  const taxHeader = lines.findIndex(line => {
+    const text = stripLayoutMarkers(line);
+    return /BC\s+ISSQN/i.test(text) && /Al[ií]quota\s+Aplicada/i.test(text) && /ISSQN\s+Apurado/i.test(text);
+  });
+  if (serviceHeader < 0 || taxHeader < 0) return null;
+
+  const serviceAnchors = findGridAnchors(lines[serviceHeader], [/^Valor\b/i, /^Desconto\b/i, /^Total\b/i, /^C[aá]lculo\b/i]);
+  const taxAnchors = findGridAnchors(lines[taxHeader], [/^BC\b/i, /^Al[ií]quota\b/i, /^Reten[cç][aã]o\b/i, /^ISSQN\b/i], true);
+  const serviceValues = readGridValueRow(lines, serviceHeader, serviceAnchors);
+  const taxValues = readGridValueRow(lines, taxHeader, taxAnchors);
+  if (!serviceValues || !taxValues) return null;
+
+  const total = parseGridMoney(serviceValues[0]);
+  const deductions = parseGridMoney(serviceValues[2], 0);
+  const base = parseGridMoney(taxValues[0]);
+  const rate = parseGridMoney(taxValues[1]);
+  const iss = parseGridMoney(taxValues[3]);
+  return [total, deductions, base, rate, iss].every(Number.isFinite) ? { total, deductions, base, rate, iss } : null;
+}
+
+function findGridAnchors(line, patterns, lastIss = false) {
+  const cells = splitLayoutCells(line);
+  return patterns.map((pattern, index) => {
+    const matches = cells.filter(cell => pattern.test(cell.text));
+    if (!matches.length) return NaN;
+    return lastIss && index === patterns.length - 1 ? matches[matches.length - 1].x : matches[0].x;
+  });
+}
+
+function readGridValueRow(lines, headerIndex, anchors) {
+  if (!anchors.every(Number.isFinite)) return null;
+  for (const line of lines.slice(headerIndex + 1, headerIndex + 4)) {
+    const cells = splitLayoutCells(line);
+    if (!cells.some(cell => /\d[,.]\d{2}|^-$/i.test(cell.text))) continue;
+    return anchors.map((start, index) => {
+      const end = anchors[index + 1] ?? Infinity;
+      return cells.filter(cell => cell.x >= start - 3 && cell.x < end - 3).map(cell => cell.text).join(" ");
+    });
+  }
+  return null;
+}
+
+function parseGridMoney(value, fallback = NaN) {
+  const match = String(value || "").match(/-?(?:\d{1,3}(?:\.\d{3})*|\d+)[,.]\d{2}/);
+  return match ? parseFlexibleFiscalMoney(match[0]) : fallback;
 }
 
 function fiscalSection(text, startPattern, endPattern) {
@@ -2331,7 +2384,9 @@ function validateAbrasfInvoice(invoice, strict) {
   if (strict && Number.isFinite(invoice.base) && Number.isFinite(invoice.deductions) && Math.abs(roundFiscal(invoice.total - invoice.deductions) - invoice.base) > 0.02) {
     throw new Error(`Valor do serviço (${formatMoney(invoice.total)}), deduções (${formatMoney(invoice.deductions)}) e base de cálculo (${formatMoney(invoice.base)}) não conferem.`);
   }
-  if (strict && Number.isFinite(invoice.iss) && Math.abs(roundFiscal(invoice.base * invoice.item.rate / 100) - invoice.iss) > 0.02) throw new Error("Base, alíquota e ISSQN não conferem.");
+  if (strict && Number.isFinite(invoice.iss) && Math.abs(roundFiscal(invoice.base * invoice.item.rate / 100) - invoice.iss) > 0.02) {
+    throw new Error(`Base (${formatMoney(invoice.base)}), alíquota (${Number(invoice.item.rate).toFixed(2)}%) e ISSQN (${formatMoney(invoice.iss)}) não conferem.`);
+  }
 }
 
 function buildAbrasfCompNfse(invoice) {
