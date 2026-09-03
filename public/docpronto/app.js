@@ -2084,12 +2084,17 @@ function findFiscalLineValue(lines, label, fallback = NaN) {
     if (partIndex < 0) continue;
     const labelCell = cells[partIndex];
     const matchedLabel = labelCell.text.match(label)?.[0] || "";
-    const candidates = [labelCell.text.slice(labelCell.text.indexOf(matchedLabel) + matchedLabel.length), ...cells.slice(partIndex + 1).map(cell => cell.text)];
+    const candidates = [labelCell.text.slice(labelCell.text.indexOf(matchedLabel) + matchedLabel.length)];
     for (const nextLine of lines.slice(lineIndex + 1, lineIndex + 4)) {
       const nextCells = splitLayoutCells(nextLine);
       const nearest = [...nextCells].sort((a, b) => Math.abs(a.x - labelCell.x) - Math.abs(b.x - labelCell.x))[0];
-      if (nearest) candidates.unshift(nearest.text);
+      // PDF.js preserves each column's horizontal position. Keep the rows in
+      // reading order: reversing them could associate a later field (for
+      // example BC ISSQN) with Total Deducoes from the row above.
+      if (nearest) candidates.push(nearest.text);
     }
+    // Some municipal PDFs print label and amount on the same baseline.
+    candidates.push(...cells.slice(partIndex + 1).map(cell => cell.text));
     for (const candidate of candidates) {
       const match = candidate.match(/-?(?:\d{1,3}(?:\.\d{3})*|\d+)[,.]\d{2}/);
       if (match) return parseFlexibleFiscalMoney(match[0]);
