@@ -1135,7 +1135,7 @@ function editableLayoutDocumentXml(pages) {
 
 async function convertWithLocalOffice(file, endpoint) {
   const fileBytes = new Uint8Array(await file.arrayBuffer());
-  const response = await fetch(`${localSignerApiBase()}/api/${endpoint}`, {
+  const response = await localConnectorFetch(`/api/${endpoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1188,7 +1188,7 @@ async function signWithInstalledCertificate(file) {
   const pdfMode = /\.pdf$/i.test(file.name);
   const placement = pdfMode ? await chooseSignaturePlacement(file) : null;
   if (pdfMode) fileBytes = await normalizePdfForEmbeddedSignature(fileBytes);
-  const response = await fetch(`${apiBase}/api/${pdfMode ? "sign-pdf-installed" : "sign-installed"}`, {
+  const response = await localConnectorFetch(`/api/${pdfMode ? "sign-pdf-installed" : "sign-installed"}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1211,12 +1211,12 @@ async function signWithInstalledCertificate(file) {
 async function ensureLocalSignerCompatible(apiBase) {
   let health;
   try {
-    const response = await fetch(`${apiBase}/api/health`, { cache: "no-store" });
+    const response = await localConnectorFetch("/api/health", { cache: "no-store" });
     health = await response.json();
   } catch {
     throw new Error("O conector local do DOCPronto não está aberto. Baixe o conector atualizado, execute o atualizador e tente novamente.");
   }
-  if (Number(health?.pdfSigningEngine || 0) < 3) {
+  if (Number(health?.pdfSigningEngine || 0) < 4) {
     throw new Error("O conector local está desatualizado e pode corromper PDFs. Baixe o conector atualizado nesta tela, execute o atualizador e tente novamente.");
   }
 }
@@ -1409,7 +1409,7 @@ async function fetchWindowsCertificates(timeoutMs = 2500) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${localSignerApiBase()}/api/certificates`, { signal: controller.signal });
+    const response = await localConnectorFetch("/api/certificates", { signal: controller.signal });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "Serviço local indisponível.");
     return result.certificates || [];
@@ -1444,6 +1444,31 @@ function filterCertificateOptions(event) {
 
 function localSignerApiBase() {
   return ["localhost", "127.0.0.1"].includes(window.location.hostname) ? "" : "http://127.0.0.1:4174";
+}
+
+let localConnectorToken = "";
+
+async function localConnectorFetch(path, options = {}) {
+  const apiBase = localSignerApiBase();
+  if (!localConnectorToken) {
+    const sessionResponse = await fetch(`${apiBase}/api/session`, { cache: "no-store" });
+    const session = await sessionResponse.json().catch(() => ({}));
+    if (!sessionResponse.ok || !session.token) throw new Error(session.error || "Não foi possível iniciar uma sessão segura com o conector local.");
+    localConnectorToken = session.token;
+  }
+  const headers = new Headers(options.headers || {});
+  headers.set("X-DocPronto-Token", localConnectorToken);
+  let response = await fetch(`${apiBase}${path}`, { ...options, headers });
+  if (response.status === 401) {
+    localConnectorToken = "";
+    const sessionResponse = await fetch(`${apiBase}/api/session`, { cache: "no-store" });
+    const session = await sessionResponse.json().catch(() => ({}));
+    if (!sessionResponse.ok || !session.token) return response;
+    localConnectorToken = session.token;
+    headers.set("X-DocPronto-Token", session.token);
+    response = await fetch(`${apiBase}${path}`, { ...options, headers });
+  }
+  return response;
 }
 
 async function signPdfWithWrittenSignature(file, placement = null) {

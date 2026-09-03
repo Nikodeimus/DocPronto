@@ -3,11 +3,20 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { tmpdir } from "node:os";
 import vm from "node:vm";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
+const connectorToken = randomBytes(32).toString("base64url");
+const allowedOrigins = new Set([
+  "https://docpronto-online.podpapiruscast.chatgpt.site",
+  "http://127.0.0.1:4173",
+  "http://localhost:4173",
+  "http://127.0.0.1:4174",
+  "http://localhost:4174"
+]);
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -64,9 +73,24 @@ createServer(async (request, response) => {
 });
 
 async function handleApi(request, response, requested) {
-  response.setHeader("Access-Control-Allow-Origin", "*");
+  const host = String(request.headers.host || "").toLowerCase();
+  const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+  if (!allowedHosts.has(host)) {
+    writeJson(response, 403, { error: "Host local inválido." });
+    return;
+  }
+  const origin = String(request.headers.origin || "");
+  if (origin && !allowedOrigins.has(origin)) {
+    writeJson(response, 403, { error: "Origem não autorizada a acessar o conector local." });
+    return;
+  }
+  if (origin) response.setHeader("Access-Control-Allow-Origin", origin);
+  response.setHeader("Vary", "Origin");
   response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-DocPronto-Token");
+  if (request.headers["access-control-request-private-network"] === "true") {
+    response.setHeader("Access-Control-Allow-Private-Network", "true");
+  }
   response.setHeader("Cache-Control", "no-store");
   if (request.method === "OPTIONS") {
     response.writeHead(204);
@@ -74,10 +98,16 @@ async function handleApi(request, response, requested) {
     return;
   }
   try {
-    if (request.method === "GET" && requested === "/api/health") {
-      writeJson(response, 200, { ok: true, service: "DocPronto local", version: "3.0.0", pdfSigningEngine: 3 });
+    if (request.method === "GET" && requested === "/api/session") {
+      writeJson(response, 200, { token: connectorToken, expires: "process" });
       return;
     }
+    if (request.method === "GET" && requested === "/api/health") {
+      requireConnectorToken(request);
+      writeJson(response, 200, { ok: true, service: "DocPronto local", version: "4.0.0", pdfSigningEngine: 4 });
+      return;
+    }
+    requireConnectorToken(request);
     if (request.method === "GET" && requested === "/api/certificates") {
       writeJson(response, 200, { certificates: await listWindowsCertificates() });
       return;
@@ -100,7 +130,18 @@ async function handleApi(request, response, requested) {
     }
     writeJson(response, 404, { error: "API nao encontrada." });
   } catch (error) {
-    writeJson(response, 400, { error: error.message || "Falha ao processar assinatura local." });
+    writeJson(response, Number(error.statusCode || 400), { error: error.message || "Falha ao processar assinatura local." });
+  }
+}
+
+function requireConnectorToken(request) {
+  const supplied = String(request.headers["x-docpronto-token"] || "");
+  const expected = Buffer.from(connectorToken);
+  const received = Buffer.from(supplied);
+  if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
+    const error = new Error("Sessão do conector inválida. Reabra o DOCPronto pelo iniciador do Windows.");
+    error.statusCode = 401;
+    throw error;
   }
 }
 
@@ -191,7 +232,10 @@ function readJsonBody(request) {
     request.setEncoding("utf8");
     request.on("data", chunk => {
       data += chunk;
-      if (data.length > 80 * 1024 * 1024) reject(new Error("Arquivo grande demais para assinatura local."));
+      if (data.length > 80 * 1024 * 1024) {
+        reject(new Error("Arquivo grande demais para assinatura local."));
+        request.destroy();
+      }
     });
     request.on("end", () => {
       try {
@@ -307,12 +351,14 @@ async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase
   ]);
   debugLog(`sign-pdf-installed:signing-bytes:${signedBytes.length}`);
   const signatureBase64 = await signBufferWithWindowsCertificate(cleanThumbprint, signedBytes);
+  await verifyDetachedWindowsSignature(cleanThumbprint, signedBytes, signatureBase64);
   debugLog(`sign-pdf-installed:signature-base64:${signatureBase64.length}`);
   const signatureHex = Buffer.from(signatureBase64, "base64").toString("hex").toUpperCase();
   if (signatureHex.length > prepared.placeholderHexLength) throw new Error("Assinatura maior que o espaco reservado no PDF.");
   debugLog(`sign-pdf-installed:hex:${signatureHex.length}:${prepared.placeholderHexLength}:${prepared.contentsHexStart}`);
   const output = Buffer.from(prepared.pdf);
   output.write(signatureHex.padEnd(prepared.placeholderHexLength, "0"), prepared.contentsHexStart, "ascii");
+  await validateSignedPdfOutput(output, prepared.byteRange, placement);
   debugLog(`sign-pdf-installed:output-ready:${output.length}`);
   return {
     filename: `${baseName(filename)}-assinado.pdf`,
@@ -320,21 +366,92 @@ async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase
   };
 }
 
-async function normalizePdfForSignature(pdf) {
+async function verifyDetachedWindowsSignature(thumbprint, content, signatureBase64) {
+  const tempDir = await mkdtemp(join(tmpdir(), "docpronto-verify-"));
+  const contentPath = join(tempDir, "content.bin");
+  const signaturePath = join(tempDir, "signature.p7s");
+  try {
+    await writeFile(contentPath, content);
+    await writeFile(signaturePath, Buffer.from(signatureBase64, "base64"));
+    const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
+$content = [System.IO.File]::ReadAllBytes($env:DOCPRONTO_VERIFY_CONTENT)
+$signature = [System.IO.File]::ReadAllBytes($env:DOCPRONTO_VERIFY_SIGNATURE)
+$cms = [System.Security.Cryptography.Pkcs.SignedCms]::new([System.Security.Cryptography.Pkcs.ContentInfo]::new($content), $true)
+$cms.Decode($signature)
+$cms.CheckSignature($true)
+if ($cms.SignerInfos.Count -ne 1) { throw 'Quantidade inesperada de assinantes.' }
+$actual = ($cms.SignerInfos[0].Certificate.Thumbprint -replace '\\s', '').ToUpperInvariant()
+$expected = ($env:DOCPRONTO_CERT_THUMBPRINT -replace '\\s', '').ToUpperInvariant()
+if ($actual -ne $expected) { throw 'O certificado da assinatura não corresponde ao certificado escolhido.' }
+`;
+    await runPowerShell(script, {
+      DOCPRONTO_VERIFY_CONTENT: contentPath,
+      DOCPRONTO_VERIFY_SIGNATURE: signaturePath,
+      DOCPRONTO_CERT_THUMBPRINT: thumbprint
+    }, 30000);
+  } catch (error) {
+    throw new Error(`A assinatura criptográfica não passou na verificação local: ${error.message || "assinatura inválida"}.`);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function validateSignedPdfOutput(output, expectedByteRange, placement) {
+  if (output.subarray(0, 5).toString("latin1") !== "%PDF-" || !/%%EOF\s*$/.test(output.toString("latin1"))) {
+    throw new Error("O PDF assinado não possui início ou término válidos.");
+  }
+  const source = output.toString("latin1");
+  const rangeMatches = [...source.matchAll(/\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/g)];
+  const range = rangeMatches.at(-1)?.slice(1).map(Number);
+  if (!range || range.length !== 4 || range.some(value => !Number.isSafeInteger(value) || value < 0)) {
+    throw new Error("O PDF assinado não contém ByteRange válido.");
+  }
+  if (range.some((value, index) => value !== expectedByteRange[index]) || range[0] !== 0 || range[1] >= range[2] || range[2] + range[3] !== output.length) {
+    throw new Error("A cobertura criptográfica do PDF assinado está incompleta.");
+  }
+  const excluded = output.subarray(range[1], range[2]).toString("ascii");
+  if (!/^<([0-9A-F]{2})+0*>$/.test(excluded)) throw new Error("O conteúdo criptográfico embutido no PDF está inválido.");
+
+  const PDFLib = await loadLocalPdfLibrary();
+  let document;
+  try {
+    document = await PDFLib.PDFDocument.load(output, { ignoreEncryption: false, throwOnInvalidObject: true, updateMetadata: false });
+  } catch (error) {
+    throw new Error(`O PDF produzido não pôde ser reaberto: ${error.message || "estrutura inválida"}.`);
+  }
+  const pageNumber = Number(placement?.page || 1);
+  if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > document.getPageCount()) throw new Error("A página escolhida para a assinatura não existe no PDF final.");
+  const page = document.getPage(pageNumber - 1);
+  const crop = typeof page.getCropBox === "function" ? page.getCropBox() : { x: 0, y: 0, ...page.getSize() };
+  const rect = normalizeSignaturePlacement(placement);
+  const tolerance = 0.5;
+  if (rect.x < crop.x - tolerance || rect.y < crop.y - tolerance || rect.x + rect.width > crop.x + crop.width + tolerance || rect.y + rect.height > crop.y + crop.height + tolerance) {
+    throw new Error("A assinatura ficou fora da área visível da página e o PDF não foi liberado.");
+  }
+}
+
+async function loadLocalPdfLibrary() {
   const libraryPath = join(root, "vendor", "pdf-lib.min.js");
   if (!existsSync(libraryPath)) throw new Error("O normalizador local de PDF não foi encontrado. Atualize o conector do DOCPronto.");
+  const code = await readFile(libraryPath, "utf8");
+  const sandbox = {
+    exports: {}, module: { exports: {} }, console,
+    setTimeout, clearTimeout, Uint8Array, ArrayBuffer, TextEncoder, TextDecoder
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.window = sandbox;
+  sandbox.self = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: "pdf-lib.min.js" });
+  const PDFLib = sandbox.exports;
+  if (!PDFLib?.PDFDocument) throw new Error("Biblioteca de PDF indisponível.");
+  return PDFLib;
+}
+
+async function normalizePdfForSignature(pdf) {
   try {
-    const code = await readFile(libraryPath, "utf8");
-    const sandbox = {
-      exports: {}, module: { exports: {} }, console,
-      setTimeout, clearTimeout, Uint8Array, ArrayBuffer, TextEncoder, TextDecoder
-    };
-    sandbox.globalThis = sandbox;
-    sandbox.window = sandbox;
-    sandbox.self = sandbox;
-    vm.runInNewContext(code, sandbox, { filename: "pdf-lib.min.js" });
-    const PDFLib = sandbox.exports;
-    if (!PDFLib?.PDFDocument) throw new Error("Biblioteca de PDF indisponível.");
+    const PDFLib = await loadLocalPdfLibrary();
     const document = await PDFLib.PDFDocument.load(pdf, {
       ignoreEncryption: false,
       throwOnInvalidObject: false,
