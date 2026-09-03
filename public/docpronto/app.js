@@ -1980,8 +1980,16 @@ function parseNationalNfse(lines, text) {
   const competenceRaw = findValueAfterLabel(lines, /Compet[eê]ncia da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}$/);
   const total = findFiscalLineValue(lines, /Valor do Servi[cç]o/i);
   const net = findFiscalLineValue(lines, /Valor L[ií]quido(?: da NFS-e)?/i);
-  const deductions = findFiscalLineValue(lines, /(?:Total Dedu[cç][oõ]es\/Redu[cç][oõ]es|Dedu[cç][oõ]es)/i, 0);
+  let deductions = findFiscalLineValue(lines, /(?:Total Dedu[cç][oõ]es\/Redu[cç][oõ]es|Dedu[cç][oõ]es)/i, 0);
   const base = findFiscalLineValue(lines, /BC ISSQN|Base de C[aá]lculo/i, total - deductions);
+  // DANFSe prints the labels in one row and their amounts in another. Some
+  // browser/PDF combinations split those rows differently and can associate
+  // the base amount with the deductions label. The base and service total are
+  // the authoritative pair for the ABRASF deduction in these mapped layouts.
+  if (Number.isFinite(total) && Number.isFinite(base)) {
+    const derivedDeductions = roundFiscal(Math.max(0, total - base));
+    if (!Number.isFinite(deductions) || Math.abs(roundFiscal(total - deductions) - base) > 0.02) deductions = derivedDeductions;
+  }
   const taxes = isNovoHamburgo ? parseNationalTaxTable(lines) : parseCriciumaTaxes(lines);
   const rate = Number.isFinite(taxes._issRate) ? taxes._issRate : findFiscalLineValue(lines, /Al[ií]quota (?:Aplicada|ISSQN)/i);
   const iss = Number.isFinite(taxes._iss) ? taxes._iss : findFiscalLineValue(lines, /ISSQN (?:Apurado|Retido)|^ISSQN\b/i, roundFiscal(base * rate / 100));
@@ -2320,7 +2328,9 @@ function validateAbrasfInvoice(invoice, strict) {
     throw new Error(`Os valores não fecham: bruto ${formatMoney(invoice.total)}, retenções ${formatMoney(retentionTotal)} e líquido ${formatMoney(invoice.net)}.`);
   }
   if (strict && (!Number.isFinite(invoice.item.rate) || invoice.item.rate <= 0)) throw new Error("Não foi possível identificar a alíquota do serviço.");
-  if (strict && Number.isFinite(invoice.base) && Number.isFinite(invoice.deductions) && Math.abs(roundFiscal(invoice.total - invoice.deductions) - invoice.base) > 0.02) throw new Error("Valor do serviço, deduções e base de cálculo não conferem.");
+  if (strict && Number.isFinite(invoice.base) && Number.isFinite(invoice.deductions) && Math.abs(roundFiscal(invoice.total - invoice.deductions) - invoice.base) > 0.02) {
+    throw new Error(`Valor do serviço (${formatMoney(invoice.total)}), deduções (${formatMoney(invoice.deductions)}) e base de cálculo (${formatMoney(invoice.base)}) não conferem.`);
+  }
   if (strict && Number.isFinite(invoice.iss) && Math.abs(roundFiscal(invoice.base * invoice.item.rate / 100) - invoice.iss) > 0.02) throw new Error("Base, alíquota e ISSQN não conferem.");
 }
 
