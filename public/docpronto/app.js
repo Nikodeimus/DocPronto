@@ -24,7 +24,7 @@ const tools = [
   { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDFs, inclusive digitalizações, em texto editável no Word usando OCR.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "Em documentos escaneados, o OCR pode demorar alguns minutos. O modo de texto editável nunca insere a página como imagem.", action: pdfToWord },
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
   { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature },
-  { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta NFS-e de Barueri em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: false, option: "pdf-xml-abrasf", warning: "Motor inicial validado com NFS-e de Barueri. O XML é reconstruído e não substitui o arquivo fiscal original assinado pelo município.", action: pdfToAbrasfXml }
+  { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta NFS-e de diferentes municípios em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: false, option: "pdf-xml-abrasf", warning: "O XML é reconstruído a partir do documento auxiliar e não substitui o arquivo fiscal original assinado pelo município.", action: pdfToAbrasfXml }
 ];
 
 const elements = {
@@ -224,7 +224,7 @@ function renderOptions(type) {
     "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — funciona online</option><option value="installed">Certificado instalado no Windows — requer conector local</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">O Chrome mostra certificados no gov.br porque aquele serviço solicita autenticação por certificado. Para assinar qualquer arquivo com o certificado do Windows, mantenha o conector do DOCPronto aberto e atualizado. <a href="/docpronto/downloads/DOCPronto-Conector-Windows.zip" download>Baixar ou atualizar o conector</a>.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em conectar e carregar</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Conectar e carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`,
-    "pdf-xml-abrasf": `<div class="notice visible">O motor identifica os campos da NFS-e, separa PIS, COFINS, IR e CSLL, confere o valor líquido e gera a estrutura CompNfse do padrão ABRASF 2.04.</div><label><input id="abrasfStrictValidation" type="checkbox" checked> Bloquear o XML se os totais não fecharem</label><small>Nesta primeira versão, são aceitas NFS-e emitidas pelo sistema próprio da Prefeitura de Barueri.</small>`
+    "pdf-xml-abrasf": `<div class="notice visible">O motor reconhece layouts de Barueri, São José do Rio Preto e DANFSe/NFS-e Nacional, identifica prestador e tomador por seção, confere retenções e gera CompNfse ABRASF 2.04.</div><label><input id="abrasfStrictValidation" type="checkbox" checked> Bloquear o XML se os totais não fecharem</label><small>Municípios validados nesta versão: Barueri/SP, São José do Rio Preto/SP, Criciúma/SC e Novo Hamburgo/RS.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
   if (type === "digital-sign") bindDigitalSignOptions();
@@ -362,7 +362,7 @@ async function imagesToPdf(files) {
       : await document.embedJpg(bytes);
     const pageWidth = 595.28;
     const pageHeight = 841.89;
-    const scale = Math.min((pageWidth - 60) / image.width, (pageHeight - 60) / image.height);
+    const scale = Math.min(1, (pageWidth - 60) / image.width, (pageHeight - 60) / image.height);
     const width = image.width * scale;
     const height = image.height * scale;
     const page = document.addPage([pageWidth, pageHeight]);
@@ -433,7 +433,6 @@ async function createRenderedDocxPdf(file) {
     for (let index = 0; index < renderedPages.length; index += 1) {
       showStatus(`Renderizando página ${index + 1} de ${renderedPages.length} com alta fidelidade...`);
       const section = renderedPages[index];
-      normalizeRenderedDocxPage(section);
       const canvas = await window.html2canvas(section, {
         backgroundColor: "#ffffff",
         scale: 2,
@@ -445,13 +444,12 @@ async function createRenderedDocxPdf(file) {
         windowHeight: Math.max(1000, section.scrollHeight + 100)
       });
       const png = await pdf.embedPng(canvas.toDataURL("image/png"));
-      const pageWidth = 595.28;
-      const pageHeight = 841.89;
-      const scale = Math.min(pageWidth / png.width, pageHeight / png.height);
-      const width = png.width * scale;
-      const height = png.height * scale;
+      const pageWidth = section.scrollWidth * 0.75;
+      const pageHeight = section.scrollHeight * 0.75;
+      const width = pageWidth;
+      const height = pageHeight;
       const page = pdf.addPage([pageWidth, pageHeight]);
-      page.drawImage(png, { x: (pageWidth - width) / 2, y: pageHeight - height, width, height });
+      page.drawImage(png, { x: 0, y: 0, width, height });
     }
     return pdf.save();
   } finally {
@@ -772,15 +770,8 @@ async function pdfRasterEngine(file) {
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: context, viewport }).promise;
-      const region = {
-        x: Math.round(canvas.width * 0.085),
-        y: Math.round(canvas.height * (pageNumber === 1 ? 0.195 : 0.185)),
-        // Stop before the vertical JUCESP validation strip. The strip is an
-        // official graphic layer, not editable body text.
-        width: Math.round(canvas.width * 0.79),
-        height: Math.round(canvas.height * 0.755)
-      };
-      pages.push({ pageNumber, pageCount: pdf.numPages, canvas, region });
+      const region = { x: Math.round(canvas.width * 0.025), y: Math.round(canvas.height * 0.025), width: Math.round(canvas.width * 0.95), height: Math.round(canvas.height * 0.95) };
+      pages.push({ pageNumber, pageCount: pdf.numPages, canvas, region, pageWidth: base.width, pageHeight: base.height });
       page.cleanup();
     }
   } finally {
@@ -841,27 +832,17 @@ function documentDecisionEngine(extractedPages) {
   });
 }
 
-function classifyOcrCandidate(candidate, pageNumber) {
+function classifyOcrCandidate(candidate) {
   const text = cleanOcrLine(candidate.text);
   const letters = (text.match(/[A-Za-zÀ-ÿ]/g) || []).length;
   const useful = (text.match(/[A-Za-zÀ-ÿ0-9]/g) || []).length;
   const suspicious = (text.match(/[|_=<>~`^*{}\[\]\\]/g) || []).length;
   if (!text || useful < 3 || candidate.confidence < 58) return "noise";
-  // Never place editable text over the official validation strip.
-  if (candidate.x >= 515) return "protected";
   if (text.length <= 3 && !/^\d{1,3}[ªº]?$/i.test(text)) return "noise";
   if (suspicious > 1 || useful / Math.max(text.length, 1) < 0.55) return "noise";
   const legalAnchor = /\b(?:cláusula|parágrafo|contrato|sócio|sociedade|assinad[oa]|alteração|capital|administração|foro|responsabilidade)\b/i.test(text);
   const wordLikeTokens = text.split(/\s+/).filter(token => /^[A-Za-zÀ-ÿ]{4,}$/.test(token)).length;
   if (text.length < 24 && !legalAnchor && wordLikeTokens < 2) return "noise";
-  // These are visual/authentication objects in official registry documents.
-  // Keeping them in the background prevents stamps and signatures from being
-  // erased and prevents their dots/lines from becoming editable gibberish.
-  if (/\b(?:JUCESP|ICP\s*Brasil|MANIFESTO DE ASSINATURAS|SECRETARIA GERAL|PROTOCOLO)\b/i.test(text)) return "protected";
-  // The lower half of page 4 is the signature/authentication zone. It contains
-  // a handwritten signature, registry stamps and seals; none of it is legal
-  // body text and it must survive pixel-for-pixel.
-  if (pageNumber === 4 && candidate.y > 500) return "protected";
   return letters || /\d/.test(text) ? "editable" : "noise";
 }
 
@@ -876,20 +857,13 @@ async function graphicPreservationEngine(analyzedPages) {
     canvas.height = page.canvas.height;
     const context = canvas.getContext("2d", { alpha: false });
     context.drawImage(page.canvas, 0, 0);
-    context.fillStyle = "#ffffff";
-    // The graphics motor owns deterministic document zones. OCR geometry is
-    // deliberately not used as an eraser: missed lines would remain duplicated.
-    // Page 4 stops before its signature/authentication zone; all other pages
-    // clear only the configured legal-text region, outside official margins.
-    const zoneBottom = page.pageNumber === 4
-      ? Math.min(page.region.y + page.region.height, 500 / 842 * canvas.height)
-      : page.region.y + page.region.height;
-    context.fillRect(page.region.x, page.region.y, page.region.width, Math.max(0, zoneBottom - page.region.y));
     const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("Não foi possível produzir a camada gráfica.")), "image/png"));
     output.push({
       pageNumber: page.pageNumber,
       width: canvas.width,
       height: canvas.height,
+      pageWidth: page.pageWidth,
+      pageHeight: page.pageHeight,
       bytes: new Uint8Array(await blob.arrayBuffer()),
       lines: page.lines,
       blocks: page.blocks,
@@ -918,7 +892,7 @@ function validateDocumentPipeline(pages) {
   if (!pages.length) throw new Error("Nenhuma página foi processada.");
   pages.forEach((page, index) => {
     if (!page.bytes?.length) throw new Error(`Página ${index + 1}: a camada gráfica não foi produzida.`);
-    if (!page.blocks?.length) throw new Error(`Página ${index + 1}: nenhum bloco de texto editável foi reconhecido.`);
+    if (!page.blocks?.length) return;
     const readable = page.blocks.filter(block => block.text.length >= 3 && block.confidence >= 55);
     if (!readable.length) throw new Error(`Página ${index + 1}: o OCR não atingiu confiança mínima.`);
     const firstY = Math.min(...readable.map(block => block.y));
@@ -1590,8 +1564,7 @@ async function createTextPdf(text) {
   const height = 841.89;
   const margin = 52;
   const lineHeight = 16;
-  const maxChars = 92;
-  const lines = wrapText(text, maxChars);
+  const lines = wrapTextByWidth(text, font, size, width - margin * 2);
   let page = document.addPage([width, height]);
   let y = height - margin;
   for (const line of lines) {
@@ -1613,15 +1586,23 @@ async function docxToText([file]) {
 async function extractTextFromDocx(file) {
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   validateArchive(zip, "word/document.xml");
-  const entry = zip.file("word/document.xml");
-  if (!entry) throw new Error("O DOCX não contém um documento de texto reconhecível.");
-  const xml = await entry.async("string");
-  const parsed = new DOMParser().parseFromString(xml, "application/xml");
-  const paragraphs = [...parsed.getElementsByTagNameNS("*", "p")];
-  const text = paragraphs.map(paragraph =>
-    [...paragraph.getElementsByTagNameNS("*", "t")].map(node => node.textContent).join("")
-  ).join("\n");
-  return text;
+  const parts = ["word/document.xml", ...Object.keys(zip.files).filter(path => /^word\/(?:header|footer|footnotes|endnotes)\d*\.xml$/i.test(path))];
+  const outputs = [];
+  for (const path of parts) {
+    const parsed = parseXml(await requireZipEntry(zip, path).async("string"));
+    const paragraphs = [...parsed.getElementsByTagNameNS("*", "p")];
+    const lines = paragraphs.map(paragraph => {
+      const cells = [];
+      const tableCells = [...paragraph.closest?.("tc")?.parentElement?.children || []];
+      if (tableCells.length) tableCells.forEach(cell => cells.push([...cell.getElementsByTagNameNS("*", "t")].map(node => node.textContent).join("")));
+      if (cells.length) return cells.join("\t");
+      let value = "";
+      [...paragraph.querySelectorAll("t, tab, br")].forEach(node => { value += node.localName === "tab" ? "\t" : node.localName === "br" ? "\n" : node.textContent; });
+      return value;
+    }).filter(value => value !== "");
+    if (lines.length) outputs.push(lines.join("\n"));
+  }
+  return outputs.join("\n\n");
 }
 
 async function csvToXlsx([file]) {
@@ -1708,7 +1689,7 @@ async function ofxToSummaryPdf([file]) {
   const height = 841.89;
   const margin = 46;
   const income = statement.transactions.filter(item => item.amount > 0).reduce((sum, item) => sum + item.amount, 0);
-  const expenses = statement.transactions.filter(item => item.amount < 0).reduce((sum, item) => sum + item.amount, 0);
+  const expenses = Math.abs(statement.transactions.filter(item => item.amount < 0).reduce((sum, item) => sum + item.amount, 0));
   const drawHeader = page => {
     page.drawText("Resumo financeiro OFX", { x: margin, y: height - margin, size: 22, font: bold, color: PDFLib.rgb(0.08, 0.14, 0.12) });
     page.drawText(`Conta: ${toWinAnsi(statement.accountId || "não informada")}  |  Banco: ${toWinAnsi(statement.bankId || "não informado")}`, { x: margin, y: height - 72, size: 9, font: regular });
@@ -1721,7 +1702,7 @@ async function ofxToSummaryPdf([file]) {
     `Transações: ${statement.transactions.length}`,
     `Entradas: ${formatMoney(income, statement.currency)}`,
     `Saídas: ${formatMoney(expenses, statement.currency)}`,
-    `Movimentação líquida: ${formatMoney(income + expenses, statement.currency)}`,
+    `Movimentação líquida: ${formatMoney(income - expenses, statement.currency)}`,
     `Saldo informado: ${statement.balance === null ? "não informado" : formatMoney(statement.balance, statement.currency)}`
   ];
   summary.forEach(line => {
@@ -1777,7 +1758,7 @@ async function reviewOfxData(result) {
   const count = document.querySelector("#ofxReviewCount");
   const errorCount = document.querySelector("#ofxReviewErrorCount");
   const confirmButton = document.querySelector("#ofxReviewConfirm");
-  metadata.innerHTML = `<label>Banco<input id="reviewBank" value="${escapeHtml(result.metadata.bankId)}" maxlength="32"></label><label>Agência<input id="reviewAgency" value="${escapeHtml(result.metadata.agencyId || "")}" maxlength="20"></label><label>Conta<input id="reviewAccount" value="${escapeHtml(result.metadata.accountId)}" maxlength="40"></label><label>Moeda<select id="reviewCurrency"><option>BRL</option><option>USD</option><option>EUR</option></select></label><label>Tipo<select id="reviewAccountType"><option value="CHECKING">Conta corrente</option><option value="SAVINGS">Poupança</option><option value="CREDITCARD">Cartão</option></select></label><label>Saldo final<input id="reviewFinalBalance" type="number" step="0.01" value="${Number(result.metadata.finalBalance || 0).toFixed(2)}"></label>`;
+  metadata.innerHTML = `<label>Banco<input id="reviewBank" value="${escapeHtml(result.metadata.bankId)}" maxlength="32" required></label><label>Agência<input id="reviewAgency" value="${escapeHtml(result.metadata.agencyId || "")}" maxlength="20"></label><label>Conta<input id="reviewAccount" value="${escapeHtml(result.metadata.accountId)}" maxlength="40" required></label><label>Moeda<select id="reviewCurrency"><option>BRL</option><option>USD</option><option>EUR</option></select></label><label>Tipo<select id="reviewAccountType"><option value="CHECKING">Conta corrente</option><option value="SAVINGS">Poupança</option><option value="CREDITCARD">Cartão</option></select></label><label>Saldo final (opcional)<input id="reviewFinalBalance" type="number" step="0.01" value="${Number.isFinite(result.metadata.finalBalance) ? Number(result.metadata.finalBalance).toFixed(2) : ""}" placeholder="Não informado"></label>`;
   document.querySelector("#reviewCurrency").value = result.metadata.currency || "BRL";
   document.querySelector("#reviewAccountType").value = result.metadata.creditCard ? "CREDITCARD" : result.metadata.accountType || "CHECKING";
   const rowHtml = (item = { date: "", memo: "", amount: null, type: "" }) => `<tr data-review-row><td><input class="review-use" type="checkbox" checked aria-label="Incluir lançamento"></td><td class="review-index"></td><td><input class="review-date" type="date" value="${escapeHtml(item.date || "")}"></td><td><input class="review-memo" value="${escapeHtml(item.memo || "")}" maxlength="255"></td><td><input class="review-credit credit-input" type="number" min="0" step="0.01" value="${item.amount !== null && item.type === "CREDIT" ? Math.abs(item.amount).toFixed(2) : ""}"></td><td><input class="review-debit debit-input" type="number" min="0" step="0.01" value="${item.amount !== null && item.type === "DEBIT" ? Math.abs(item.amount).toFixed(2) : ""}"></td><td><button class="review-delete" type="button" title="Excluir lançamento" aria-label="Excluir lançamento">×</button></td></tr>`;
@@ -1800,10 +1781,11 @@ async function reviewOfxData(result) {
       const debitSet = debitRaw !== "";
       const enabled = row.querySelector(".review-use").checked;
       const key = `${date}|${memo.toLowerCase()}|${credit}|${debit}`;
-      const duplicate = seen.has(key);
+      const duplicate = enabled && seen.has(key);
       if (enabled) seen.add(key);
-      const invalid = enabled && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !memo || (!creditSet && !debitSet) || (creditSet && debitSet) || credit < 0 || debit < 0);
+      const invalid = enabled && (!isValidIsoDate(date) || !memo || (!creditSet && !debitSet) || (creditSet && debitSet) || credit <= 0 && debit <= 0 || credit < 0 || debit < 0 || duplicate);
       row.classList.toggle("invalid", invalid);
+      row.title = duplicate ? "Possível lançamento duplicado." : "";
       if (invalid) errors += 1;
       const searchable = `${date} ${memo} ${credit} ${debit}`.toLowerCase();
       row.classList.toggle("filtered", Boolean(query) && !searchable.includes(query));
@@ -1814,17 +1796,21 @@ async function reviewOfxData(result) {
     const expectedCredits = result.metadata.expectedCredits;
     const expectedDebits = result.metadata.expectedDebits;
     const initialBalance = result.metadata.initialBalance;
-    const finalBalance = Number(document.querySelector("#reviewFinalBalance").value || 0);
+    const finalBalanceRaw = document.querySelector("#reviewFinalBalance").value.trim();
+    const finalBalance = finalBalanceRaw === "" ? null : Number(finalBalanceRaw);
     const reconciliation = [];
     if (expectedCredits !== null && Math.abs(credits - expectedCredits) > 0.01) reconciliation.push(`créditos diferem do extrato em ${formatMoney(credits - expectedCredits, result.metadata.currency)}`);
     if (expectedDebits !== null && Math.abs(debits - expectedDebits) > 0.01) reconciliation.push(`débitos diferem do extrato em ${formatMoney(debits - expectedDebits, result.metadata.currency)}`);
-    if (initialBalance !== null && result.metadata.finalBalance !== null && Math.abs(initialBalance + credits - debits - finalBalance) > 0.01) reconciliation.push("a equação entre saldo inicial, movimentações e saldo final não fecha");
+    if (initialBalance !== null && finalBalance !== null && Math.abs(initialBalance + credits - debits - finalBalance) > 0.01) reconciliation.push("a equação entre saldo inicial, movimentações e saldo final não fecha");
     const currency = document.querySelector("#reviewCurrency").value;
     summary.innerHTML = `<span>${selected.length} selecionados</span><span class="credit">Total de créditos: ${formatMoney(credits, currency)}</span><span class="debit">Total de débitos: ${formatMoney(debits, currency)}</span><span class="balance">Saldo líquido: ${formatMoney(credits - debits, currency)}</span>`;
     count.textContent = `${allRows.length} lançamentos`;
+    if (!selected.length) errors += 1;
+    if (!document.querySelector("#reviewBank").value.trim() || !document.querySelector("#reviewAccount").value.trim()) errors += 1;
     const totalErrors = errors + reconciliation.length;
     errorCount.textContent = totalErrors ? `${totalErrors} ${totalErrors === 1 ? "erro" : "erros"}` : "";
-    warning.textContent = errors ? "Encontramos linhas com problemas. Revise as transações destacadas antes de gerar." : reconciliation.length ? `Conferência financeira pendente: ${reconciliation.join("; ")}.` : "Valores, totais e saldos conferem com o extrato original.";
+    const hasReferenceTotals = expectedCredits !== null || expectedDebits !== null || initialBalance !== null || finalBalance !== null;
+    warning.textContent = errors ? "Existem linhas duplicadas, zeradas ou incompletas, ou faltam banco/conta. Corrija antes de gerar." : reconciliation.length ? `Conferência financeira pendente: ${reconciliation.join("; ")}.` : hasReferenceTotals ? "Valores conferidos com os totais disponíveis do extrato." : "Revise os lançamentos: o PDF não trouxe totais ou saldos suficientes para reconciliação automática.";
     warning.classList.toggle("visible", totalErrors > 0);
     confirmButton.disabled = totalErrors > 0;
   };
@@ -1857,12 +1843,21 @@ async function reviewOfxData(result) {
     const credit = Number(creditRaw || 0);
     const debit = Number(debitRaw || 0);
     const amount = creditSet ? credit : -debit;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !memo || !Number.isFinite(amount) || (!creditSet && !debitSet) || (creditSet && debitSet) || credit < 0 || debit < 0) throw new Error("Corrija os lançamentos destacados antes de gerar o OFX.");
+    if (!isValidIsoDate(date) || !memo || !Number.isFinite(amount) || amount === 0 || (!creditSet && !debitSet) || (creditSet && debitSet) || credit < 0 || debit < 0) throw new Error("Corrija os lançamentos destacados antes de gerar o OFX.");
     return { date, memo, amount, type: debitSet ? "DEBIT" : "CREDIT" };
   });
   if (!transactions.length) throw new Error("Selecione ao menos um lançamento para gerar o OFX.");
   const accountType = document.querySelector("#reviewAccountType").value;
-  return { bankId: document.querySelector("#reviewBank").value.trim() || "PDF", agencyId: document.querySelector("#reviewAgency").value.trim(), accountId: document.querySelector("#reviewAccount").value.trim() || "PDF", currency: document.querySelector("#reviewCurrency").value, accountType, creditCard: accountType === "CREDITCARD", finalBalance: Number(document.querySelector("#reviewFinalBalance").value || 0), transactions };
+  const bankId = document.querySelector("#reviewBank").value.trim();
+  const accountId = document.querySelector("#reviewAccount").value.trim();
+  if (!bankId || !accountId || /^PDF(?:-|$)/i.test(bankId) || /^PDF(?:-|$)/i.test(accountId)) throw new Error("Confirme banco e conta reais antes de gerar o OFX.");
+  const finalBalanceRaw = document.querySelector("#reviewFinalBalance").value.trim();
+  return { bankId, agencyId: document.querySelector("#reviewAgency").value.trim(), accountId, currency: document.querySelector("#reviewCurrency").value, accountType, creditCard: accountType === "CREDITCARD", finalBalance: finalBalanceRaw === "" ? null : Number(finalBalanceRaw), transactions };
+}
+
+function isValidIsoDate(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return Boolean(match && isValidCalendarDate(Number(match[1]), Number(match[2]), Number(match[3])));
 }
 
 async function extractTransactionsFromPdf(file) {
@@ -1913,7 +1908,7 @@ async function pdfToAbrasfXml([file]) {
   const rawLines = pages.flat();
   const lines = rawLines.map(line => stripLayoutMarkers(line).replace(/\s+/g, " ").trim()).filter(Boolean);
   const text = lines.join("\n");
-  const invoice = parseBarueriNfse(lines, text);
+  const invoice = parseSupportedNfse(rawLines, text);
   validateAbrasfInvoice(invoice, document.querySelector("#abrasfStrictValidation")?.checked !== false);
   const xml = buildAbrasfCompNfse(invoice);
   const parsed = new DOMParser().parseFromString(xml, "application/xml");
@@ -1921,12 +1916,264 @@ async function pdfToAbrasfXml([file]) {
   download(xml, `NFSe-${invoice.number}-ABRASF.xml`, "application/xml;charset=utf-8");
 }
 
+function parseSupportedNfse(rawLines, text) {
+  const cleanLines = rawLines.map(line => stripLayoutMarkers(line).replace(/\s+/g, " ").trim()).filter(Boolean);
+  if (/PREFEITURA MUNICIPAL DE BARUERI|barueri\.sp\.gov\.br\/nfe/i.test(text)) return parseBarueriNfse(cleanLines, text);
+  if (/MUNIC[IÍ]PIO DE S[AÃ]O JOS[EÉ] DO RIO PRETO/i.test(text)) return parseRioPretoNfse(rawLines, text);
+  if (/DANFSEe?\s*v?1\.0|Chave de Acesso(?: Nacional)? da NFS-e|Munic[ií]pio de Novo Hamburgo/i.test(text)) return parseNationalNfse(rawLines, text);
+  throw new Error("Município ou layout ainda não reconhecido. Envie uma NFS-e com texto selecionável para adicionarmos este padrão.");
+}
+
+function parseRioPretoNfse(lines, text) {
+  const providerSection = fiscalSection(text, /Prestador de Servi[cç]o/i, /Tomador de Servi[cç]o/i);
+  const customerSection = fiscalSection(text, /Tomador de Servi[cç]o/i, /Atividade Econ[oô]mica/i);
+  const detailsSection = fiscalSection(text, /Identifica[cç][aã]o Presta[cç][aã]o de Servi[cç]os/i, /Outras Informa[cç][oõ]es/i);
+  const number = findValueAfterLabel(lines, /^NFS-e$/i, /^\d{1,12}$/) || (text.match(/NFS-e\s*\n?\s*(\d{1,12})\b/i) || [])[1];
+  const auth = findValueAfterLabel(lines, /C[oó]digo de Verifica[cç][aã]o/i, /^[A-Z0-9-]{6,30}$/i);
+  const issueRaw = findValueAfterLabel(lines, /Emiss[aã]o da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2}$/);
+  const provider = parseLabeledParty(providerSection);
+  const customer = parseLabeledParty(customerSection);
+  const activity = fiscalSection(text, /Atividade Econ[oô]mica/i, /Discrimina[cç][aã]o do Servi[cç]o/i).replace(/Atividade Econ[oô]mica/i, "").trim();
+  const description = fiscalSection(text, /Discrimina[cç][aã]o do Servi[cç]o/i, /Tributos Federais/i).replace(/Discrimina[cç][aã]o do Servi[cç]o/i, "").trim() || activity;
+  const federal = parseRioPretoFederalTaxes(lines);
+  const total = findFiscalLineValue(lines, /Valor do Servi[cç]o/i);
+  const net = findFiscalLineValue(lines, /Valor L[ií]quido/i);
+  const base = findFiscalLineValue(lines, /Base de C[aá]lculo/i);
+  const deductions = findFiscalLineValue(lines, /Dedu[cç][oõ]es Previstas em Lei/i, 0);
+  const rate = findFiscalLineValue(lines, /^Al[ií]quota/i);
+  const iss = findFiscalLineValue(lines, /^ISSQN\b/i);
+  const retentionTotal = findFiscalLineValue(lines, /Reten[cç][oõ]es Federais/i);
+  const competence = (detailsSection.match(/Compet[eê]ncia\s+(\d{2}\/\d{4})/i) || [])[1];
+  const serviceCode = (activity.match(/\b(\d{1,2}[.]\d{2})(?:[.]\d{2}[.]\d{3})?/i) || [])[1] || "";
+  const substituted = findValueAfterLabel(lines, /NFS-e Substitu[ií]da/i, /^\d+$/);
+  if (!number || !auth || !issueRaw || !provider.taxId || !customer.taxId || !Number.isFinite(total) || !Number.isFinite(net)) {
+    throw new Error("A NFS-e de São José do Rio Preto foi reconhecida, mas faltaram número, código, partes ou valores essenciais.");
+  }
+  const issue = parseBrDateTime(issueRaw);
+  const federalSum = roundFiscal(federal.pis + federal.cofins + federal.inss + federal.ir + federal.csll + federal.other);
+  if (Number.isFinite(retentionTotal) && Math.abs(federalSum - retentionTotal) > 0.02) throw new Error("As retenções federais individualizadas não conferem com o total impresso na nota.");
+  return {
+    number, auth, issueDate: issue.date, time: issue.time, competence: competence ? brMonthToIso(competence) : issue.date,
+    provider, customer, municipality: { code: "3549805", uf: "SP", name: "São José do Rio Preto" },
+    serviceMunicipalityCode: "3549805", incidenceMunicipalityCode: "3549805",
+    item: { code: serviceCode, description: activity || "Serviço prestado", rate, total },
+    retentions: federal, total, deductions, base, iss, net, description,
+    issRetained: /ISSQN a Reter[\s\S]{0,80}\(X\)\s*Sim/i.test(detailsSection), simple: /Simples Nacional[\s\S]{0,80}\(X\)\s*Sim/i.test(detailsSection),
+    exigibility: Number((detailsSection.match(/Exigibilidade ISSQN\s+(\d+)/i) || [])[1] || 1), incentive: false,
+    substitutedNumber: substituted || null, rps: parseRioPretoRps(lines)
+  };
+}
+
+function parseNationalNfse(lines, text) {
+  const isCriciuma = /Prefeitura Municipal de Crici[uú]ma/i.test(text);
+  const isNovoHamburgo = /Munic[ií]pio de Novo Hamburgo/i.test(text);
+  if (!isCriciuma && !isNovoHamburgo) throw new Error("O layout nacional foi identificado, mas o município emissor ainda não está mapeado.");
+  const municipality = isCriciuma ? { code: "4204608", uf: "SC", name: "Criciúma" } : { code: "4313409", uf: "RS", name: "Novo Hamburgo" };
+  const providerSection = fiscalSection(text, /EMITENTE DA NFS-e/i, /TOMADOR DO SERVI[CÇ]O/i);
+  const customerSection = fiscalSection(text, /TOMADOR DO SERVI[CÇ]O/i, /(?:INTERMEDI[AÁ]RIO|SERVI[CÇ]O PRESTADO)/i);
+  const serviceSection = fiscalSection(text, /SERVI[CÇ]O PRESTADO/i, /(?:TRIBUTA[CÇ][AÃ]O MUNICIPAL|VALOR TOTAL DA NFS-e)/i);
+  const provider = parseNationalParty(providerSection);
+  const customer = parseNationalParty(customerSection);
+  const number = findValueAfterLabel(lines, /N[uú]mero da (?:NFS-e|Nota Fiscal)/i, /^\d{1,15}$/);
+  const auth = (text.match(/\bNFS\d{35,60}\b/) || [])[0] || findValueAfterLabel(lines, /C[oó]digo de Autenticidade/i, /^\d{20,70}$/);
+  const issueRaw = findValueAfterLabel(lines, /Data e Hora da emiss[aã]o da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || findValueAfterLabel(lines, /Data e Hora da emiss[aã]o do DPS/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/);
+  const competenceRaw = findValueAfterLabel(lines, /Compet[eê]ncia da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}$/);
+  const total = findFiscalLineValue(lines, /Valor do Servi[cç]o/i);
+  const net = findFiscalLineValue(lines, /Valor L[ií]quido(?: da NFS-e)?/i);
+  const deductions = findFiscalLineValue(lines, /(?:Total Dedu[cç][oõ]es\/Redu[cç][oõ]es|Dedu[cç][oõ]es)/i, 0);
+  const base = findFiscalLineValue(lines, /BC ISSQN|Base de C[aá]lculo/i, total - deductions);
+  const taxes = isNovoHamburgo ? parseNationalTaxTable(lines) : parseCriciumaTaxes(lines);
+  const rate = Number.isFinite(taxes._issRate) ? taxes._issRate : findFiscalLineValue(lines, /Al[ií]quota (?:Aplicada|ISSQN)/i);
+  const iss = Number.isFinite(taxes._iss) ? taxes._iss : findFiscalLineValue(lines, /ISSQN (?:Apurado|Retido)|^ISSQN\b/i, roundFiscal(base * rate / 100));
+  delete taxes._issRate;
+  delete taxes._iss;
+  const code = (serviceSection.match(/C[oó]digo de Tributa[cç][aã]o Nacional[\s\S]{0,160}?\b(\d{2}[.]?\d{2}[.]?\d{2}|\d{6})\b/i) || serviceSection.match(/\b(\d{2}[.]\d{2}[.]\d{2}|\d{6})\b/) || [])[1] || "";
+  const description = fiscalSection(serviceSection, /Descri[cç][aã]o do Servi[cç]o/i, /$/).replace(/Descri[cç][aã]o do Servi[cç]o/i, "").trim() || "Serviço prestado";
+  if (!number || !auth || !issueRaw || !provider.taxId || !customer.taxId || !Number.isFinite(total) || !Number.isFinite(net)) throw new Error("A NFS-e foi reconhecida, mas faltaram número, autenticação, partes ou valores essenciais.");
+  const issue = parseBrDateTime(issueRaw);
+  return {
+    number, auth, issueDate: issue.date, time: issue.time, competence: competenceRaw ? brDateToIso(competenceRaw) : issue.date,
+    provider, customer, municipality, serviceMunicipalityCode: municipality.code, incidenceMunicipalityCode: municipality.code,
+    item: { code: onlyDigits(code), description: code || "Serviço prestado", rate, total }, retentions: taxes,
+    total, deductions, base, iss, net, description, issRetained: /Reten[cç][aã]o do ISSQN[\s\S]{0,100}\bRetido\b/i.test(text) && !/N[aã]o Retido/i.test(text),
+    simple: /Simples Nacional[\s\S]{0,100}(?:Sim|Optante)/i.test(providerSection) && !/N[aã]o Optante/i.test(providerSection), exigibility: 1, incentive: false,
+    substitutedNumber: null, rps: parseNationalRps(lines)
+  };
+}
+
+function fiscalSection(text, startPattern, endPattern) {
+  const source = String(text || "");
+  const startMatch = source.match(startPattern);
+  if (!startMatch || startMatch.index === undefined) return "";
+  const rest = source.slice(startMatch.index);
+  if (endPattern.source === "$") return rest;
+  const endMatch = rest.slice(startMatch[0].length).match(endPattern);
+  return endMatch && endMatch.index !== undefined ? rest.slice(0, startMatch[0].length + endMatch.index) : rest;
+}
+
+function findValueAfterLabel(lines, label, valuePattern) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const currentParts = splitLayoutCells(lines[index]);
+    const labelIndex = currentParts.findIndex(cell => label.test(cell.text));
+    if (labelIndex < 0) continue;
+    const labelCell = currentParts[labelIndex];
+    const candidates = [labelCell.text.replace(label, "").trim(), ...currentParts.slice(labelIndex + 1).map(cell => cell.text)];
+    for (const nextLine of lines.slice(index + 1, index + 5)) {
+      const cells = splitLayoutCells(nextLine);
+      const nearest = [...cells].sort((a, b) => Math.abs(a.x - labelCell.x) - Math.abs(b.x - labelCell.x))[0];
+      if (nearest) candidates.push(nearest.text);
+      candidates.push(...cells.map(cell => cell.text));
+    }
+    for (const candidate of candidates) {
+      const value = String(candidate).trim();
+      const match = value.match(valuePattern);
+      if (match) return match[0];
+    }
+  }
+  return "";
+}
+
+function splitLayoutParts(line) {
+  return splitLayoutCells(line).map(cell => cell.text);
+}
+
+function splitLayoutCells(line) {
+  const source = String(line || "");
+  const marked = [...source.matchAll(/\uE000(\d+)\uE001([^\uE000]*)/g)].map(match => ({ x: Number(match[1]), text: match[2].trim() })).filter(cell => cell.text);
+  if (marked.length) return marked;
+  let cursor = 0;
+  return source.split(/\s{2,}|\t/).map(part => { const x = source.indexOf(part, cursor); cursor = x + part.length; return { x: Math.max(0, x), text: part.trim() }; }).filter(cell => cell.text);
+}
+
+function extractFiscalTaxId(section) {
+  const labelMatch = String(section || "").match(/(?:CNPJ\s*[\/-]?\s*CPF|CPF\s*[\/-]?\s*CNPJ|CNPJ|CPF)[^0-9]{0,30}((?:\d[ .\/-]?){10,18}\d)/i);
+  if (labelMatch) {
+    const digits = onlyDigits(labelMatch[1]);
+    if (digits.length === 11 || digits.length === 14) return digits;
+  }
+  const candidates = String(section || "").match(/(?:\d[ .\/-]?){11,18}/g) || [];
+  return candidates.map(onlyDigits).find(value => value.length === 11 || value.length === 14) || "";
+}
+
+function parseLabeledParty(section) {
+  const taxId = extractFiscalTaxId(section);
+  const name = (section.match(/Nome\/Raz[aã]o Social:\s*([^\n]+)/i) || [])[1]?.trim() || "";
+  const municipalRegistration = (section.match(/Inscri[cç][aã]o(?: Municipal)?:?\s*(\d{3,20})/i) || [])[1] || "";
+  const email = (section.match(/E-mail:\s*([^\s\n]+)/i) || [])[1] || "";
+  const cep = onlyDigits((section.match(/CEP:\s*(\d{5}-?\d{3})/i) || [])[1]);
+  return { taxId, name, municipalRegistration, emails: email ? [email] : [], cep };
+}
+
+function parseNationalParty(section) {
+  const taxId = extractFiscalTaxId(section);
+  const lines = String(section || "").split("\n").map(value => value.trim()).filter(Boolean);
+  const nameIndex = lines.findIndex(line => /Nome \/ Nome Empresarial/i.test(line));
+  let name = "";
+  for (let index = nameIndex + 1; index < Math.min(lines.length, nameIndex + 4); index += 1) {
+    if (!/^(?:E-mail|Endere[cç]o|Munic[ií]pio|CEP)$/i.test(lines[index]) && lines[index].length > 3) { name = lines[index].replace(/\s{2,}.*$/, "").trim(); break; }
+  }
+  const email = (section.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/) || [])[0] || "";
+  const cep = onlyDigits((section.match(/\b\d{5}-?\d{3}\b/) || [])[0]);
+  return { taxId, name, municipalRegistration: "", emails: email ? [email] : [], cep };
+}
+
+function findFiscalLineValue(lines, label, fallback = NaN) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const cells = splitLayoutCells(lines[lineIndex]);
+    const partIndex = cells.findIndex(cell => label.test(cell.text));
+    if (partIndex < 0) continue;
+    const labelCell = cells[partIndex];
+    const matchedLabel = labelCell.text.match(label)?.[0] || "";
+    const candidates = [labelCell.text.slice(labelCell.text.indexOf(matchedLabel) + matchedLabel.length), ...cells.slice(partIndex + 1).map(cell => cell.text)];
+    for (const nextLine of lines.slice(lineIndex + 1, lineIndex + 4)) {
+      const nextCells = splitLayoutCells(nextLine);
+      const nearest = [...nextCells].sort((a, b) => Math.abs(a.x - labelCell.x) - Math.abs(b.x - labelCell.x))[0];
+      if (nearest) candidates.unshift(nearest.text);
+    }
+    for (const candidate of candidates) {
+      const match = candidate.match(/-?(?:\d{1,3}(?:\.\d{3})*|\d+)[,.]\d{2}/);
+      if (match) return parseFlexibleFiscalMoney(match[0]);
+    }
+  }
+  return fallback;
+}
+
+function parseFlexibleFiscalMoney(value) {
+  let text = String(value || "").trim();
+  const comma = text.lastIndexOf(",");
+  const dot = text.lastIndexOf(".");
+  if (comma > dot) text = text.replace(/\./g, "").replace(",", ".");
+  else if (dot > comma && comma >= 0) text = text.replace(/,/g, "");
+  const number = Number(text);
+  return Number.isFinite(number) ? number : NaN;
+}
+
+function parseRioPretoFederalTaxes(lines) {
+  const start = lines.findIndex(line => /\bPIS\b/i.test(line) && /COFINS/i.test(line) && /INSS/i.test(line) && /\bIR\b/i.test(line) && /CSLL/i.test(line));
+  const sample = start >= 0 ? lines.slice(start + 1, start + 5).join(" ") : "";
+  const values = sample.match(/(?:\d{1,3}(?:\.\d{3})*|\d+),\d{2}/g)?.slice(0, 5).map(parseFiscalMoney) || [];
+  return { pis: values[0] || 0, cofins: values[1] || 0, inss: values[2] || 0, ir: values[3] || 0, csll: values[4] || 0, other: 0 };
+}
+
+function parseNationalTaxTable(lines) {
+  const result = { pis: 0, cofins: 0, inss: 0, ir: 0, csll: 0, other: 0 };
+  const keys = { PIS: "pis", COFINS: "cofins", INSS: "inss", IRRF: "ir", CSLL: "csll" };
+  for (const rawLine of lines) {
+    const line = stripLayoutMarkers(rawLine);
+    const issMatch = line.match(/^\s*ISSQN\s+([\d.,]+)\s*%\s+R\$\s*([\d.,]+)/i);
+    if (issMatch) { result._issRate = parseFlexibleFiscalMoney(issMatch[1]); result._iss = parseFlexibleFiscalMoney(issMatch[2]); }
+    const match = line.match(/^\s*(PIS|COFINS|INSS|IRRF|CSLL)\b[\s\S]*?R\$\s*([\d.,]+)[\s\S]*?\b(Sim|N[aã]o)\b/i);
+    if (match && /^Sim$/i.test(match[3])) result[keys[match[1].toUpperCase()]] = parseFlexibleFiscalMoney(match[2]);
+  }
+  return result;
+}
+
+function parseCriciumaTaxes(lines) {
+  const result = { pis: 0, cofins: 0, inss: 0, ir: 0, csll: 0, other: 0 };
+  const header = lines.findIndex(line => /IRRF/i.test(line) && /Contribui[cç][aã]o Previdenci[aá]ria/i.test(line));
+  if (header >= 0) {
+    const next = lines.slice(header + 1, header + 3).flatMap(splitLayoutParts);
+    const amount = next.map(value => value.match(/R\$\s*([\d.,]+)/i)?.[1]).find(Boolean);
+    if (amount) result.ir = parseFlexibleFiscalMoney(amount);
+  }
+  return result;
+}
+
+function parseBrDateTime(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return { date: "", time: "" };
+  return { date: `${match[3]}-${match[2]}-${match[1]}`, time: `${match[4]}:${match[5]}:${match[6] || "00"}` };
+}
+
+function brMonthToIso(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{4})$/);
+  return match ? `${match[2]}-${match[1]}-01` : "";
+}
+
+function parseRioPretoRps(lines) {
+  const header = lines.findIndex(line => /^RPS\b/i.test(line) && /S[eé]rie RPS/i.test(line));
+  if (header < 0) return null;
+  const sample = lines.slice(header + 1, header + 3).join(" ").trim();
+  const match = sample.match(/^\s*(\d+)\s+([A-Z])\s+(\d)\b/i);
+  return match ? { number: match[1], series: match[2], type: Number(match[3]), date: "" } : null;
+}
+
+function parseNationalRps(lines) {
+  const number = findValueAfterLabel(lines, /N[uú]mero (?:do )?(?:DPS|RPS)/i, /^\d+$/);
+  const series = findValueAfterLabel(lines, /S[eé]rie (?:do )?(?:DPS|RPS)/i, /^[A-Z0-9]{1,10}$/i);
+  const dateRaw = findValueAfterLabel(lines, /Data e Hora de emiss[aã]o (?:da|do) (?:DPS|RPS)/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/);
+  return number ? { number, series: series || "1", type: 1, date: dateRaw ? parseBrDateTime(dateRaw).date : "" } : null;
+}
+
 function parseBarueriNfse(lines, text) {
   if (!/PREFEITURA MUNICIPAL DE BARUERI|barueri\.sp\.gov\.br\/nfe/i.test(text)) {
-    throw new Error("Esta primeira versão do motor ABRASF aceita NFS-e emitidas pela Prefeitura de Barueri.");
+    throw new Error("O documento não corresponde ao layout de NFS-e de Barueri.");
   }
-  const cnpjs = [...new Set((text.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/g) || []).map(onlyDigits))];
-  if (cnpjs.length < 2) throw new Error("Não foi possível identificar os CNPJs do prestador e do tomador.");
+  const providerSection = fiscalSection(text, /Prestador de Servi[cç]os/i, /Nome Tomador de Servi[cç]os/i);
+  const customerSection = fiscalSection(text, /Nome Tomador de Servi[cç]os/i, /Qtde\s+Descri[cç][aã]o do Servi[cç]o/i);
+  const providerTaxId = extractFiscalTaxId(providerSection);
+  const customerTaxId = extractFiscalTaxId(customerSection);
+  if (!providerTaxId || !customerTaxId) throw new Error("Não foi possível identificar CPF/CNPJ do prestador ou do tomador dentro das respectivas seções.");
   const auth = (text.match(/\b[A-Z0-9]{4}(?:\.[A-Z0-9]{4}){2}\.[A-Z0-9]{5,12}-[A-Z0-9]\b/i) || [])[0];
   const dates = text.match(/\b\d{2}\/\d{2}\/\d{4}\b/g) || [];
   const time = (text.match(/\b\d{2}:\d{2}\b/) || [])[0] || "00:00";
@@ -1936,8 +2183,8 @@ function parseBarueriNfse(lines, text) {
   const retentions = findBarueriRetentions(lines, text);
   const total = findLabeledFiscalMoney(lines, /VALOR TOTAL DA NOTA/i);
   const net = findFiscalMoneyNear(text, /Valor L[ií]quido/i);
-  const provider = findSectionEntityName(lines, /Prestador de Servi[cç]os/i, cnpjs[0]) || "PRESTADOR NÃO IDENTIFICADO";
-  const customer = findSectionEntityName(lines, /Nome Tomador de Servi[cç]os/i, cnpjs[1]) || "TOMADOR NÃO IDENTIFICADO";
+  const provider = providerSection.replace(/^[\s\S]*?Prestador de Servi[cç]os/i, "").split("\n").map(value => value.trim()).find(value => value.length > 5 && !/^(?:CNPJ|CPF|ALAMEDA|RUA|CEP)/i.test(value)) || "";
+  const customer = customerSection.replace(/^[\s\S]*?Nome Tomador de Servi[cç]os/i, "").split("\n").map(value => value.trim()).find(value => value.length > 5 && !/^(?:CPF|CNPJ|Endere[cç]o|Complemento)/i.test(value)) || "";
   const emails = [...new Set(text.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g) || [])];
   const description = extractBarueriDescription(lines);
   const issueDate = brDateToIso(dates[0]);
@@ -1949,11 +2196,12 @@ function parseBarueriNfse(lines, text) {
   const iss = roundFiscal(base * item.rate / 100);
   return {
     number, auth, issueDate, time: `${time}:00`, rps,
-    provider: { cnpj: cnpjs[0], name: provider, municipalRegistration: findBarueriMunicipalRegistration(lines) },
-    customer: { cnpj: cnpjs[1], name: customer, emails },
-    item: { ...item, total: serviceTotal }, retentions, total, base, iss,
+    provider: { taxId: providerTaxId, name: provider, municipalRegistration: findBarueriMunicipalRegistration(lines), emails: [] },
+    customer: { taxId: customerTaxId, name: customer, emails },
+    municipality: { code: "3505708", uf: "SP", name: "Barueri" }, serviceMunicipalityCode: "3505708", incidenceMunicipalityCode: "3505708",
+    item: { ...item, total: serviceTotal }, retentions, total, deductions: 0, base, iss,
     net: Number.isFinite(net) ? net : roundFiscal(total - Object.values(retentions).reduce((sum, value) => sum + value, 0)),
-    description
+    description, competence: issueDate, issRetained: false, simple: false, exigibility: 1, incentive: false, substitutedNumber: null
   };
 }
 
@@ -2059,12 +2307,16 @@ function extractBarueriDescription(lines) {
 }
 
 function validateAbrasfInvoice(invoice, strict) {
+  if (![11, 14].includes(onlyDigits(invoice.provider.taxId).length) || ![11, 14].includes(onlyDigits(invoice.customer.taxId).length)) throw new Error("CPF/CNPJ do prestador ou tomador está ausente ou incompleto.");
+  if (!invoice.municipality?.code || !/^\d{7}$/.test(invoice.municipality.code)) throw new Error("Código IBGE do município emissor não foi identificado.");
   const retentionTotal = Object.values(invoice.retentions).reduce((sum, value) => sum + Number(value || 0), 0);
   const expectedNet = roundFiscal(invoice.total - retentionTotal);
   if (strict && Math.abs(expectedNet - invoice.net) > 0.02) {
     throw new Error(`Os valores não fecham: bruto ${formatMoney(invoice.total)}, retenções ${formatMoney(retentionTotal)} e líquido ${formatMoney(invoice.net)}.`);
   }
-  if (strict && invoice.item.rate <= 0) throw new Error("Não foi possível identificar a alíquota do serviço.");
+  if (strict && (!Number.isFinite(invoice.item.rate) || invoice.item.rate <= 0)) throw new Error("Não foi possível identificar a alíquota do serviço.");
+  if (strict && Number.isFinite(invoice.base) && Number.isFinite(invoice.deductions) && Math.abs(roundFiscal(invoice.total - invoice.deductions) - invoice.base) > 0.02) throw new Error("Valor do serviço, deduções e base de cálculo não conferem.");
+  if (strict && Number.isFinite(invoice.iss) && Math.abs(roundFiscal(invoice.base * invoice.item.rate / 100) - invoice.iss) > 0.02) throw new Error("Base, alíquota e ISSQN não conferem.");
 }
 
 function buildAbrasfCompNfse(invoice) {
@@ -2072,9 +2324,11 @@ function buildAbrasfCompNfse(invoice) {
   const money = value => Number(value || 0).toFixed(2);
   const rate = (Number(invoice.item.rate || 0) / 100).toFixed(4);
   const issue = `${invoice.issueDate}T${invoice.time}-03:00`;
-  const rps = invoice.rps ? `<Rps><IdentificacaoRps><Numero>${v(invoice.rps.number)}</Numero><Serie>${v(invoice.rps.series)}</Serie><Tipo>1</Tipo></IdentificacaoRps><DataEmissao>${v(invoice.rps.date)}</DataEmissao><Status>1</Status></Rps>` : "";
-  const emails = invoice.customer.emails.length ? `<Contato><Email>${v(invoice.customer.emails.join(";"))}</Email></Contato>` : "";
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<CompNfse xmlns="http://www.abrasf.org.br/nfse.xsd"><Nfse versao="2.04"><InfNfse Id="NFSe${v(invoice.number)}"><Numero>${v(invoice.number)}</Numero><CodigoVerificacao>${v(invoice.auth)}</CodigoVerificacao><DataEmissao>${issue}</DataEmissao><ValoresNfse><BaseCalculo>${money(invoice.base)}</BaseCalculo><Aliquota>${rate}</Aliquota><ValorIss>${money(invoice.iss)}</ValorIss><ValorLiquidoNfse>${money(invoice.net)}</ValorLiquidoNfse></ValoresNfse><DescricaoCodigoTributacaoMunicipio>${v(invoice.item.description)}</DescricaoCodigoTributacaoMunicipio><PrestadorServico><RazaoSocial>${v(invoice.provider.name)}</RazaoSocial><Endereco><CodigoMunicipio>3505708</CodigoMunicipio><Uf>SP</Uf></Endereco></PrestadorServico><OrgaoGerador><CodigoMunicipio>3505708</CodigoMunicipio><Uf>SP</Uf></OrgaoGerador><DeclaracaoPrestacaoServico><InfDeclaracaoPrestacaoServico Id="DPS${v(invoice.number)}">${rps}<Competencia>${v(invoice.issueDate)}</Competencia><Servico><Valores><ValorServicos>${money(invoice.total)}</ValorServicos><ValorDeducoes>0.00</ValorDeducoes><ValorPis>${money(invoice.retentions.pis)}</ValorPis><ValorCofins>${money(invoice.retentions.cofins)}</ValorCofins><ValorInss>${money(invoice.retentions.inss)}</ValorInss><ValorIr>${money(invoice.retentions.ir)}</ValorIr><ValorCsll>${money(invoice.retentions.csll)}</ValorCsll><OutrasRetencoes>${money(invoice.retentions.other)}</OutrasRetencoes><ValorIss>${money(invoice.iss)}</ValorIss><Aliquota>${rate}</Aliquota><DescontoIncondicionado>0.00</DescontoIncondicionado><DescontoCondicionado>0.00</DescontoCondicionado></Valores><IssRetido>2</IssRetido><ItemListaServico>${v(serviceListItem(invoice.item.code))}</ItemListaServico><CodigoTributacaoMunicipio>${v(invoice.item.code)}</CodigoTributacaoMunicipio><Discriminacao>${v(invoice.description)}</Discriminacao><CodigoMunicipio>3505708</CodigoMunicipio><ExigibilidadeISS>1</ExigibilidadeISS><MunicipioIncidencia>3505708</MunicipioIncidencia></Servico><Prestador><CpfCnpj><Cnpj>${v(invoice.provider.cnpj)}</Cnpj></CpfCnpj><InscricaoMunicipal>${v(invoice.provider.municipalRegistration)}</InscricaoMunicipal></Prestador><TomadorServico><IdentificacaoTomador><CpfCnpj><Cnpj>${v(invoice.customer.cnpj)}</Cnpj></CpfCnpj></IdentificacaoTomador><RazaoSocial>${v(invoice.customer.name)}</RazaoSocial>${emails}</TomadorServico><OptanteSimplesNacional>2</OptanteSimplesNacional><IncentivoFiscal>2</IncentivoFiscal></InfDeclaracaoPrestacaoServico></DeclaracaoPrestacaoServico></InfNfse></Nfse></CompNfse>`;
+  const rps = invoice.rps ? `<Rps><IdentificacaoRps><Numero>${v(invoice.rps.number)}</Numero><Serie>${v(invoice.rps.series || "1")}</Serie><Tipo>${v(invoice.rps.type || 1)}</Tipo></IdentificacaoRps>${invoice.rps.date ? `<DataEmissao>${v(invoice.rps.date)}</DataEmissao>` : ""}<Status>1</Status></Rps>` : "";
+  const emails = invoice.customer.emails?.length ? `<Contato><Email>${v(invoice.customer.emails.join(";"))}</Email></Contato>` : "";
+  const taxIdXml = party => onlyDigits(party.taxId).length === 11 ? `<Cpf>${v(onlyDigits(party.taxId))}</Cpf>` : `<Cnpj>${v(onlyDigits(party.taxId))}</Cnpj>`;
+  const municipality = invoice.municipality;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<CompNfse xmlns="http://www.abrasf.org.br/nfse.xsd"><Nfse versao="2.04"><InfNfse Id="NFSe${v(invoice.number)}"><Numero>${v(invoice.number)}</Numero><CodigoVerificacao>${v(invoice.auth)}</CodigoVerificacao><DataEmissao>${issue}</DataEmissao><ValoresNfse><BaseCalculo>${money(invoice.base)}</BaseCalculo><Aliquota>${rate}</Aliquota><ValorIss>${money(invoice.iss)}</ValorIss><ValorLiquidoNfse>${money(invoice.net)}</ValorLiquidoNfse></ValoresNfse><DescricaoCodigoTributacaoMunicipio>${v(invoice.item.description)}</DescricaoCodigoTributacaoMunicipio><PrestadorServico><RazaoSocial>${v(invoice.provider.name)}</RazaoSocial><Endereco><CodigoMunicipio>${v(municipality.code)}</CodigoMunicipio><Uf>${v(municipality.uf)}</Uf></Endereco></PrestadorServico><OrgaoGerador><CodigoMunicipio>${v(municipality.code)}</CodigoMunicipio><Uf>${v(municipality.uf)}</Uf></OrgaoGerador><DeclaracaoPrestacaoServico><InfDeclaracaoPrestacaoServico Id="DPS${v(invoice.number)}">${rps}<Competencia>${v(invoice.competence || invoice.issueDate)}</Competencia><Servico><Valores><ValorServicos>${money(invoice.total)}</ValorServicos><ValorDeducoes>${money(invoice.deductions)}</ValorDeducoes><ValorPis>${money(invoice.retentions.pis)}</ValorPis><ValorCofins>${money(invoice.retentions.cofins)}</ValorCofins><ValorInss>${money(invoice.retentions.inss)}</ValorInss><ValorIr>${money(invoice.retentions.ir)}</ValorIr><ValorCsll>${money(invoice.retentions.csll)}</ValorCsll><OutrasRetencoes>${money(invoice.retentions.other)}</OutrasRetencoes><ValorIss>${money(invoice.iss)}</ValorIss><Aliquota>${rate}</Aliquota><DescontoIncondicionado>0.00</DescontoIncondicionado><DescontoCondicionado>0.00</DescontoCondicionado></Valores><IssRetido>${invoice.issRetained ? 1 : 2}</IssRetido><ItemListaServico>${v(serviceListItem(invoice.item.code))}</ItemListaServico><CodigoTributacaoMunicipio>${v(onlyDigits(invoice.item.code))}</CodigoTributacaoMunicipio><Discriminacao>${v(invoice.description)}</Discriminacao><CodigoMunicipio>${v(invoice.serviceMunicipalityCode || municipality.code)}</CodigoMunicipio><ExigibilidadeISS>${v(invoice.exigibility || 1)}</ExigibilidadeISS><MunicipioIncidencia>${v(invoice.incidenceMunicipalityCode || municipality.code)}</MunicipioIncidencia></Servico><Prestador><CpfCnpj>${taxIdXml(invoice.provider)}</CpfCnpj>${invoice.provider.municipalRegistration ? `<InscricaoMunicipal>${v(invoice.provider.municipalRegistration)}</InscricaoMunicipal>` : ""}</Prestador><TomadorServico><IdentificacaoTomador><CpfCnpj>${taxIdXml(invoice.customer)}</CpfCnpj>${invoice.customer.municipalRegistration ? `<InscricaoMunicipal>${v(invoice.customer.municipalRegistration)}</InscricaoMunicipal>` : ""}</IdentificacaoTomador><RazaoSocial>${v(invoice.customer.name)}</RazaoSocial>${emails}</TomadorServico><OptanteSimplesNacional>${invoice.simple ? 1 : 2}</OptanteSimplesNacional><IncentivoFiscal>${invoice.incentive ? 1 : 2}</IncentivoFiscal></InfDeclaracaoPrestacaoServico></DeclaracaoPrestacaoServico></InfNfse></Nfse></CompNfse>`;
 }
 
 function serviceListItem(code) {
@@ -2418,7 +2672,8 @@ function isBalanceLine(line) {
 async function extractTransactionsWithOcr(pdf) {
   if (!window.Tesseract) throw new Error("O módulo de OCR não foi carregado.");
   const lines = [];
-  const pageLimit = Math.min(pdf.numPages, 20);
+  if (pdf.numPages > 20) throw new Error(`Este PDF possui ${pdf.numPages} páginas. O OCR seguro aceita no máximo 20; divida o documento para evitar um OFX incompleto.`);
+  const pageLimit = pdf.numPages;
   for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
     showStatus(`Executando OCR local: página ${pageNumber} de ${pageLimit}...`);
     const page = await pdf.getPage(pageNumber);
@@ -2445,7 +2700,6 @@ async function extractTransactionsWithOcr(pdf) {
     lines.push(...result.data.text.split(/\r?\n/).map(line => line.trim()).filter(Boolean));
     page.cleanup();
   }
-  if (pdf.numPages > pageLimit) showStatus(`OCR limitado às primeiras ${pageLimit} páginas por segurança.`);
   return lines;
 }
 
@@ -2464,16 +2718,16 @@ function deduplicateTransactions(transactions) {
   });
 }
 
-function buildOfx({ bankId, agencyId, accountId, accountType, currency, transactions, finalBalance = 0, creditCard = false }) {
+function buildOfx({ bankId, agencyId, accountId, accountType, currency, transactions, finalBalance = null, creditCard = false }) {
   const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
   const now = new Date();
   const generatedAt = formatOfxTimestamp(now);
-  const transactionXml = sorted.map((transaction, index) => `
+  const transactionXml = sorted.map(transaction => `
           <STMTTRN>
             <TRNTYPE>${transaction.type}</TRNTYPE>
             <DTPOSTED>${transaction.date.replaceAll("-", "")}120000[-3:BRT]</DTPOSTED>
             <TRNAMT>${transaction.amount.toFixed(2)}</TRNAMT>
-            <FITID>${escapeXml(`PDF-${transaction.date}-${index + 1}-${Math.abs(transaction.amount).toFixed(2)}`)}</FITID>
+            <FITID>${escapeXml(`PDF-${simpleHash(`${bankId}|${accountId}|${transaction.date}|${transaction.amount.toFixed(2)}|${transaction.memo.trim().toLowerCase()}`)}`)}</FITID>
             <NAME>${escapeXml(transaction.memo.slice(0, 32))}</NAME>
             <MEMO>${escapeXml(transaction.memo)}</MEMO>
           </STMTTRN>`).join("");
@@ -2512,7 +2766,7 @@ NEWFILEUID:NONE
           <DTSTART>${sorted[0].date.replaceAll("-", "")}000000[-3:BRT]</DTSTART>
           <DTEND>${sorted[sorted.length - 1].date.replaceAll("-", "")}235959[-3:BRT]</DTEND>${transactionXml}
         </BANKTRANLIST>
-        <LEDGERBAL><BALAMT>${Number(finalBalance || 0).toFixed(2)}</BALAMT><DTASOF>${sorted[sorted.length - 1].date.replaceAll("-", "")}235959[-3:BRT]</DTASOF></LEDGERBAL>
+        ${Number.isFinite(finalBalance) ? `<LEDGERBAL><BALAMT>${Number(finalBalance).toFixed(2)}</BALAMT><DTASOF>${sorted[sorted.length - 1].date.replaceAll("-", "")}235959[-3:BRT]</DTASOF></LEDGERBAL>` : ""}
       ${statementClose}
   ${messageClose}
 </OFX>`;
@@ -2535,26 +2789,41 @@ function parseOfx(rawText) {
   const ofxStart = normalized.search(/<OFX[\s>]/i);
   if (ofxStart < 0) throw new Error("O arquivo não contém uma estrutura OFX reconhecível.");
   const content = normalized.slice(ofxStart);
+  const statementBlocks = content.match(/<(?:STMTRS|CCSTMTRS)>[\s\S]*?(?=<\/(?:STMTRS|CCSTMTRS)>|$)/gi) || [];
+  if (statementBlocks.length > 1) throw new Error("Este OFX contém mais de uma conta ou fatura. Separe cada conta em um arquivo antes de converter para evitar mistura de lançamentos.");
+  const statementContent = statementBlocks[0] || content;
   const transactionBlocks = content.match(/<STMTTRN>[\s\S]*?(?=<STMTTRN>|<\/BANKTRANLIST>|<\/CCSTMTRS>|<\/OFX>|$)/gi) || [];
-  const transactions = transactionBlocks.map(block => ({
-    type: ofxTag(block, "TRNTYPE"),
-    date: normalizeOfxDate(ofxTag(block, "DTPOSTED") || ofxTag(block, "DTUSER")),
-    amount: parseOfxNumber(ofxTag(block, "TRNAMT")),
-    fitId: ofxTag(block, "FITID"),
-    checkNumber: ofxTag(block, "CHECKNUM") || ofxTag(block, "REFNUM"),
-    name: decodeOfxEntities(ofxTag(block, "NAME")),
-    memo: decodeOfxEntities(ofxTag(block, "MEMO"))
-  })).filter(item => item.date || item.fitId || item.amount !== 0);
+  const transactions = transactionBlocks.map((block, index) => {
+    const fitId = ofxTag(block, "FITID");
+    const rawAmount = ofxTag(block, "TRNAMT");
+    const rawDate = ofxTag(block, "DTPOSTED") || ofxTag(block, "DTUSER");
+    let amount;
+    try { amount = parseOfxNumber(rawAmount); }
+    catch { throw new Error(`Valor inválido no lançamento ${index + 1}${fitId ? ` (${fitId})` : ""}: ${rawAmount || "vazio"}.`); }
+    const date = normalizeOfxDate(rawDate);
+    if (!date) throw new Error(`Data inválida no lançamento ${index + 1}${fitId ? ` (${fitId})` : ""}: ${rawDate || "vazia"}.`);
+    return { type: ofxTag(block, "TRNTYPE"), date, amount, fitId, checkNumber: ofxTag(block, "CHECKNUM") || ofxTag(block, "REFNUM"), name: decodeOfxEntities(ofxTag(block, "NAME")), memo: decodeOfxEntities(ofxTag(block, "MEMO")) };
+  });
   if (!transactions.length) throw new Error("Nenhuma transação bancária foi encontrada no OFX.");
-  const balanceRaw = ofxTag(content, "BALAMT") || ofxTag(content, "AVAILCASH");
+  const balanceRaw = ofxTag(statementContent, "BALAMT") || ofxTag(statementContent, "AVAILCASH");
+  let balance = null;
+  if (balanceRaw) {
+    try { balance = parseOfxNumber(balanceRaw); }
+    catch { throw new Error(`O saldo informado no OFX é inválido: ${balanceRaw}.`); }
+  }
+  const fitIds = new Set();
+  for (const item of transactions) {
+    if (item.fitId && fitIds.has(item.fitId)) throw new Error(`O OFX contém FITID duplicado: ${item.fitId}. Corrija a origem antes de converter.`);
+    if (item.fitId) fitIds.add(item.fitId);
+  }
   return {
-    bankId: ofxTag(content, "BANKID") || ofxTag(content, "ORG"),
-    accountId: ofxTag(content, "ACCTID") || ofxTag(content, "ACCTKEY"),
-    accountType: ofxTag(content, "ACCTTYPE"),
-    currency: ofxTag(content, "CURDEF") || "BRL",
-    startDate: normalizeOfxDate(ofxTag(content, "DTSTART")) || transactions[0].date,
-    endDate: normalizeOfxDate(ofxTag(content, "DTEND")) || transactions[transactions.length - 1].date,
-    balance: balanceRaw ? parseOfxNumber(balanceRaw) : null,
+    bankId: ofxTag(statementContent, "BANKID") || ofxTag(content, "ORG"),
+    accountId: ofxTag(statementContent, "ACCTID") || ofxTag(statementContent, "ACCTKEY"),
+    accountType: ofxTag(statementContent, "ACCTTYPE"),
+    currency: ofxTag(statementContent, "CURDEF") || "BRL",
+    startDate: normalizeOfxDate(ofxTag(statementContent, "DTSTART")) || transactions[0].date,
+    endDate: normalizeOfxDate(ofxTag(statementContent, "DTEND")) || transactions[transactions.length - 1].date,
+    balance,
     transactions
   };
 }
@@ -2583,14 +2852,32 @@ function ofxTag(content, tag) {
 }
 
 function parseOfxNumber(value) {
-  const normalized = String(value || "0").trim().replace(",", ".");
+  let normalized = String(value ?? "").trim().replace(/\s/g, "");
+  if (!normalized) throw new Error("Valor OFX vazio.");
+  if (!/^[+-]?[\d.,]+$/.test(normalized)) throw new Error("Valor OFX inválido.");
+  const comma = normalized.lastIndexOf(",");
+  const dot = normalized.lastIndexOf(".");
+  if (comma >= 0 && dot >= 0) {
+    const decimal = comma > dot ? "," : ".";
+    const thousands = decimal === "," ? /\./g : /,/g;
+    normalized = normalized.replace(thousands, "").replace(decimal, ".");
+  } else if (comma >= 0) {
+    const decimals = normalized.length - comma - 1;
+    normalized = decimals === 2 ? normalized.replace(",", ".") : normalized.replace(/,/g, "");
+  } else if ((normalized.match(/\./g) || []).length > 1) {
+    const parts = normalized.split(".");
+    const decimal = parts.pop();
+    normalized = `${parts.join("")}.${decimal}`;
+  }
   const number = Number(normalized);
-  return Number.isFinite(number) ? number : 0;
+  if (!Number.isFinite(number)) throw new Error("Valor OFX inválido.");
+  return number;
 }
 
 function normalizeOfxDate(value) {
   const match = String(value || "").match(/^(\d{4})(\d{2})(\d{2})/);
-  return match ? `${match[1]}-${match[2]}-${match[3]}` : "";
+  if (!match || !isValidCalendarDate(Number(match[1]), Number(match[2]), Number(match[3]))) return "";
+  return `${match[1]}-${match[2]}-${match[3]}`;
 }
 
 function formatOfxDate(value) {
@@ -2617,10 +2904,11 @@ function formatMoney(value, currency = "BRL") {
 
 function parsePageRange(value, pageCount) {
   const pages = new Set();
-  value.split(",").map(part => part.trim()).filter(Boolean).forEach(part => {
-    const [startRaw, endRaw] = part.split("-").map(Number);
-    const start = startRaw;
-    const end = endRaw || startRaw;
+  value.split(",").map(part => part.trim()).forEach(part => {
+    if (!part || !/^\d+(?:-\d+)?$/.test(part)) throw new Error("Use páginas como 1,3,5-8, sem vírgulas vazias ou intervalos incompletos.");
+    const [startText, endText] = part.split("-");
+    const start = Number(startText);
+    const end = endText === undefined ? start : Number(endText);
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end > pageCount || start > end) {
       throw new Error(`Intervalo inválido. O documento possui ${pageCount} página(s).`);
     }
@@ -2634,20 +2922,32 @@ function parseCsv(text, delimiter) {
   const rows = [];
   let row = [];
   let value = "";
-  let quoted = false;
+  let state = "FIELD_START";
+  let wasQuoted = false;
+  const pushField = () => { row.push({ value, quoted: wasQuoted }); value = ""; wasQuoted = false; state = "FIELD_START"; };
+  const pushRow = () => { pushField(); rows.push(row); row = []; };
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
-    if (quoted) {
+    if (state === "QUOTED") {
       if (char === '"' && text[index + 1] === '"') { value += '"'; index += 1; }
-      else if (char === '"') quoted = false;
+      else if (char === '"') state = "AFTER_QUOTE";
       else value += char;
-    } else if (char === '"') quoted = true;
-    else if (char === delimiter) { row.push(value); value = ""; }
-    else if (char === "\n") { row.push(value.replace(/\r$/, "")); rows.push(row); row = []; value = ""; }
-    else value += char;
+      continue;
+    }
+    if (state === "AFTER_QUOTE") {
+      if (char === delimiter) pushField();
+      else if (char === "\n" || char === "\r") { if (char === "\r" && text[index + 1] === "\n") index += 1; pushRow(); }
+      else throw new Error(`CSV malformado: caractere inesperado após aspas na posição ${index + 1}.`);
+      continue;
+    }
+    if (state === "FIELD_START" && char === '"') { state = "QUOTED"; wasQuoted = true; }
+    else if (char === '"') throw new Error(`CSV malformado: aspas em campo não citado na posição ${index + 1}.`);
+    else if (char === delimiter) pushField();
+    else if (char === "\n" || char === "\r") { if (char === "\r" && text[index + 1] === "\n") index += 1; pushRow(); }
+    else { value += char; state = "UNQUOTED"; }
   }
-  if (quoted) throw new Error("O CSV possui um campo com aspas não fechadas.");
-  if (value.length || row.length) { row.push(value.replace(/\r$/, "")); rows.push(row); }
+  if (state === "QUOTED") throw new Error("O CSV possui um campo com aspas não fechadas.");
+  if (value.length || row.length || wasQuoted || state === "AFTER_QUOTE") pushRow();
   return rows;
 }
 
@@ -2679,9 +2979,15 @@ function clamp(value, min, max) {
 
 function worksheetXml(rows) {
   const body = rows.map((row, rowIndex) => {
-    const cells = row.map((value, columnIndex) => {
+    const cells = row.map((input, columnIndex) => {
       const ref = `${columnLetters(columnIndex + 1)}${rowIndex + 1}`;
-      return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${escapeXml(String(value))}</t></is></c>`;
+      const cell = typeof input === "object" && input !== null && "value" in input ? input : { value: input, quoted: false };
+      const value = String(cell.value ?? "");
+      assertValidXmlText(value, rowIndex + 1, columnIndex + 1);
+      const classified = classifyCsvCell(value, Boolean(cell.quoted));
+      if (classified.type === "number") return `<c r="${ref}"><v>${classified.value}</v></c>`;
+      if (classified.type === "date") return `<c r="${ref}" s="1"><v>${classified.value}</v></c>`;
+      return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${escapeXml(value)}</t></is></c>`;
     }).join("");
     return `<row r="${rowIndex + 1}">${cells}</row>`;
   }).join("");
@@ -2700,8 +3006,37 @@ function workbookXml() {
 function workbookRelsXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
 }
+
+function classifyCsvCell(value, quoted) {
+  if (quoted || value === "" || /^[=+@]/.test(value) || /^-?0\d+/.test(value)) return { type: "text", value };
+  const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const br = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  const dateParts = iso ? [Number(iso[1]), Number(iso[2]), Number(iso[3])] : br ? [Number(br[3]), Number(br[2]), Number(br[1])] : null;
+  if (dateParts && isValidCalendarDate(...dateParts)) return { type: "date", value: excelDateSerial(...dateParts) };
+  if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return { type: "number", value: String(number) };
+  }
+  return { type: "text", value };
+}
+
+function assertValidXmlText(value, row, column) {
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uD800-\uDFFF\uFFFE\uFFFF]/u.test(value)) {
+    throw new Error(`O CSV contém um caractere incompatível com Excel na linha ${row}, coluna ${column}.`);
+  }
+}
+
+function isValidCalendarDate(year, month, day) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function excelDateSerial(year, month, day) {
+  const days = Math.floor((Date.UTC(year, month - 1, day) - Date.UTC(1899, 11, 31)) / 86400000);
+  return days >= 60 ? days + 1 : days;
+}
 function stylesXml() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf xfId="0"/></cellXfs></styleSheet>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="dd/mm/yyyy"/></numFmts><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf xfId="0"/><xf xfId="0" numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>`;
 }
 
 async function createDocxFromText(text) {
@@ -2861,8 +3196,30 @@ function wrapText(text, maxChars) {
     return lines;
   });
 }
+function wrapTextByWidth(text, font, size, maxWidth) {
+  const result = [];
+  const safeWidth = value => font.widthOfTextAtSize(toWinAnsi(value), size);
+  for (const paragraph of String(text || "").replace(/\r/g, "").split("\n")) {
+    if (!paragraph) { result.push(""); continue; }
+    const tokens = paragraph.split(/(\s+)/).filter(Boolean);
+    let line = "";
+    for (const token of tokens) {
+      const candidate = `${line}${token}`;
+      if (safeWidth(candidate) <= maxWidth) { line = candidate; continue; }
+      if (line.trim()) { result.push(line.trimEnd()); line = ""; }
+      let chunk = "";
+      for (const char of token) {
+        if (safeWidth(`${chunk}${char}`) > maxWidth && chunk) { result.push(chunk); chunk = char; }
+        else chunk += char;
+      }
+      line = chunk;
+    }
+    if (line) result.push(line.trimEnd());
+  }
+  return result;
+}
 function toWinAnsi(text) {
-  return text.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\x20-\x7E\u00A0-\u00FF]/g, "?");
+  return String(text || "").replace(/[^\x20-\x7E\u00A0-\u00FF]/g, "□");
 }
 function download(data, filename, type) {
   const blob = data instanceof Blob ? data : new Blob([data], { type });
