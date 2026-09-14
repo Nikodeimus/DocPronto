@@ -33,6 +33,7 @@ jobs:
         run: |
           mkdir -p _site
           cp index.html styles.css app.js .nojekyll _site/
+          cp -R hub _site/hub
 
       - name: Empacotar o site
         uses: actions/upload-pages-artifact@v3
