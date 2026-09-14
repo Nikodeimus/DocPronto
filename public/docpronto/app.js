@@ -1805,10 +1805,11 @@ async function reviewOfxData(result) {
       const creditSet = creditRaw !== "";
       const debitSet = debitRaw !== "";
       const enabled = row.querySelector(".review-use").checked;
-      const key = `${date}|${memo.toLowerCase()}|${credit}|${debit}`;
+      const direction = debitSet ? "DEBIT" : "CREDIT";
+      const key = `${date}|${memo.toLowerCase()}|${direction}|${credit}|${debit}`;
       const duplicate = enabled && seen.has(key);
       if (enabled) seen.add(key);
-      const invalid = enabled && (!isValidIsoDate(date) || !memo || (!creditSet && !debitSet) || (creditSet && debitSet) || credit <= 0 && debit <= 0 || credit < 0 || debit < 0 || duplicate);
+      const invalid = enabled && (!isValidIsoDate(date) || !memo || !parseOfxReviewAmount(creditRaw, debitRaw) || duplicate);
       row.classList.toggle("invalid", invalid);
       row.title = duplicate ? "Possível lançamento duplicado." : "";
       if (invalid) errors += 1;
@@ -1835,13 +1836,13 @@ async function reviewOfxData(result) {
     const totalErrors = errors + reconciliation.length;
     errorCount.textContent = totalErrors ? `${totalErrors} ${totalErrors === 1 ? "erro" : "erros"}` : "";
     const hasReferenceTotals = expectedCredits !== null || expectedDebits !== null || initialBalance !== null || finalBalance !== null;
-    warning.textContent = errors ? "Existem linhas duplicadas, zeradas ou incompletas, ou faltam banco/conta. Corrija antes de gerar." : reconciliation.length ? `Conferência financeira pendente: ${reconciliation.join("; ")}.` : hasReferenceTotals ? "Valores conferidos com os totais disponíveis do extrato." : "Revise os lançamentos: o PDF não trouxe totais ou saldos suficientes para reconciliação automática.";
+    warning.textContent = errors ? "Existem linhas duplicadas ou incompletas, ou faltam banco/conta. Lançamentos de 0,00 são aceitos quando constam no extrato." : reconciliation.length ? `Conferência financeira pendente: ${reconciliation.join("; ")}.` : hasReferenceTotals ? "Valores conferidos com os totais disponíveis do extrato." : "Revise os lançamentos: o PDF não trouxe totais ou saldos suficientes para reconciliação automática.";
     warning.classList.toggle("visible", totalErrors > 0);
     confirmButton.disabled = totalErrors > 0;
   };
   rows.oninput = event => {
-    if (event.target.matches(".review-credit") && Number(event.target.value || 0) > 0) event.target.closest("tr").querySelector(".review-debit").value = "";
-    if (event.target.matches(".review-debit") && Number(event.target.value || 0) > 0) event.target.closest("tr").querySelector(".review-credit").value = "";
+    if (event.target.matches(".review-credit") && event.target.value.trim() !== "") event.target.closest("tr").querySelector(".review-debit").value = "";
+    if (event.target.matches(".review-debit") && event.target.value.trim() !== "") event.target.closest("tr").querySelector(".review-credit").value = "";
     update();
   };
   rows.onclick = event => {
@@ -1863,13 +1864,9 @@ async function reviewOfxData(result) {
     const memo = row.querySelector(".review-memo").value.trim();
     const creditRaw = row.querySelector(".review-credit").value.trim();
     const debitRaw = row.querySelector(".review-debit").value.trim();
-    const creditSet = creditRaw !== "";
-    const debitSet = debitRaw !== "";
-    const credit = Number(creditRaw || 0);
-    const debit = Number(debitRaw || 0);
-    const amount = creditSet ? credit : -debit;
-    if (!isValidIsoDate(date) || !memo || !Number.isFinite(amount) || amount === 0 || (!creditSet && !debitSet) || (creditSet && debitSet) || credit < 0 || debit < 0) throw new Error("Corrija os lançamentos destacados antes de gerar o OFX.");
-    return { date, memo, amount, type: debitSet ? "DEBIT" : "CREDIT" };
+    const parsedAmount = parseOfxReviewAmount(creditRaw, debitRaw);
+    if (!isValidIsoDate(date) || !memo || !parsedAmount) throw new Error("Corrija os lançamentos destacados antes de gerar o OFX.");
+    return { date, memo, ...parsedAmount };
   });
   if (!transactions.length) throw new Error("Selecione ao menos um lançamento para gerar o OFX.");
   const accountType = document.querySelector("#reviewAccountType").value;
@@ -1878,6 +1875,18 @@ async function reviewOfxData(result) {
   if (!bankId || !accountId || /^PDF(?:-|$)/i.test(bankId) || /^PDF(?:-|$)/i.test(accountId)) throw new Error("Confirme banco e conta reais antes de gerar o OFX.");
   const finalBalanceRaw = document.querySelector("#reviewFinalBalance").value.trim();
   return { bankId, agencyId: document.querySelector("#reviewAgency").value.trim(), accountId, currency: document.querySelector("#reviewCurrency").value, accountType, creditCard: accountType === "CREDITCARD", finalBalance: finalBalanceRaw === "" ? null : Number(finalBalanceRaw), transactions };
+}
+
+function parseOfxReviewAmount(creditRaw, debitRaw) {
+  const creditText = String(creditRaw ?? "").trim();
+  const debitText = String(debitRaw ?? "").trim();
+  const creditSet = creditText !== "";
+  const debitSet = debitText !== "";
+  if (creditSet === debitSet) return null;
+  const credit = Number(creditText || 0);
+  const debit = Number(debitText || 0);
+  if (!Number.isFinite(credit) || !Number.isFinite(debit) || credit < 0 || debit < 0) return null;
+  return creditSet ? { amount: credit, type: "CREDIT" } : { amount: -debit, type: "DEBIT" };
 }
 
 function isValidIsoDate(value) {
