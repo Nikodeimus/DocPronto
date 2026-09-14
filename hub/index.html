@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="DocPronto Hub — gestão e processamento de documentos fiscais">
+  <title>DocPronto Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><div class="brand-mark">DP</div><div><strong>DocPronto</strong><span>Document Hub</span></div></div>
+      <nav id="nav" aria-label="Navegação principal">
+        <button class="nav-item active" data-view="dashboard"><span>◫</span>Visão geral</button>
+        <button class="nav-item" data-view="batch"><span>↯</span>Processamento em lote</button>
+        <button class="nav-item" data-view="inbox"><span>↓</span>Caixa de entrada</button>
+        <button class="nav-item" data-view="documents"><span>▤</span>Documentos</button>
+        <button class="nav-item" data-view="batches"><span>▦</span>Lotes</button>
+        <button class="nav-item" data-view="failures"><span>!</span>Falhas</button>
+        <div class="nav-label">GESTÃO</div>
+        <button class="nav-item" data-view="integrations"><span>◇</span>Integrações</button>
+        <button class="nav-item" data-view="admin"><span>♙</span>Administração</button>
+        <button class="nav-item" data-view="audit"><span>⌁</span>Auditoria</button>
+        <button class="nav-item" data-view="settings"><span>⚙</span>Configurações</button>
+      </nav>
+      <div class="side-status"><span class="status-dot demo"></span><div><strong>Ambiente demonstrativo</strong><small>Dados persistidos neste navegador</small></div></div>
+    </aside>
+    <section class="workspace">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menuBtn" aria-label="Abrir menu">☰</button>
+        <div class="company-switch"><small>EMPRESA</small><strong>Palin Organização</strong></div>
+        <label class="global-search"><span>⌕</span><input id="globalSearch" placeholder="Buscar chave, lote ou documento"></label>
+        <button class="icon-btn" id="notifyBtn" aria-label="Notificações">●</button>
+        <div class="profile"><div class="avatar">HP</div><div><strong>Heitor</strong><small>Super Admin</small></div></div>
+      </header>
+      <main id="app" tabindex="-1"></main>
+    </section>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="modalRoot"></div>
+  <script src="./app.js"></script>
+</body>
+</html>

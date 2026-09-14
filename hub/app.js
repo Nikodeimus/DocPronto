@@ -1,0 +1,165 @@
+(function(){
+"use strict";
+var KEY="docpronto-hub-v1";
+var STEPS=["validating","retrieval","downloading_pdf","converting","validating_xml","extracting","storing","completed"];
+var LABELS={pending:"Na fila",validating:"Validando",retrieval:"Consultando fonte",downloading_pdf:"Baixando PDF",converting:"Convertendo",validating_xml:"Validando XML",extracting:"Extraindo dados",storing:"Armazenando",completed:"Concluído",failed:"Falha",retrying:"Tentando novamente",paused:"Pausado",cancelled:"Cancelado"};
+var state=loadState();
+var currentView="dashboard",validated=null,timer=null,page=1,perPage=20,filter="";
+function seed(){
+  var now=Date.now(),docs=[];
+  for(var i=0;i<18;i++){var key=makeKey("35"+String(26+i%2).padStart(2,"0")+String(100000000000000000000000000000000000000+i));docs.push(makeDoc(key,now-i*86400000,i));}
+  return {batches:[],documents:docs,audit:[{id:id(),at:new Date().toISOString(),user:"Heitor",action:"AMBIENTE_INICIADO",resource:"Demonstração",result:"SUCESSO"}],settings:{mode:"AUTO",concurrency:5,retries:3,timeout:30},notifications:[]};
+}
+function loadState(){try{return JSON.parse(localStorage.getItem(KEY))||seed()}catch(e){return seed()}}
+function save(){localStorage.setItem(KEY,JSON.stringify(state))}
+function id(){return Math.random().toString(36).slice(2)+Date.now().toString(36)}
+function onlyDigits(s){return String(s||"").replace(/\D/g,"")}
+function dv(base43){var sum=0,w=2;for(var i=base43.length-1;i>=0;i--){sum+=Number(base43[i])*w;w=w===9?2:w+1}var d=11-sum%11;return d===10||d===11?0:d}
+function makeKey(seedText){var base=onlyDigits(seedText).padEnd(43,"0").slice(0,43);return base+dv(base)}
+function validKey(k){return /^\d{44}$/.test(k)&&Number(k[43])===dv(k.slice(0,43))}
+function mask(k){return k.slice(0,6)+"••••••••••••••••••••••••••••••"+k.slice(-6)}
+function money(v){return new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v||0)}
+function date(v){return new Intl.DateTimeFormat("pt-BR",{dateStyle:"short",timeStyle:v&&String(v).includes("T")?"short":undefined}).format(new Date(v))}
+function makeDoc(key,at,n){return{id:id(),accessKey:key,status:"completed",number:String(10420+n),issuer:["Alvorada Serviços Ltda.","Nova Ponte Tecnologia","Horizonte Comércio"][n%3],recipient:"Palin Organização",issuerDoc:"12.345.678/0001-"+String(10+n).padStart(2,"0"),recipientDoc:"28.988.409/0001-87",issueDate:new Date(at).toISOString(),value:580+(n*137.41)%6200,xmlSource:n%3===0?"ORIGINAL":"RECONSTRUCTED",pdf:true,xml:true,createdAt:new Date(at).toISOString(),batchId:null,logs:["Chave validada","PDF obtido","Conversão concluída","XML validado","Documento armazenado"]}}
+function audit(action,resource,result){state.audit.unshift({id:id(),at:new Date().toISOString(),user:"Heitor",action:action,resource:resource,result:result||"SUCESSO"});state.audit=state.audit.slice(0,250)}
+function toast(msg){var el=document.getElementById("toast");el.textContent=msg;el.classList.add("show");setTimeout(function(){el.classList.remove("show")},2400)}
+function badge(status){var c=status==="completed"||status==="ONLINE"||status==="SUCESSO"?"success":status==="failed"||status==="OFFLINE"||status==="ERRO"?"error":status==="pending"||status==="paused"||status==="PENDENTE"?"warning":status==="cancelled"?"neutral":"info";return '<span class="badge '+c+'">'+(LABELS[status]||status)+'</span>'}
+function head(title,sub,actions){return '<div class="page-head"><div><h1>'+title+'</h1><p>'+sub+'</p></div><div class="actions">'+(actions||"")+'</div></div>'}
+function metric(label,value,note){return '<div class="card stat"><div class="stat-top"><span>'+label+'</span><span>●</span></div><strong>'+value+'</strong><small>'+note+'</small></div>'}
+function renderDashboard(){
+ var docs=state.documents,total=docs.length,done=docs.filter(function(d){return d.status==="completed"}).length,fail=docs.filter(function(d){return d.status==="failed"}).length,proc=total-done-fail,sum=docs.reduce(function(a,d){return a+d.value},0);
+ var chart=[34,52,47,68,61,83,72,92,77,88,69,96].map(function(h,i){return '<div class="bar '+(i===11?"hot":"")+'" style="height:'+h+'%"><b>'+Math.round(h*2.3)+'</b></div>'}).join("");
+ return head("Visão geral","Operação consolidada da Palin Organização",'<button class="btn primary" data-view-go="batch">+ Processar documentos</button>')+
+ '<section class="grid stats">'+metric("Total de documentos",total,"Base demonstrativa e lotes locais")+metric("Concluídos",done,'<span class="up">Disponíveis para download</span>')+metric("Em processamento",proc,"Atualização automática")+metric("Falhas",fail,"Itens que pedem atenção")+metric("PDFs",docs.filter(function(d){return d.pdf}).length,"Arquivos armazenados")+metric("XMLs",docs.filter(function(d){return d.xml}).length,"Originais e reconstruídos")+metric("Valor total",money(sum),"Soma dos documentos")+metric("Lotes",state.batches.length,"Histórico persistente")+'</section>'+
+ '<section class="grid two-col"><div class="card panel"><div class="panel-title"><h2>Throughput recente</h2><small>documentos/minuto · demonstração</small></div><div class="chart">'+chart+'</div><div class="chart-labels"><span>10:00</span><span>10:30</span><span>11:00</span><span>Agora</span></div></div>'+
+ '<div class="card panel"><div class="panel-title"><h2>Saúde dos serviços</h2><small>Agora</small></div>'+
+ health("FSist","DocumentSourceProvider","PENDENTE","Configuração oficial necessária")+health("DocPronto","PdfToXmlProvider","PENDENTE","Documentação necessária")+health("Storage local","LocalStorageProvider","ONLINE","Navegador")+health("Motor de fila","SimulationQueueProvider","ONLINE","Concorrência "+state.settings.concurrency)+'</div></section>';
+}
+function health(name,type,status,note){return '<div class="health-row"><div class="health-name">'+name+'<small>'+type+'</small></div>'+badge(status)+'<small>'+note+'</small></div>'}
+function parseInput(raw){
+ var parts=String(raw||"").split(/[\s,;]+/).filter(Boolean),seen={},valid=[],invalid=[],dup=[];
+ parts.forEach(function(original){var k=onlyDigits(original);if(seen[k]){dup.push(k);return}seen[k]=1;if(k.length!==44)invalid.push({key:k||original,reason:"Deve conter exatamente 44 dígitos"});else if(!validKey(k))invalid.push({key:k,reason:"Dígito verificador inválido"});else valid.push(k)});
+ var existing=valid.filter(function(k){return state.documents.some(function(d){return d.accessKey===k})}),fresh=valid.filter(function(k){return existing.indexOf(k)<0});
+ return {inserted:parts.length,valid:valid,invalid:invalid,duplicates:dup,existing:existing,fresh:fresh};
+}
+function renderBatch(){
+ var v=validated||{inserted:0,valid:[],invalid:[],duplicates:[],existing:[],fresh:[]},active=state.batches.find(function(b){return ["processing","paused"].includes(b.status)});
+ var invalids=v.invalid.slice(0,8).map(function(x){return '<div class="validation-item"><code>'+mask((x.key+"").padEnd(44,"•"))+'</code><span>'+x.reason+'</span></div>'}).join("");
+ return head("Processamento em lote","Envie de uma chave a grandes listas com validação e deduplicação",'<button class="btn" id="sampleBtn">Inserir exemplo</button>')+
+ (active?renderActive(active):"")+
+ '<section class="grid batch-layout"><div class="card input-card"><textarea id="keysInput" aria-label="Chaves fiscais" placeholder="Cole suas chaves aqui — uma por linha">'+(window._draft||"")+'</textarea><div class="input-help"><span>Aceita uma por linha, vírgulas, TXT e CSV</span><span>Chave fiscal: 44 dígitos</span></div><div class="actions"><button class="btn primary" id="validateBtn">Validar chaves</button><button class="btn" id="processBtn" '+(!v.fresh.length?"disabled":"")+'>Processar todas</button><label class="btn upload">Importar TXT/CSV<input id="fileInput" type="file" accept=".txt,.csv,text/plain,text/csv"></label><button class="btn" id="clearBtn">Limpar</button></div></div>'+
+ '<aside class="card panel"><div class="panel-title"><h2>Resumo da validação</h2>'+badge(v.invalid.length?"warning":"success")+'</div><div class="grid counter-grid">'+counter("Inseridas",v.inserted)+counter("Válidas",v.valid.length)+counter("Inválidas",v.invalid.length)+counter("Duplicadas",v.duplicates.length)+counter("Já existentes",v.existing.length)+counter("Novas para processar",v.fresh.length,"wide")+'</div><div class="validation-list">'+invalids+'</div></aside></section>';
+}
+function counter(label,n,c){return '<div class="counter '+(c||"")+'"><span>'+label+'</span><strong>'+n+'</strong></div>'}
+function batchStats(b){var s={completed:0,failed:0,processing:0,pending:0,cancelled:0};b.items.forEach(function(x){if(x.status==="completed")s.completed++;else if(x.status==="failed")s.failed++;else if(x.status==="pending")s.pending++;else if(x.status==="cancelled")s.cancelled++;else s.processing++});return s}
+function renderActive(b){
+ var s=batchStats(b),pct=b.items.length?Math.round((s.completed+s.failed+s.cancelled)*100/b.items.length):0;
+ return '<div class="card progress-card"><div class="progress-top"><div><small>'+b.name+'</small><br><strong>'+pct+'% concluído</strong></div><div class="actions">'+(b.status==="paused"?'<button class="btn small primary" id="resumeBtn">Continuar</button>':'<button class="btn small" id="pauseBtn">Pausar</button>')+'<button class="btn small danger" id="cancelBtn">Cancelar</button><button class="btn small" data-view-go="batches">Ver lote</button></div></div><div class="progress-track"><div class="progress-fill" style="width:'+pct+'%"></div></div><div class="progress-meta"><span><b>'+s.completed+'</b> concluídos</span><span><b>'+s.processing+'</b> processando</span><span><b>'+s.pending+'</b> na fila</span><span><b>'+s.failed+'</b> falhas</span></div></div>';
+}
+function createBatch(keys){
+ var b={id:id(),name:"Lote #"+new Date().getFullYear()+String(state.batches.length+1).padStart(5,"0"),status:"processing",createdAt:new Date().toISOString(),startedAt:new Date().toISOString(),finishedAt:null,items:keys.map(function(k,i){return{id:id(),accessKey:k,status:"pending",stepIndex:0,attempts:0,errorCode:null,errorMessage:null,seed:i}})};
+ state.batches.unshift(b);audit("LOTE_CRIADO",b.name);save();startEngine();return b;
+}
+function startEngine(){if(timer)clearInterval(timer);timer=setInterval(tick,380)}
+function tick(){
+ var b=state.batches.find(function(x){return x.status==="processing"});if(!b){clearInterval(timer);timer=null;return}
+ var running=b.items.filter(function(x){return !["pending","completed","failed","cancelled"].includes(x.status)}).length;
+ b.items.forEach(function(item){
+  if(running>=state.settings.concurrency)return;
+  if(item.status==="pending"){item.status="validating";item.stepIndex=0;item.attempts++;running++}
+ });
+ b.items.forEach(function(item){
+  if(["completed","failed","cancelled","pending"].includes(item.status))return;
+  var fail=item.seed%13===7&&item.stepIndex===3&&item.attempts>=state.settings.retries;
+  if(fail){item.status="failed";item.errorCode="CONVERSION_FAILED";item.errorMessage="Conversor indisponível após tentativas";return}
+  if(item.seed%13===7&&item.stepIndex===3&&item.attempts<state.settings.retries){item.attempts++;item.status="retrying";item.stepIndex=2;return}
+  item.stepIndex++;item.status=STEPS[item.stepIndex]||"completed";
+  if(item.status==="completed"&&!state.documents.some(function(d){return d.accessKey===item.accessKey})){var d=makeDoc(item.accessKey,Date.now(),state.documents.length);d.batchId=b.id;state.documents.unshift(d)}
+ });
+ var s=batchStats(b);if(s.completed+s.failed+s.cancelled===b.items.length){b.status=s.failed?"completed_with_errors":"completed";b.finishedAt=new Date().toISOString();audit("LOTE_FINALIZADO",b.name,s.failed?"ATENÇÃO":"SUCESSO");state.notifications.unshift("Lote finalizado: "+b.name);clearInterval(timer);timer=null;toast("Lote finalizado")}
+ save();if(currentView==="batch"||currentView==="batches")render();
+}
+function pause(){var b=state.batches.find(function(x){return x.status==="processing"});if(b){b.status="paused";b.items.forEach(function(i){if(!["completed","failed","cancelled"].includes(i.status))i.status="paused"});audit("LOTE_PAUSADO",b.name);save();render()}}
+function resume(){var b=state.batches.find(function(x){return x.status==="paused"});if(b){b.status="processing";b.items.forEach(function(i){if(i.status==="paused")i.status="pending"});audit("LOTE_RETOMADO",b.name);save();startEngine();render()}}
+function cancel(){var b=state.batches.find(function(x){return ["processing","paused"].includes(x.status)});if(b&&confirm("Cancelar os itens ainda não concluídos?")){b.status="cancelled";b.finishedAt=new Date().toISOString();b.items.forEach(function(i){if(i.status!=="completed"&&i.status!=="failed")i.status="cancelled"});audit("LOTE_CANCELADO",b.name,"ATENÇÃO");save();render()}}
+function table(items,kind){
+ if(!items.length)return '<div class="empty"><strong>Nenhum registro encontrado</strong>Ajuste os filtros ou processe um novo lote.</div>';
+ if(kind==="documents")return '<div class="table-wrap"><table class="data-table"><thead><tr><th>Chave</th><th>Número</th><th>Emitente</th><th>Data</th><th>Valor</th><th>XML</th><th>Status</th><th>Ações</th></tr></thead><tbody>'+items.map(function(d){return '<tr><td><code>'+mask(d.accessKey)+'</code></td><td>'+d.number+'</td><td>'+d.issuer+'</td><td>'+date(d.issueDate)+'</td><td>'+money(d.value)+'</td><td>'+badge(d.xmlSource)+'</td><td>'+badge(d.status)+'</td><td class="row-actions"><button class="link-btn" data-doc="'+d.id+'">Abrir</button><button class="link-btn" data-xml="'+d.id+'">XML</button></td></tr>'}).join("")+'</tbody></table></div>';
+ return '<div class="table-wrap"><table class="data-table"><thead><tr><th>Lote</th><th>Criado</th><th>Total</th><th>Concluídos</th><th>Falhas</th><th>Progresso</th><th>Status</th><th>Ação</th></tr></thead><tbody>'+items.map(function(b){var s=batchStats(b),p=Math.round((s.completed+s.failed+s.cancelled)*100/b.items.length);return '<tr><td><strong>'+b.name+'</strong></td><td>'+date(b.createdAt)+'</td><td>'+b.items.length+'</td><td>'+s.completed+'</td><td>'+s.failed+'</td><td>'+p+'%</td><td>'+badge(b.status)+'</td><td><button class="link-btn" data-batch="'+b.id+'">Detalhes</button></td></tr>'}).join("")+'</tbody></table></div>';
+}
+function renderDocuments(){
+ var q=filter.toLowerCase(),list=state.documents.filter(function(d){return !q||[d.accessKey,d.number,d.issuer,d.recipient,d.xmlSource].join(" ").toLowerCase().includes(q)}),start=(page-1)*perPage,part=list.slice(start,start+perPage);
+ return head("Documentos","PDFs, XMLs e dados estruturados disponíveis",'<button class="btn" id="exportDocs">Exportar CSV</button><button class="btn primary" data-view-go="batch">+ Novo lote</button>')+'<div class="card"><div class="toolbar"><input id="tableSearch" value="'+filter+'" placeholder="Buscar chave, número ou empresa"><select id="statusFilter"><option>Todos os status</option><option>Concluído</option><option>Falha</option></select><span style="margin-left:auto;color:var(--muted);font-size:10px">'+list.length+' registros</span></div>'+table(part,"documents")+pager(list.length)+'</div>';
+}
+function pager(total){var pages=Math.max(1,Math.ceil(total/perPage));return '<div class="pagination"><span>Página '+page+' de '+pages+'</span><div class="actions"><button class="btn small" id="prevPage" '+(page<=1?"disabled":"")+'>Anterior</button><button class="btn small" id="nextPage" '+(page>=pages?"disabled":"")+'>Próxima</button></div></div>'}
+function renderBatches(){return head("Histórico de lotes","Acompanhe processamentos, resultados e falhas",'<button class="btn primary" data-view-go="batch">+ Criar lote</button>')+'<div class="card">'+table(state.batches,"batches")+'</div>'}
+function renderInbox(){return head("Caixa de entrada de chaves","Uma esteira contínua para novas solicitações documentais")+'<div class="card panel"><div class="inbox-drop"><h3>Envie novas chaves a qualquer momento</h3><p>TXT e CSV alimentam o mesmo motor de validação, deduplicação e processamento.</p><button class="btn primary" data-view-go="batch">Abrir processamento em lote</button></div></div><div class="notice" style="margin-top:14px">API, webhook, ERP e SFTP estão previstos pela arquitetura universal de ingestão. Nesta demonstração, use entrada manual, TXT ou CSV.</div>'}
+function renderFailures(){
+ var rows=[];state.batches.forEach(function(b){b.items.filter(function(i){return i.status==="failed"}).forEach(function(i){rows.push({b:b,i:i})})});
+ var body=rows.length?'<div class="table-wrap"><table class="data-table"><thead><tr><th>Chave</th><th>Lote</th><th>Código</th><th>Mensagem</th><th>Tentativas</th><th>Ações</th></tr></thead><tbody>'+rows.map(function(x){return '<tr><td><code>'+mask(x.i.accessKey)+'</code></td><td>'+x.b.name+'</td><td>'+badge("failed")+' '+x.i.errorCode+'</td><td>'+x.i.errorMessage+'</td><td>'+x.i.attempts+'</td><td><button class="link-btn" data-retry="'+x.i.id+'" data-parent="'+x.b.id+'">Reprocessar</button><button class="link-btn" data-ignore="'+x.i.id+'" data-parent="'+x.b.id+'">Ignorar</button></td></tr>'}).join("")+'</tbody></table></div>':'<div class="empty"><strong>A fila de falhas está vazia</strong>Erros definitivos ou esgotados aparecerão aqui.</div>';
+ return head("Falhas e análise","Dead-letter queue com diagnóstico e reprocessamento controlado")+'<div class="card">'+body+'</div>';
+}
+function renderIntegrations(){
+ return head("Integrações","Providers isolados e substituíveis sem alterar o núcleo")+'<div class="grid provider-grid">'+provider("FSist","DocumentSourceProvider","Obtém o PDF somente por integração oficial, API ou fluxo autorizado.","PENDENTE")+provider("DocPronto","PdfToXmlProvider","Converte o PDF e devolve XML reconstruído, com origem identificada.","PENDENTE")+provider("Storage local","StorageProvider","Armazenamento demonstrativo neste navegador. Produção: filesystem ou MinIO.","ONLINE")+provider("Fila simulada","QueueProvider","Motor local com concorrência, retry, pausa, retomada e checkpoints.","ONLINE")+'</div><div class="notice" style="margin-top:14px">O sistema não tenta resolver CAPTCHA nem contornar autenticação. Credenciais e endpoints reais só devem ser configurados após confirmação da documentação oficial dos provedores.</div>';
+}
+function provider(name,type,desc,status){return '<div class="card provider"><div class="provider-head"><div><h3>'+name+'</h3><small>'+type+'</small></div>'+badge(status)+'</div><p>'+desc+'</p><dl><div><dt>Modo</dt><dd>'+(status==="ONLINE"?"Local demonstrativo":"Não configurado")+'</dd></div><div><dt>Timeout</dt><dd>'+state.settings.timeout+' segundos</dd></div><div><dt>Retry</dt><dd>'+state.settings.retries+' tentativas</dd></div><div><dt>Rate limit</dt><dd>Configurável</dd></div></dl><button class="btn small" data-config="'+name+'">Configurar</button></div>'}
+function renderAdmin(){
+ return head("Administração","Empresas, usuários, recursos e políticas operacionais")+'<section class="grid settings-grid">'+
+ '<div class="card setting-card"><h3>Perfis de acesso</h3>'+role("Super Admin","Controle total da plataforma")+role("Admin da Empresa","Usuários e documentos da empresa")+role("Operador","Processa e consulta documentos")+role("Visualizador","Somente leitura")+'</div>'+
+ '<div class="card setting-card"><h3>Recursos locais</h3><div class="resource-meter"><div class="resource-box"><span>CPU simulada</span><strong>34%</strong></div><div class="resource-box"><span>RAM simulada</span><strong>42%</strong></div></div><div style="margin-top:14px">'+badge("ONLINE")+' <strong style="font-size:11px;margin-left:6px">LocalResourceManager: GREEN</strong></div><p style="color:var(--muted);font-size:10px;line-height:1.6">O modo AUTO ajusta gradualmente a concorrência preservando recursos para banco e sistema operacional.</p></div>'+
+ '<div class="card setting-card"><h3>Privacidade e LGPD</h3><p style="font-size:10px;line-height:1.7;color:var(--muted)">Chaves são mascaradas, ações relevantes são auditadas e os dados ficam isolados conceitualmente por empresa.</p><div class="notice">Política de retenção e exclusão deverá ser configurada antes da produção.</div></div></section>';
+}
+function role(n,d){return '<div class="health-row" style="grid-template-columns:1fr"><div class="health-name">'+n+'<small>'+d+'</small></div></div>'}
+function renderAudit(){
+ var rows=state.audit.slice(0,100).map(function(a){return '<tr><td>'+date(a.at)+'</td><td>'+a.user+'</td><td>'+a.action+'</td><td class="audit-key">'+a.resource+'</td><td>'+badge(a.result)+'</td></tr>'}).join("");
+ return head("Auditoria","Registro das ações relevantes sem expor segredos ou chaves completas")+'<div class="card"><div class="table-wrap"><table class="data-table"><thead><tr><th>Data</th><th>Usuário</th><th>Ação</th><th>Recurso</th><th>Resultado</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+}
+function renderSettings(){
+ var s=state.settings;
+ return head("Configurações","Ajuste o motor conforme a capacidade real da infraestrutura")+'<section class="grid settings-grid"><div class="card setting-card"><h3>Perfil de desempenho</h3><div class="mode-selector">'+["ECO","STANDARD","AUTO"].map(function(m){return '<button class="mode '+(s.mode===m?"active":"")+'" data-mode="'+m+'">'+m+'</button>'}).join("")+'</div><p style="color:var(--muted);font-size:10px;line-height:1.6">Nenhum perfil remove limites, segurança ou controle de concorrência.</p></div>'+
+ '<div class="card setting-card"><h3>Motor de processamento</h3><div class="field"><label>Concorrência máxima</label><input id="concurrency" type="number" min="1" max="20" value="'+s.concurrency+'"></div><div class="field"><label>Tentativas máximas</label><input id="retries" type="number" min="1" max="8" value="'+s.retries+'"></div><button class="btn primary small" id="saveSettings">Salvar</button></div>'+
+ '<div class="card setting-card"><h3>Provedores</h3><div class="field"><label>Timeout padrão (segundos)</label><input id="timeout" type="number" min="5" max="300" value="'+s.timeout+'"></div><p style="color:var(--muted);font-size:10px">Os limites oficiais deverão ser configurados após receber a documentação de cada provedor.</p></div></section>';
+}
+function render(){var app=document.getElementById("app"),html={dashboard:renderDashboard,batch:renderBatch,inbox:renderInbox,documents:renderDocuments,batches:renderBatches,failures:renderFailures,integrations:renderIntegrations,admin:renderAdmin,audit:renderAudit,settings:renderSettings}[currentView]();app.innerHTML=html;bindView();document.querySelectorAll(".nav-item").forEach(function(n){n.classList.toggle("active",n.dataset.view===currentView)})}
+function bindView(){
+ document.querySelectorAll("[data-view-go]").forEach(function(b){b.onclick=function(){go(b.dataset.viewGo)}});
+ var e;
+ if(e=document.getElementById("sampleBtn"))e.onclick=function(){var a=[];for(var i=0;i<14;i++)a.push(makeKey("352609"+String(i+9800000000000000000000000000000000000)));a.push(a[2],"12345",a[4].slice(0,43)+"9");window._draft=a.join("\n");validated=null;render()};
+ if(e=document.getElementById("keysInput"))e.oninput=function(){window._draft=e.value};
+ if(e=document.getElementById("validateBtn"))e.onclick=function(){validated=parseInput(document.getElementById("keysInput").value);window._draft=document.getElementById("keysInput").value;toast("Validação concluída");render()};
+ if(e=document.getElementById("processBtn"))e.onclick=function(){if(validated&&validated.fresh.length&&confirm("Criar lote com "+validated.fresh.length+" chaves novas?")){createBatch(validated.fresh);validated=null;window._draft="";render()}};
+ if(e=document.getElementById("clearBtn"))e.onclick=function(){validated=null;window._draft="";render()};
+ if(e=document.getElementById("fileInput"))e.onchange=function(){var f=e.files[0];if(!f)return;var r=new FileReader();r.onload=function(){window._draft=String(r.result);validated=parseInput(window._draft);render();toast("Arquivo importado e validado")};r.readAsText(f)};
+ if(e=document.getElementById("pauseBtn"))e.onclick=pause;if(e=document.getElementById("resumeBtn"))e.onclick=resume;if(e=document.getElementById("cancelBtn"))e.onclick=cancel;
+ if(e=document.getElementById("tableSearch"))e.oninput=function(){filter=e.value;page=1;render()};
+ if(e=document.getElementById("prevPage"))e.onclick=function(){page--;render()};if(e=document.getElementById("nextPage"))e.onclick=function(){page++;render()};
+ if(e=document.getElementById("exportDocs"))e.onclick=function(){download("documentos-docpronto.csv",toCsv(state.documents),"text/csv")};
+ if(e=document.getElementById("saveSettings"))e.onclick=function(){state.settings.concurrency=Math.max(1,Math.min(20,Number(document.getElementById("concurrency").value)||5));state.settings.retries=Math.max(1,Math.min(8,Number(document.getElementById("retries").value)||3));state.settings.timeout=Math.max(5,Math.min(300,Number(document.getElementById("timeout").value)||30));audit("CONFIGURAÇÕES_ALTERADAS","Motor");save();toast("Configurações salvas");render()};
+ document.querySelectorAll("[data-mode]").forEach(function(b){b.onclick=function(){state.settings.mode=b.dataset.mode;state.settings.concurrency=b.dataset.mode==="ECO"?2:b.dataset.mode==="STANDARD"?5:Math.max(5,navigator.hardwareConcurrency?Math.min(12,navigator.hardwareConcurrency):6);save();render();toast("Modo "+b.dataset.mode+" ativado")}});
+ document.querySelectorAll("[data-doc]").forEach(function(b){b.onclick=function(){openDoc(b.dataset.doc)}});
+ document.querySelectorAll("[data-xml]").forEach(function(b){b.onclick=function(){downloadXml(b.dataset.xml)}});
+ document.querySelectorAll("[data-batch]").forEach(function(b){b.onclick=function(){openBatch(b.dataset.batch)}});
+ document.querySelectorAll("[data-config]").forEach(function(b){b.onclick=function(){toast(b.dataset.config+" aguarda documentação/configuração oficial")}});
+ document.querySelectorAll("[data-retry]").forEach(function(b){b.onclick=function(){retryItem(b.dataset.parent,b.dataset.retry)}});
+ document.querySelectorAll("[data-ignore]").forEach(function(b){b.onclick=function(){ignoreItem(b.dataset.parent,b.dataset.ignore)}});
+}
+function toCsv(docs){var rows=[["chave","status","numero","emitente","destinatario","data","valor","xml_source"]];docs.forEach(function(d){rows.push([d.accessKey,d.status,d.number,d.issuer,d.recipient,d.issueDate,d.value.toFixed(2),d.xmlSource])});return "\ufeff"+rows.map(function(r){return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"'}).join(";")}).join("\n")}
+function xmlFor(d){return '<?xml version="1.0" encoding="UTF-8"?>\n<DocumentoFiscal origem="'+d.xmlSource+'">\n  <Aviso>XML demonstrativo; não é XML fiscal original</Aviso>\n  <Chave>'+d.accessKey+'</Chave>\n  <Numero>'+d.number+'</Numero>\n  <Emitente>'+escapeXml(d.issuer)+'</Emitente>\n  <Destinatario>'+escapeXml(d.recipient)+'</Destinatario>\n  <Valor>'+d.value.toFixed(2)+'</Valor>\n</DocumentoFiscal>'}
+function escapeXml(s){return String(s).replace(/[<>&'"]/g,function(c){return{"<":"&lt;",">":"&gt;","&":"&amp;","'":"&apos;",'"':"&quot;"}[c]})}
+function download(name,content,type){var a=document.createElement("a");a.href=URL.createObjectURL(new Blob([content],{type:type||"text/plain"}));a.download=name;a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},1000);audit("ARQUIVO_BAIXADO",name);save()}
+function downloadXml(docId){var d=state.documents.find(function(x){return x.id===docId});if(d)download("documento-"+d.number+".xml",xmlFor(d),"application/xml")}
+function openDoc(docId){var d=state.documents.find(function(x){return x.id===docId});if(!d)return;var logs=d.logs.map(function(l){return "<div>"+l+"</div>"}).join("");showModal('<div class="modal-head"><div><small>Documento '+d.number+'</small><h2>'+d.issuer+'</h2></div><button class="icon-btn" data-close>×</button></div><div class="modal-body"><div class="grid detail-grid">'+detail("Chave",mask(d.accessKey))+detail("Emissão",date(d.issueDate))+detail("Valor",money(d.value))+detail("Emitente",d.issuer)+detail("Destinatário",d.recipient)+detail("Origem XML",d.xmlSource)+'</div><div class="actions" style="margin-top:18px"><button class="btn primary" data-modal-xml="'+d.id+'">Baixar XML</button><button class="btn" data-demo-pdf>Visualizar PDF</button></div><h3 style="margin-top:24px">Histórico de processamento</h3><div class="timeline">'+logs+'</div></div>');audit("DOCUMENTO_VISUALIZADO","Documento "+d.number);save()}
+function detail(l,v){return '<div class="detail"><span>'+l+'</span><strong>'+v+'</strong></div>'}
+function openBatch(batchId){var b=state.batches.find(function(x){return x.id===batchId});if(!b)return;var s=batchStats(b),rows=b.items.slice(0,80).map(function(i){return '<tr><td><code>'+mask(i.accessKey)+'</code></td><td>'+LABELS[i.status]+'</td><td>'+i.attempts+'</td><td>'+(i.errorCode||"—")+'</td></tr>'}).join("");showModal('<div class="modal-head"><div><small>Detalhes do lote</small><h2>'+b.name+'</h2></div><button class="icon-btn" data-close>×</button></div><div class="modal-body"><div class="grid detail-grid">'+detail("Total",b.items.length)+detail("Concluídos",s.completed)+detail("Falhas",s.failed)+'</div><div class="actions" style="margin-top:16px"><button class="btn" data-batch-csv="'+b.id+'">Exportar CSV</button></div><div class="table-wrap" style="margin-top:15px"><table class="data-table"><thead><tr><th>Chave</th><th>Etapa/status</th><th>Tentativas</th><th>Erro</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>')}
+function showModal(html){var root=document.getElementById("modalRoot");root.innerHTML='<div class="modal-backdrop"><div class="modal">'+html+'</div></div>';root.querySelector("[data-close]").onclick=function(){root.innerHTML=""};root.querySelector(".modal-backdrop").onclick=function(e){if(e.target===e.currentTarget)root.innerHTML=""};var x=root.querySelector("[data-modal-xml]");if(x)x.onclick=function(){downloadXml(x.dataset.modalXml)};var p=root.querySelector("[data-demo-pdf]");if(p)p.onclick=function(){toast("PDF demonstrativo: integração real ainda não configurada")};var c=root.querySelector("[data-batch-csv]");if(c)c.onclick=function(){var b=state.batches.find(function(z){return z.id===c.dataset.batchCsv});var rows="chave;status;tentativas;erro\n"+b.items.map(function(i){return [i.accessKey,i.status,i.attempts,i.errorCode||""].join(";")}).join("\n");download(b.name.replace(/[^a-z0-9]/gi,"-")+".csv","\ufeff"+rows,"text/csv")}}
+function retryItem(bid,iid){var b=state.batches.find(function(x){return x.id===bid}),i=b&&b.items.find(function(x){return x.id===iid});if(i){i.status="pending";i.stepIndex=0;i.errorCode=null;i.errorMessage=null;i.seed=0;b.status="processing";b.finishedAt=null;audit("ITEM_REPROCESSADO",b.name);save();startEngine();render()}}
+function ignoreItem(bid,iid){var b=state.batches.find(function(x){return x.id===bid}),i=b&&b.items.find(function(x){return x.id===iid});if(i){i.status="cancelled";audit("FALHA_IGNORADA",b.name,"ATENÇÃO");save();render()}}
+function go(v){currentView=v;page=1;filter="";document.getElementById("sidebar").classList.remove("open");render();document.getElementById("app").focus()}
+document.getElementById("nav").onclick=function(e){var b=e.target.closest("[data-view]");if(b)go(b.dataset.view)};
+document.getElementById("menuBtn").onclick=function(){document.getElementById("sidebar").classList.toggle("open")};
+document.getElementById("notifyBtn").onclick=function(){toast(state.notifications[0]||"Nenhuma nova notificação")};
+document.getElementById("globalSearch").onkeydown=function(e){if(e.key==="Enter"){filter=e.target.value;go("documents")}};
+window.addEventListener("storage",function(){state=loadState();render()});
+if(state.batches.some(function(b){return b.status==="processing"}))startEngine();
+render();
+})();
