@@ -127,18 +127,18 @@ function bindView(){
  document.querySelectorAll("[data-view-go]").forEach(function(b){b.onclick=function(){go(b.dataset.viewGo)}});
  var e;
  if(e=document.getElementById("sampleBtn"))e.onclick=function(){var a=[];for(var i=0;i<14;i++)a.push(makeKey("352609"+String(i+9800000000000000000000000000000000000)));a.push(a[2],"12345",a[4].slice(0,43)+"9");window._draft=a.join("\n");validated=null;render()};
- if(e=document.getElementById("keysInput"))e.oninput=function(){window._draft=e.value};
+ if(e=document.getElementById("keysInput")){var keysInputEl=e;keysInputEl.oninput=function(){window._draft=keysInputEl.value}};
  if(e=document.getElementById("validateBtn"))e.onclick=function(){validated=parseInput(document.getElementById("keysInput").value);window._draft=document.getElementById("keysInput").value;toast("Validação concluída");render()};
  if(e=document.getElementById("processBtn"))e.onclick=function(){if(validated&&validated.fresh.length&&confirm("Criar lote com "+validated.fresh.length+" chaves novas?")){createBatch(validated.fresh);validated=null;window._draft="";render()}};
  if(e=document.getElementById("clearBtn"))e.onclick=function(){validated=null;window._draft="";render()};
- if(e=document.getElementById("fileInput"))e.onchange=function(){var f=e.files[0];if(!f)return;var r=new FileReader();r.onload=function(){window._draft=String(r.result);validated=parseInput(window._draft);render();toast("Arquivo importado e validado")};r.readAsText(f)};
+ if(e=document.getElementById("fileInput")){var fileInputEl=e;fileInputEl.onchange=function(){var f=fileInputEl.files[0];if(!f)return;var r=new FileReader();r.onload=function(){window._draft=String(r.result);validated=parseInput(window._draft);render();toast("Arquivo importado e validado")};r.readAsText(f)}};
  if(e=document.getElementById("pauseBtn"))e.onclick=pause;if(e=document.getElementById("resumeBtn"))e.onclick=resume;if(e=document.getElementById("cancelBtn"))e.onclick=cancel;
- if(e=document.getElementById("tableSearch"))e.oninput=function(){filter=e.value;page=1;render()};
+ if(e=document.getElementById("tableSearch")){var tableSearchEl=e;tableSearchEl.oninput=function(){filter=tableSearchEl.value;page=1;render()}};
  if(e=document.getElementById("prevPage"))e.onclick=function(){page--;render()};if(e=document.getElementById("nextPage"))e.onclick=function(){page++;render()};
  if(e=document.getElementById("exportDocs"))e.onclick=function(){download("documentos-docpronto.csv",toCsv(state.documents),"text/csv")};
  if(e=document.getElementById("deleteSelectedDocs"))e.onclick=deleteSelectedDocuments;
  if(e=document.getElementById("clearCompletedBatches"))e.onclick=clearCompletedBatches;
- if(e=document.getElementById("selectAllDocuments")){var selectable=getFilteredDocuments(),selectedCountInFilter=selectable.filter(function(d){return selectedDocs[d.id]}).length;e.checked=selectable.length>0&&selectedCountInFilter===selectable.length;e.indeterminate=selectedCountInFilter>0&&selectedCountInFilter<selectable.length;e.onchange=function(){selectable.forEach(function(d){selectedDocs[d.id]=e.checked});render()}}
+ if(e=document.getElementById("selectAllDocuments")){var selectAllEl=e,selectable=getFilteredDocuments(),selectedCountInFilter=selectable.filter(function(d){return selectedDocs[d.id]}).length;selectAllEl.checked=selectable.length>0&&selectedCountInFilter===selectable.length;selectAllEl.indeterminate=selectedCountInFilter>0&&selectedCountInFilter<selectable.length;selectAllEl.onchange=function(){var shouldSelect=selectAllEl.checked;selectable.forEach(function(d){selectedDocs[d.id]=shouldSelect});render()}}
  document.querySelectorAll("[data-select-doc]").forEach(function(c){c.onchange=function(){selectedDocs[c.dataset.selectDoc]=c.checked;render()}});
  document.querySelectorAll("[data-delete-doc]").forEach(function(b){b.onclick=function(){deleteDocument(b.dataset.deleteDoc)}});
  document.querySelectorAll("[data-delete-batch]").forEach(function(b){b.onclick=function(){if(!b.disabled)deleteBatch(b.dataset.deleteBatch)}});
