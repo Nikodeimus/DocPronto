@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
+const agentVersion = "2026.09.15-dfe.3";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -88,7 +89,7 @@ async function handleApi(request, response, requested) {
   }
   try {
     if (request.method === "GET" && requested === "/api/certificates") {
-      writeJson(response, 200, { certificates: await listWindowsCertificates() });
+      writeJson(response, 200, { agentVersion, certificates: await listWindowsCertificates() });
       return;
     }
     if (request.method === "POST" && requested === "/api/dfe/sync") {
