@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.15";
+const agentVersion = "2026.09.15-cert.16";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -97,6 +97,10 @@ async function handleApi(request, response, requested) {
     }
     if (request.method === "GET" && requested === "/api/certificates") {
       writeJson(response, 200, { agentVersion, certificates: await listWindowsCertificates() });
+      return;
+    }
+    if (request.method === "POST" && requested === "/api/certificate/test-a3") {
+      writeJson(response, 200, await testA3Reader(await readJsonBody(request)));
       return;
     }
     if (request.method === "POST" && requested === "/api/dfe/sync") {
@@ -262,6 +266,8 @@ $cuf = $env:DOCPRONTO_CUF
 $lastNsu = $env:DOCPRONTO_LAST_NSU
 $type = $env:DOCPRONTO_DFE_TYPE
 $certificateMode = $env:DOCPRONTO_CERT_MODE
+Add-Type -AssemblyName System.Security
+Add-Type -AssemblyName System.Net.Http
 
 $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'CurrentUser')
 $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
@@ -269,6 +275,25 @@ try {
   $cert = $store.Certificates | Where-Object { ($_.Thumbprint -replace '\s', '') -eq $thumbprint } | Select-Object -First 1
   if (-not $cert) { throw 'Certificado A1/A3 não encontrado no Windows.' }
   if (-not $cert.HasPrivateKey) { throw 'O certificado selecionado não possui chave privada disponível.' }
+  if ($cert.NotBefore -gt (Get-Date) -or $cert.NotAfter -le (Get-Date)) { throw 'O certificado selecionado está fora do período de validade.' }
+  $subjectCnpj = [regex]::Match($cert.Subject, '(?<!\d)(\d{14})(?!\d)')
+  if ($subjectCnpj.Success -and $subjectCnpj.Groups[1].Value -ne $cnpj) {
+    throw ('O CNPJ informado não pertence ao certificado selecionado. Certificado: ' + $subjectCnpj.Groups[1].Value + '.')
+  }
+
+  if ($certificateMode -eq 'A3') {
+    try {
+      $probe = [Text.Encoding]::UTF8.GetBytes('DocPronto validação local do A3')
+      $contentInfo = [System.Security.Cryptography.Pkcs.ContentInfo]::new($probe)
+      $signedCms = [System.Security.Cryptography.Pkcs.SignedCms]::new($contentInfo, $true)
+      $signer = [System.Security.Cryptography.Pkcs.CmsSigner]::new($cert)
+      $signer.IncludeOption = [System.Security.Cryptography.X509Certificates.X509IncludeOption]::EndCertOnly
+      $signedCms.ComputeSignature($signer, $false)
+      if ($signedCms.Encode().Length -eq 0) { throw 'O token não produziu a assinatura de validação.' }
+    } catch {
+      throw ('Não foi possível desbloquear a chave privada do A3. Confirme o PIN na janela do token e verifique o driver do leitor. Detalhe: ' + $_.Exception.Message)
+    }
+  }
 
   if ($type -eq 'CTE') {
     $endpoint = 'https://www1.cte.fazenda.gov.br/CTeDistribuicaoDFe/CTeDistribuicaoDFe.asmx'
@@ -291,43 +316,34 @@ try {
 
   $contentType = 'application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"'
   try {
-    if ($certificateMode -eq 'A3') {
-      $requestFile = [IO.Path]::GetTempFileName()
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.ClientCertificateOptions = [Net.Http.ClientCertificateOption]::Manual
+    $handler.UseProxy = $false
+    $handler.UseCookies = $false
+    [void]$handler.ClientCertificates.Add($cert)
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds($(if ($certificateMode -eq 'A3') { 120 } else { 45 }))
+    try {
+      $payload = [Text.Encoding]::UTF8.GetBytes($soap)
+      $httpContent = [Net.Http.ByteArrayContent]::new($payload)
+      [void]$httpContent.Headers.TryAddWithoutValidation('Content-Type', $contentType)
       try {
-        [IO.File]::WriteAllText($requestFile, $soap, [Text.UTF8Encoding]::new($false))
-        $certStorePath = 'CurrentUser\\MY\\' + $thumbprint
-        $curlOutput = & curl.exe --silent --show-error --fail --tlsv1.2 --http1.1 --noproxy '*' --connect-timeout 30 --max-time 120 --cert $certStorePath --header ('Content-Type: ' + $contentType) --data-binary ('@' + $requestFile) $endpoint 2>&1
-        $curlExitCode = $LASTEXITCODE
-        $responseText = ($curlOutput | Out-String).Trim()
-        if ($curlExitCode -ne 0) {
-          throw ('curl/Schannel retornou erro ' + $curlExitCode + ': ' + $responseText)
+        $webResponse = $client.PostAsync($endpoint, $httpContent).GetAwaiter().GetResult()
+        $responseText = $webResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if (-not $webResponse.IsSuccessStatusCode) {
+          throw ('HTTP ' + [int]$webResponse.StatusCode + ': ' + $responseText)
         }
       } finally {
-        Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
+        $httpContent.Dispose()
       }
-    } else {
-      $payload = [Text.Encoding]::UTF8.GetBytes($soap)
-      $webRequest = [Net.HttpWebRequest]::Create($endpoint)
-      $webRequest.Method = 'POST'
-      $webRequest.ContentType = $contentType
-      $webRequest.ContentLength = $payload.Length
-      $webRequest.KeepAlive = $false
-      $webRequest.Proxy = $null
-      $webRequest.Timeout = 45000
-      $webRequest.ReadWriteTimeout = 45000
-      [void]$webRequest.ClientCertificates.Add($cert)
-      $requestStream = $webRequest.GetRequestStream()
-      try { $requestStream.Write($payload, 0, $payload.Length) } finally { $requestStream.Dispose() }
-      $webResponse = $webRequest.GetResponse()
-      try {
-        $reader = [IO.StreamReader]::new($webResponse.GetResponseStream(), [Text.Encoding]::UTF8)
-        try { $responseText = $reader.ReadToEnd() } finally { $reader.Dispose() }
-      } finally { $webResponse.Dispose() }
+    } finally {
+      $client.Dispose()
+      $handler.Dispose()
     }
   } catch {
     $httpMessage = $_.Exception.Message
     if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $httpMessage = $_.ErrorDetails.Message }
-    throw ('Falha na conexão direta do Windows com a SEFAZ: ' + $httpMessage)
+    throw ('O A3 foi desbloqueado, mas a conexão segura com a SEFAZ falhou: ' + $httpMessage)
   }
 
   [xml]$soapXml = $responseText
@@ -565,7 +581,17 @@ async function signWithWindowsCertificate({ thumbprint, contentBase64 }) {
   return signBufferWithWindowsCertificate(cleanThumbprint, Buffer.from(contentBase64, "base64"));
 }
 
-async function signBufferWithWindowsCertificate(thumbprint, content) {
+async function testA3Reader({ thumbprint }) {
+  const cleanThumbprint = String(thumbprint || "").replace(/\s/g, "");
+  if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione o certificado A3 instalado.");
+  await signBufferWithWindowsCertificate(cleanThumbprint, Buffer.from("DocPronto - teste local do leitor A3", "utf8"), {
+    windowsHide: false,
+    timeoutMessage: "O leitor A3 não respondeu em 2 minutos. Confirme o PIN e verifique o driver do token."
+  });
+  return { ready: true, agentVersion, message: "Leitor, PIN e chave privada do A3 validados localmente." };
+}
+
+async function signBufferWithWindowsCertificate(thumbprint, content, options = {}) {
   const cleanThumbprint = String(thumbprint || "").replace(/\s/g, "");
   if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione um certificado instalado valido.");
   const tempDir = await mkdtemp(join(tmpdir(), "docpronto-sign-"));
@@ -597,7 +623,7 @@ try {
     const output = (await runPowerShell(script, {
       DOCPRONTO_CERT_THUMBPRINT: cleanThumbprint,
       DOCPRONTO_SIGN_INPUT: inputPath
-    }, 120000)).trim();
+    }, 120000, options)).trim();
     debugLog(`windows-sign:done:${output.length}`);
     return output;
   } finally {
@@ -787,7 +813,8 @@ function escapePdfString(value) {
 
 function runPowerShell(script, env = {}, timeoutMs = 30000, options = {}) {
   return new Promise((resolveOutput, reject) => {
-    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+    const utf8Script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $OutputEncoding = [Console]::OutputEncoding;\n" + script;
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", utf8Script], {
       windowsHide: options.windowsHide !== false,
       env: { ...process.env, ...env }
     });
