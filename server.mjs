@@ -265,63 +265,83 @@ try {
   $dist = '<distDFeInt xmlns="' + $fiscalNs + '" versao="1.01"><tpAmb>1</tpAmb><cUFAutor>' + $cuf + '</cUFAutor><CNPJ>' + $cnpj + '</CNPJ><distNSU><ultNSU>' + $lastNsu + '</ultNSU></distNSU></distDFeInt>'
   $soap = '<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body><' + $operation + ' xmlns="' + $serviceNs + '"><' + $messageElement + '>' + $dist + '</' + $messageElement + '></' + $operation + '></soap12:Body></soap12:Envelope>'
 
-  $handler = [System.Net.Http.HttpClientHandler]::new()
-  $handler.ClientCertificateOptions = [System.Net.Http.ClientCertificateOption]::Manual
-  [void]$handler.ClientCertificates.Add($cert)
-  $client = [System.Net.Http.HttpClient]::new($handler)
-  $client.Timeout = [TimeSpan]::FromSeconds(120)
+  $request = [System.Net.HttpWebRequest]::Create($endpoint)
+  $request.Method = 'POST'
+  $request.ProtocolVersion = [Version]'1.1'
+  $request.KeepAlive = $false
+  $request.Timeout = 120000
+  $request.ReadWriteTimeout = 120000
+  $request.ContentType = 'application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"'
+  [void]$request.ClientCertificates.Add($cert)
+  $payload = [Text.Encoding]::UTF8.GetBytes($soap)
+  $request.ContentLength = $payload.Length
   try {
-    $content = [System.Net.Http.StringContent]::new($soap, [Text.Encoding]::UTF8)
-    $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"')
-    $response = $client.PostAsync($endpoint, $content).GetAwaiter().GetResult()
-    $responseText = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-    if (-not $response.IsSuccessStatusCode) { throw ('SEFAZ respondeu HTTP ' + [int]$response.StatusCode + ': ' + $responseText.Substring(0, [Math]::Min(500, $responseText.Length))) }
-    [xml]$soapXml = $responseText
-    $ret = $soapXml.SelectSingleNode("//*[local-name()='retDistDFeInt']")
-    if (-not $ret) { throw 'Resposta da SEFAZ sem retDistDFeInt.' }
-    $statusNode = $ret.SelectSingleNode("./*[local-name()='cStat']")
-    $messageNode = $ret.SelectSingleNode("./*[local-name()='xMotivo']")
-    $lastNode = $ret.SelectSingleNode("./*[local-name()='ultNSU']")
-    $maxNode = $ret.SelectSingleNode("./*[local-name()='maxNSU']")
-    $documents = @()
-    foreach ($docNode in $ret.SelectNodes(".//*[local-name()='docZip']")) {
-      $compressed = [Convert]::FromBase64String($docNode.InnerText.Trim())
-      $memory = [IO.MemoryStream]::new($compressed)
-      $gzip = [IO.Compression.GZipStream]::new($memory, [IO.Compression.CompressionMode]::Decompress)
-      $reader = [IO.StreamReader]::new($gzip, [Text.Encoding]::UTF8)
-      try { $documentXml = $reader.ReadToEnd() } finally { $reader.Dispose(); $gzip.Dispose(); $memory.Dispose() }
-      $keyMatch = [regex]::Match($documentXml, '<ch(?:NFe|CTe)>(\d{44})</ch(?:NFe|CTe)>')
-      if (-not $keyMatch.Success) { $keyMatch = [regex]::Match($documentXml, 'Id="(?:NFe|CTe)(\d{44})"') }
-      if ($keyMatch.Success) { $key = $keyMatch.Groups[1].Value } else { $key = '' }
-      $documents += [PSCustomObject]@{
-        nsu = $docNode.GetAttribute('NSU')
-        schema = $docNode.GetAttribute('schema')
-        key = $key
-        xmlBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($documentXml))
-      }
+    $requestStream = $request.GetRequestStream()
+    try { $requestStream.Write($payload, 0, $payload.Length) } finally { $requestStream.Dispose() }
+    $httpResponse = $request.GetResponse()
+    try {
+      $responseReader = [IO.StreamReader]::new($httpResponse.GetResponseStream(), [Text.Encoding]::UTF8)
+      try { $responseText = $responseReader.ReadToEnd() } finally { $responseReader.Dispose() }
+    } finally { $httpResponse.Dispose() }
+  } catch {
+    $messages = @()
+    $currentError = $_.Exception
+    while ($currentError) {
+      if ($currentError.Message) { $messages += $currentError.Message }
+      $currentError = $currentError.InnerException
     }
-    [PSCustomObject]@{
-      documentType = $type
-      statusCode = $(if ($statusNode) { $statusNode.InnerText } else { '' })
-      message = $(if ($messageNode) { $messageNode.InnerText } else { '' })
-      lastNSU = $(if ($lastNode) { $lastNode.InnerText } else { $lastNsu })
-      maxNSU = $(if ($maxNode) { $maxNode.InnerText } else { $lastNsu })
-      documents = $documents
-    } | ConvertTo-Json -Depth 5 -Compress
-  } finally {
-    if ($client) { $client.Dispose() }
-    if ($handler) { $handler.Dispose() }
+    throw ('Falha TLS/SEFAZ: ' + ($messages -join ' -> '))
   }
+
+  [xml]$soapXml = $responseText
+  $ret = $soapXml.SelectSingleNode("//*[local-name()='retDistDFeInt']")
+  if (-not $ret) { throw 'Resposta da SEFAZ sem retDistDFeInt.' }
+  $statusNode = $ret.SelectSingleNode("./*[local-name()='cStat']")
+  $messageNode = $ret.SelectSingleNode("./*[local-name()='xMotivo']")
+  $lastNode = $ret.SelectSingleNode("./*[local-name()='ultNSU']")
+  $maxNode = $ret.SelectSingleNode("./*[local-name()='maxNSU']")
+  $documents = @()
+  foreach ($docNode in $ret.SelectNodes(".//*[local-name()='docZip']")) {
+    $compressed = [Convert]::FromBase64String($docNode.InnerText.Trim())
+    $memory = [IO.MemoryStream]::new($compressed)
+    $gzip = [IO.Compression.GZipStream]::new($memory, [IO.Compression.CompressionMode]::Decompress)
+    $reader = [IO.StreamReader]::new($gzip, [Text.Encoding]::UTF8)
+    try { $documentXml = $reader.ReadToEnd() } finally { $reader.Dispose(); $gzip.Dispose(); $memory.Dispose() }
+    $keyMatch = [regex]::Match($documentXml, '<ch(?:NFe|CTe)>(\d{44})</ch(?:NFe|CTe)>')
+    if (-not $keyMatch.Success) { $keyMatch = [regex]::Match($documentXml, 'Id="(?:NFe|CTe)(\d{44})"') }
+    if ($keyMatch.Success) { $key = $keyMatch.Groups[1].Value } else { $key = '' }
+    $documents += [PSCustomObject]@{
+      nsu = $docNode.GetAttribute('NSU')
+      schema = $docNode.GetAttribute('schema')
+      key = $key
+      xmlBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($documentXml))
+    }
+  }
+  [PSCustomObject]@{
+    documentType = $type
+    statusCode = $(if ($statusNode) { $statusNode.InnerText } else { '' })
+    message = $(if ($messageNode) { $messageNode.InnerText } else { '' })
+    lastNSU = $(if ($lastNode) { $lastNode.InnerText } else { $lastNsu })
+    maxNSU = $(if ($maxNode) { $maxNode.InnerText } else { $lastNsu })
+    documents = $documents
+  } | ConvertTo-Json -Depth 5 -Compress
 } finally {
   $store.Close()
 }`;
-  const output = await runPowerShell(script, {
-    DOCPRONTO_CERT_THUMBPRINT: cleanThumbprint,
-    DOCPRONTO_CNPJ: cleanCnpj,
-    DOCPRONTO_CUF: cleanUf,
-    DOCPRONTO_DFE_TYPE: type,
-    DOCPRONTO_LAST_NSU: nsu
-  }, 180000);
+  let output;
+  try {
+    output = await runPowerShell(script, {
+      DOCPRONTO_CERT_THUMBPRINT: cleanThumbprint,
+      DOCPRONTO_CNPJ: cleanCnpj,
+      DOCPRONTO_CUF: cleanUf,
+      DOCPRONTO_DFE_TYPE: type,
+      DOCPRONTO_LAST_NSU: nsu
+    }, 180000);
+  } catch (error) {
+    const raw = String(error.message || error);
+    const marker = raw.indexOf("Falha TLS/SEFAZ:");
+    throw new Error(marker >= 0 ? raw.slice(marker).split(/\r?\n/)[0] : "Falha ao acessar a SEFAZ com o certificado A3.");
+  }
   let result;
   try { result = JSON.parse(output.trim()); }
   catch { throw new Error("Não foi possível interpretar a resposta da SEFAZ."); }
