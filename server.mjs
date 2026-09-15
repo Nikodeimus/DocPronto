@@ -77,6 +77,9 @@ async function handleApi(request, response, requested) {
   }
   response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (request.headers["access-control-request-private-network"] === "true") {
+    response.setHeader("Access-Control-Allow-Private-Network", "true");
+  }
   response.setHeader("Cache-Control", "no-store");
   if (request.method === "OPTIONS") {
     response.writeHead(204);
