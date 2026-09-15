@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-dfe.3";
+const agentVersion = "2026.09.15-dfe.4";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -234,7 +234,6 @@ async function syncFiscalDocuments({ thumbprint, cnpj, cuf, documentType, lastNS
   if (!["NFE", "CTE"].includes(type)) throw new Error("Tipo de documento fiscal não suportado.");
 
   const script = `$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Net.Http
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $thumbprint = $env:DOCPRONTO_CERT_THUMBPRINT -replace '\s', ''
 $cnpj = $env:DOCPRONTO_CNPJ
@@ -266,32 +265,33 @@ try {
   $dist = '<distDFeInt xmlns="' + $fiscalNs + '" versao="1.01"><tpAmb>1</tpAmb><cUFAutor>' + $cuf + '</cUFAutor><CNPJ>' + $cnpj + '</CNPJ><distNSU><ultNSU>' + $lastNsu + '</ultNSU></distNSU></distDFeInt>'
   $soap = '<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body><' + $operation + ' xmlns="' + $serviceNs + '"><' + $messageElement + '>' + $dist + '</' + $messageElement + '></' + $operation + '></soap12:Body></soap12:Envelope>'
 
-  $request = [System.Net.HttpWebRequest]::Create($endpoint)
-  $request.Method = 'POST'
-  $request.ProtocolVersion = [Version]'1.1'
-  $request.KeepAlive = $false
-  $request.Timeout = 120000
-  $request.ReadWriteTimeout = 120000
-  $request.ContentType = 'application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"'
-  [void]$request.ClientCertificates.Add($cert)
-  $payload = [Text.Encoding]::UTF8.GetBytes($soap)
-  $request.ContentLength = $payload.Length
+  $curlPath = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
+  if (-not $curlPath) { throw 'O curl.exe do Windows não foi encontrado.' }
+  $requestFile = [IO.Path]::GetTempFileName()
   try {
-    $requestStream = $request.GetRequestStream()
-    try { $requestStream.Write($payload, 0, $payload.Length) } finally { $requestStream.Dispose() }
-    $httpResponse = $request.GetResponse()
-    try {
-      $responseReader = [IO.StreamReader]::new($httpResponse.GetResponseStream(), [Text.Encoding]::UTF8)
-      try { $responseText = $responseReader.ReadToEnd() } finally { $responseReader.Dispose() }
-    } finally { $httpResponse.Dispose() }
-  } catch {
-    $messages = @()
-    $currentError = $_.Exception
-    while ($currentError) {
-      if ($currentError.Message) { $messages += $currentError.Message }
-      $currentError = $currentError.InnerException
+    [IO.File]::WriteAllText($requestFile, $soap, [Text.UTF8Encoding]::new($false))
+    $certificatePath = 'CurrentUser\MY\' + $thumbprint
+    $contentType = 'Content-Type: application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"'
+    $curlArguments = @(
+      '--silent',
+      '--show-error',
+      '--fail-with-body',
+      '--http1.1',
+      '--tlsv1.2',
+      '--max-time', '120',
+      '--cert', $certificatePath,
+      '--header', $contentType,
+      '--data-binary', ('@' + $requestFile),
+      $endpoint
+    )
+    $curlOutput = & $curlPath @curlArguments 2>&1
+    $curlExit = $LASTEXITCODE
+    $responseText = ($curlOutput | Out-String).Trim()
+    if ($curlExit -ne 0) {
+      throw ('Falha Schannel/curl (' + $curlExit + '): ' + $responseText)
     }
-    throw ('Falha TLS/SEFAZ: ' + ($messages -join ' -> '))
+  } finally {
+    Remove-Item $requestFile -Force -ErrorAction SilentlyContinue
   }
 
   [xml]$soapXml = $responseText
