@@ -63,7 +63,18 @@ createServer(async (request, response) => {
 });
 
 async function handleApi(request, response, requested) {
-  response.setHeader("Access-Control-Allow-Origin", "*");
+  const origin = String(request.headers.origin || "");
+  const configuredOrigins = String(process.env.DOCPRONTO_ALLOWED_ORIGINS || "https://nikodeimus.github.io,http://127.0.0.1:4173,http://localhost:4173")
+    .split(",").map(value => value.trim()).filter(Boolean);
+  const originAllowed = !origin || configuredOrigins.includes(origin);
+  if (!originAllowed) {
+    writeJson(response, 403, { error: "Origem não autorizada para acessar o agente local." });
+    return;
+  }
+  if (origin) {
+    response.setHeader("Access-Control-Allow-Origin", origin);
+    response.setHeader("Vary", "Origin");
+  }
   response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type");
   response.setHeader("Cache-Control", "no-store");
