@@ -9,7 +9,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.9";
+const agentVersion = "2026.09.15-cert.10";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -230,13 +230,13 @@ function readJsonBody(request) {
 
 async function syncFiscalDocuments({ thumbprint, cnpj, cuf, documentType, lastNSU, certificateMode, pfxBase64, pfxPassword }) {
   const cleanThumbprint = String(thumbprint || "").replace(/\s/g, "");
-  const mode = String(certificateMode || "A3").toUpperCase();
+  const mode = String(certificateMode || "INSTALLED").toUpperCase();
   const cleanCnpj = String(cnpj || "").replace(/\D/g, "");
   const cleanUf = String(cuf || "").replace(/\D/g, "");
   const type = String(documentType || "NFE").toUpperCase();
   const nsu = String(lastNSU || "0").replace(/\D/g, "").padStart(15, "0").slice(-15);
-  if (!["A1", "A3"].includes(mode)) throw new Error("Selecione o tipo de certificado A1 ou A3.");
-  if (mode === "A3" && !/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione um certificado A3 válido.");
+  if (!["A1", "A3", "INSTALLED"].includes(mode)) throw new Error("Selecione um certificado A1 ou A3.");
+  if (mode !== "A1" && !/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione um certificado A1 ou A3 instalado válido.");
   if (!/^\d{14}$/.test(cleanCnpj)) throw new Error("Informe o CNPJ com 14 dígitos.");
   if (!/^\d{2}$/.test(cleanUf)) throw new Error("Selecione a UF da empresa.");
   if (!["NFE", "CTE"].includes(type)) throw new Error("Tipo de documento fiscal não suportado.");
@@ -254,7 +254,7 @@ $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'C
 $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
 try {
   $cert = $store.Certificates | Where-Object { ($_.Thumbprint -replace '\s', '') -eq $thumbprint } | Select-Object -First 1
-  if (-not $cert) { throw 'Certificado A3 não encontrado no Windows.' }
+  if (-not $cert) { throw 'Certificado A1/A3 não encontrado no Windows.' }
   if (-not $cert.HasPrivateKey) { throw 'O certificado selecionado não possui chave privada disponível.' }
 
   if ($type -eq 'CTE') {
@@ -289,9 +289,12 @@ try {
       '--silent',
       '--show-error',
       '--fail-with-body',
+      '--ipv4',
       '--http1.1',
       '--tlsv1.2',
-      '--max-time', '120',
+      '--ssl-revoke-best-effort',
+      '--connect-timeout', '25',
+      '--max-time', '90',
       '--cert', $certificatePath,
       '--header', $contentType,
       '--data-binary', ('@' + $requestFile),
@@ -350,11 +353,13 @@ try {
       DOCPRONTO_CUF: cleanUf,
       DOCPRONTO_DFE_TYPE: type,
       DOCPRONTO_LAST_NSU: nsu
-    }, 180000);
+    }, 110000, {
+      timeoutMessage: "A consulta A1/A3 instalada excedeu 110 segundos. Verifique a conexão, o certificado selecionado e tente novamente."
+    });
   } catch (error) {
     const raw = String(error.message || error);
     const detail = raw.replace(/\r?\n/g, " ").replace(/\s+/g, " ").replace(/\s+No linha:.*$/i, "").replace(/\s+At line:.*$/i, "").trim().slice(0, 900);
-    throw new Error(detail || "Falha ao acessar a SEFAZ com o certificado A3.");
+    throw new Error(detail || "Falha ao acessar a SEFAZ com o certificado A1/A3 instalado.");
   }
   let result;
   try { result = JSON.parse(output.trim()); }
@@ -730,7 +735,7 @@ function escapePdfString(value) {
   return cleanPdfText(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
 
-function runPowerShell(script, env = {}, timeoutMs = 30000) {
+function runPowerShell(script, env = {}, timeoutMs = 30000, options = {}) {
   return new Promise((resolveOutput, reject) => {
     const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
       windowsHide: true,
@@ -740,7 +745,7 @@ function runPowerShell(script, env = {}, timeoutMs = 30000) {
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error("Operacao local demorou demais e foi cancelada."));
+      reject(new Error(options.timeoutMessage || "Operacao local demorou demais e foi cancelada."));
     }, timeoutMs);
     child.stdout.on("data", chunk => { stdout += chunk.toString("utf8"); });
     child.stderr.on("data", chunk => { stderr += chunk.toString("utf8"); });
