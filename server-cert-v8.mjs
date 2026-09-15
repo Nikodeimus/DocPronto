@@ -2,6 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { randomBytes } from "node:crypto";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -9,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.12";
+const agentVersion = "2026.09.15-cert.13";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -242,6 +243,17 @@ async function syncFiscalDocuments({ thumbprint, cnpj, cuf, documentType, lastNS
   if (!["NFE", "CTE"].includes(type)) throw new Error("Tipo de documento fiscal não suportado.");
   if (mode === "A1") return syncFiscalDocumentsA1({ pfxBase64, pfxPassword, cnpj: cleanCnpj, cuf: cleanUf, type, nsu });
 
+  let installedExportFailure = "";
+  if (mode === "INSTALLED") {
+    const transientPassword = randomBytes(24).toString("base64url");
+    try {
+      const transientPfx = await exportInstalledCertificateToMemory(cleanThumbprint, transientPassword);
+      return await syncFiscalDocumentsA1({ pfxBase64: transientPfx, pfxPassword: transientPassword, cnpj: cleanCnpj, cuf: cleanUf, type, nsu });
+    } catch (error) {
+      installedExportFailure = String(error.message || error).replace(/\s+/g, " ").trim().slice(0, 300);
+    }
+  }
+
   const script = `$ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $thumbprint = $env:DOCPRONTO_CERT_THUMBPRINT -replace '\s', ''
@@ -350,7 +362,8 @@ try {
   } catch (error) {
     const raw = String(error.message || error);
     const detail = raw.replace(/\r?\n/g, " ").replace(/\s+/g, " ").replace(/\s+No linha:.*$/i, "").replace(/\s+At line:.*$/i, "").trim().slice(0, 900);
-    throw new Error(detail || "Falha ao acessar a SEFAZ com o certificado A1/A3 instalado.");
+    const exportDetail = installedExportFailure ? " A tentativa segura em memória também falhou: " + installedExportFailure : "";
+    throw new Error((detail || "Falha ao acessar a SEFAZ com o certificado A1/A3 instalado.") + exportDetail);
   }
   let result;
   try { result = JSON.parse(output.trim()); }
@@ -368,6 +381,30 @@ try {
     result.documents.push({ nsu: safeNsu, schema: String(document.schema || ""), key, fileId });
   }
   return result;
+}
+
+async function exportInstalledCertificateToMemory(thumbprint, password) {
+  const script = `$ErrorActionPreference = 'Stop'
+$thumbprint = $env:DOCPRONTO_CERT_THUMBPRINT -replace '\\s', ''
+$password = $env:DOCPRONTO_TRANSIENT_PASSWORD
+$store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'CurrentUser')
+$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+try {
+  $cert = $store.Certificates | Where-Object { ($_.Thumbprint -replace '\\s', '') -eq $thumbprint } | Select-Object -First 1
+  if (-not $cert) { throw 'Certificado instalado não encontrado.' }
+  if (-not $cert.HasPrivateKey) { throw 'Certificado instalado sem chave privada.' }
+  $bytes = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, $password)
+  [Convert]::ToBase64String($bytes)
+} finally {
+  $store.Close()
+}`;
+  const output = await runPowerShell(script, {
+    DOCPRONTO_CERT_THUMBPRINT: thumbprint,
+    DOCPRONTO_TRANSIENT_PASSWORD: password
+  }, 20000, { timeoutMessage: "O Windows demorou demais para liberar o A1 instalado." });
+  const encoded = output.trim();
+  if (!encoded) throw new Error("O Windows não permitiu usar o A1 instalado em memória.");
+  return encoded;
 }
 
 async function syncFiscalDocumentsA1({ pfxBase64, pfxPassword, cnpj, cuf, type, nsu }) {
@@ -403,6 +440,7 @@ function postSoapWithA1(endpoint, soap, action, pfx, passphrase) {
     const payload = Buffer.from(soap, "utf8");
     const request = httpsRequest(endpoint, {
       method: "POST",
+      family: 4,
       pfx,
       passphrase,
       minVersion: "TLSv1.2",
@@ -424,7 +462,7 @@ function postSoapWithA1(endpoint, soap, action, pfx, passphrase) {
         resolveResponse(body);
       });
     });
-    request.setTimeout(120000, () => request.destroy(new Error("A consulta A1 à SEFAZ excedeu 120 segundos.")));
+    request.setTimeout(60000, () => request.destroy(new Error("A consulta A1 à SEFAZ excedeu 60 segundos.")));
     request.on("error", error => reject(new Error("A1/SEFAZ: " + error.message)));
     request.end(payload);
   });
