@@ -26,7 +26,7 @@ set "AGENT_DIR=%LOCALAPPDATA%\DocProntoAgent"
 if not exist "%AGENT_DIR%" mkdir "%AGENT_DIR%"
 
 echo Baixando a versao atual do agente...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Nikodeimus/DocPronto/main/server.mjs?v=dfe-1' -OutFile '%AGENT_DIR%\server.mjs' } catch { Write-Host $_.Exception.Message; exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Nikodeimus/DocPronto/main/server.mjs?v=dfe-2' -OutFile '%AGENT_DIR%\server.mjs' } catch { Write-Host $_.Exception.Message; exit 1 }"
 if errorlevel 1 (
   echo [ERRO] Nao foi possivel baixar o agente.
   pause
@@ -35,10 +35,10 @@ if errorlevel 1 (
 
 echo.
 echo IMPORTANTE: feche qualquer janela antiga do Agente A3.
-echo Iniciando a versao atual em 127.0.0.1:4173...
-start "DocPronto - Agente A3 (mantenha aberto)" /D "%AGENT_DIR%" cmd /k node server.mjs
+echo Iniciando a versao atual em 127.0.0.1:4174...
+start "DocPronto - Agente A3 (mantenha aberto)" /D "%AGENT_DIR%" cmd /k "set PORT=4174&& node server.mjs"
 timeout /t 3 /nobreak >nul
-start "" "https://nikodeimus.github.io/DocPronto/hub/?v=a3-3"
+start "" "https://nikodeimus.github.io/DocPronto/hub/?v=dfe-3"
 
 echo.
 echo Agente iniciado. Mantenha a nova janela aberta
