@@ -9,7 +9,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.10";
+const agentVersion = "2026.09.15-cert.11";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -276,38 +276,14 @@ try {
   $dist = '<distDFeInt xmlns="' + $fiscalNs + '" versao="' + $layoutVersion + '"><tpAmb>1</tpAmb><cUFAutor>' + $cuf + '</cUFAutor><CNPJ>' + $cnpj + '</CNPJ><distNSU><ultNSU>' + $lastNsu + '</ultNSU></distNSU></distDFeInt>'
   $soap = '<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body><' + $operation + ' xmlns="' + $serviceNs + '"><' + $messageElement + '>' + $dist + '</' + $messageElement + '></' + $operation + '></soap12:Body></soap12:Envelope>'
 
-  $curlPath = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
-  if (-not $curlPath) { throw 'O curl.exe do Windows não foi encontrado.' }
-  $curlVersion = (& $curlPath --version | Select-Object -First 1)
-  if ($curlVersion -notmatch 'Schannel') { throw ('Falha Schannel/curl: transporte TLS incompatível: ' + $curlVersion) }
-  $requestFile = [IO.Path]::GetTempFileName()
+  $contentType = 'application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"'
   try {
-    [IO.File]::WriteAllText($requestFile, $soap, [Text.UTF8Encoding]::new($false))
-    $certificatePath = 'CurrentUser' + [char]92 + 'MY' + [char]92 + $thumbprint
-    $contentType = 'Content-Type: application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"'
-    $curlArguments = @(
-      '--silent',
-      '--show-error',
-      '--fail-with-body',
-      '--ipv4',
-      '--http1.1',
-      '--tlsv1.2',
-      '--ssl-revoke-best-effort',
-      '--connect-timeout', '25',
-      '--max-time', '90',
-      '--cert', $certificatePath,
-      '--header', $contentType,
-      '--data-binary', ('@' + $requestFile),
-      $endpoint
-    )
-    $curlOutput = & $curlPath @curlArguments 2>&1
-    $curlExit = $LASTEXITCODE
-    $responseText = ($curlOutput | Out-String).Trim()
-    if ($curlExit -ne 0) {
-      throw ('Falha Schannel/curl (' + $curlExit + '): ' + $responseText)
-    }
-  } finally {
-    Remove-Item $requestFile -Force -ErrorAction SilentlyContinue
+    $webResponse = Invoke-WebRequest -Uri $endpoint -Method Post -Certificate $cert -ContentType $contentType -Body ([Text.Encoding]::UTF8.GetBytes($soap)) -UseBasicParsing -DisableKeepAlive -TimeoutSec 75
+    $responseText = [string]$webResponse.Content
+  } catch {
+    $httpMessage = $_.Exception.Message
+    if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $httpMessage = $_.ErrorDetails.Message }
+    throw ('Falha HTTPS do Windows ao consultar a SEFAZ: ' + $httpMessage)
   }
 
   [xml]$soapXml = $responseText
@@ -353,8 +329,8 @@ try {
       DOCPRONTO_CUF: cleanUf,
       DOCPRONTO_DFE_TYPE: type,
       DOCPRONTO_LAST_NSU: nsu
-    }, 110000, {
-      timeoutMessage: "A consulta A1/A3 instalada excedeu 110 segundos. Verifique a conexão, o certificado selecionado e tente novamente."
+    }, 90000, {
+      timeoutMessage: "A conexão HTTPS do Windows excedeu 90 segundos. Verifique proxy, firewall ou antivírus e tente novamente."
     });
   } catch (error) {
     const raw = String(error.message || error);
