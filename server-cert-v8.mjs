@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.14";
+const agentVersion = "2026.09.15-cert.15";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -291,24 +291,39 @@ try {
 
   $contentType = 'application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"'
   try {
-    $payload = [Text.Encoding]::UTF8.GetBytes($soap)
-    $webRequest = [Net.HttpWebRequest]::Create($endpoint)
-    $webRequest.Method = 'POST'
-    $webRequest.ContentType = $contentType
-    $webRequest.ContentLength = $payload.Length
-    $webRequest.KeepAlive = $false
-    $webRequest.Proxy = $null
-    $requestTimeout = $(if ($certificateMode -eq 'A3') { 120000 } else { 45000 })
-    $webRequest.Timeout = $requestTimeout
-    $webRequest.ReadWriteTimeout = $requestTimeout
-    [void]$webRequest.ClientCertificates.Add($cert)
-    $requestStream = $webRequest.GetRequestStream()
-    try { $requestStream.Write($payload, 0, $payload.Length) } finally { $requestStream.Dispose() }
-    $webResponse = $webRequest.GetResponse()
-    try {
-      $reader = [IO.StreamReader]::new($webResponse.GetResponseStream(), [Text.Encoding]::UTF8)
-      try { $responseText = $reader.ReadToEnd() } finally { $reader.Dispose() }
-    } finally { $webResponse.Dispose() }
+    if ($certificateMode -eq 'A3') {
+      $requestFile = [IO.Path]::GetTempFileName()
+      try {
+        [IO.File]::WriteAllText($requestFile, $soap, [Text.UTF8Encoding]::new($false))
+        $certStorePath = 'CurrentUser\\MY\\' + $thumbprint
+        $curlOutput = & curl.exe --silent --show-error --fail --tlsv1.2 --http1.1 --noproxy '*' --connect-timeout 30 --max-time 120 --cert $certStorePath --header ('Content-Type: ' + $contentType) --data-binary ('@' + $requestFile) $endpoint 2>&1
+        $curlExitCode = $LASTEXITCODE
+        $responseText = ($curlOutput | Out-String).Trim()
+        if ($curlExitCode -ne 0) {
+          throw ('curl/Schannel retornou erro ' + $curlExitCode + ': ' + $responseText)
+        }
+      } finally {
+        Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
+      }
+    } else {
+      $payload = [Text.Encoding]::UTF8.GetBytes($soap)
+      $webRequest = [Net.HttpWebRequest]::Create($endpoint)
+      $webRequest.Method = 'POST'
+      $webRequest.ContentType = $contentType
+      $webRequest.ContentLength = $payload.Length
+      $webRequest.KeepAlive = $false
+      $webRequest.Proxy = $null
+      $webRequest.Timeout = 45000
+      $webRequest.ReadWriteTimeout = 45000
+      [void]$webRequest.ClientCertificates.Add($cert)
+      $requestStream = $webRequest.GetRequestStream()
+      try { $requestStream.Write($payload, 0, $payload.Length) } finally { $requestStream.Dispose() }
+      $webResponse = $webRequest.GetResponse()
+      try {
+        $reader = [IO.StreamReader]::new($webResponse.GetResponseStream(), [Text.Encoding]::UTF8)
+        try { $responseText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+      } finally { $webResponse.Dispose() }
+    }
   } catch {
     $httpMessage = $_.Exception.Message
     if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $httpMessage = $_.ErrorDetails.Message }
