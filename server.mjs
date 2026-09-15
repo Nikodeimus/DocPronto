@@ -1,5 +1,5 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -89,6 +89,14 @@ async function handleApi(request, response, requested) {
   try {
     if (request.method === "GET" && requested === "/api/certificates") {
       writeJson(response, 200, { certificates: await listWindowsCertificates() });
+      return;
+    }
+    if (request.method === "POST" && requested === "/api/dfe/sync") {
+      writeJson(response, 200, await syncFiscalDocuments(await readJsonBody(request)));
+      return;
+    }
+    if (request.method === "POST" && requested === "/api/dfe/xml") {
+      writeJson(response, 200, await readStoredFiscalDocument(await readJsonBody(request)));
       return;
     }
     if (request.method === "POST" && requested === "/api/sign-installed") {
@@ -211,6 +219,135 @@ function readJsonBody(request) {
     });
     request.on("error", reject);
   });
+}
+
+async function syncFiscalDocuments({ thumbprint, cnpj, cuf, documentType, lastNSU }) {
+  const cleanThumbprint = String(thumbprint || "").replace(/\s/g, "");
+  const cleanCnpj = String(cnpj || "").replace(/\D/g, "");
+  const cleanUf = String(cuf || "").replace(/\D/g, "");
+  const type = String(documentType || "NFE").toUpperCase();
+  const nsu = String(lastNSU || "0").replace(/\D/g, "").padStart(15, "0").slice(-15);
+  if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione um certificado A3 válido.");
+  if (!/^\d{14}$/.test(cleanCnpj)) throw new Error("Informe o CNPJ com 14 dígitos.");
+  if (!/^\d{2}$/.test(cleanUf)) throw new Error("Selecione a UF da empresa.");
+  if (!["NFE", "CTE"].includes(type)) throw new Error("Tipo de documento fiscal não suportado.");
+
+  const script = `$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Net.Http
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$thumbprint = $env:DOCPRONTO_CERT_THUMBPRINT -replace '\s', ''
+$cnpj = $env:DOCPRONTO_CNPJ
+$cuf = $env:DOCPRONTO_CUF
+$lastNsu = $env:DOCPRONTO_LAST_NSU
+$type = $env:DOCPRONTO_DFE_TYPE
+
+$store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'CurrentUser')
+$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+try {
+  $cert = $store.Certificates | Where-Object { ($_.Thumbprint -replace '\s', '') -eq $thumbprint } | Select-Object -First 1
+  if (-not $cert) { throw 'Certificado A3 não encontrado no Windows.' }
+  if (-not $cert.HasPrivateKey) { throw 'O certificado selecionado não possui chave privada disponível.' }
+
+  if ($type -eq 'CTE') {
+    $endpoint = 'https://www1.cte.fazenda.gov.br/CTeDistribuicaoDFe/CTeDistribuicaoDFe.asmx'
+    $serviceNs = 'http://www.portalfiscal.inf.br/cte/wsdl/CTeDistribuicaoDFe'
+    $fiscalNs = 'http://www.portalfiscal.inf.br/cte'
+    $operation = 'cteDistDFeInteresse'
+    $messageElement = 'cteDadosMsg'
+  } else {
+    $endpoint = 'https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx'
+    $serviceNs = 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe'
+    $fiscalNs = 'http://www.portalfiscal.inf.br/nfe'
+    $operation = 'nfeDistDFeInteresse'
+    $messageElement = 'nfeDadosMsg'
+  }
+
+  $dist = '<distDFeInt xmlns="' + $fiscalNs + '" versao="1.01"><tpAmb>1</tpAmb><cUFAutor>' + $cuf + '</cUFAutor><CNPJ>' + $cnpj + '</CNPJ><distNSU><ultNSU>' + $lastNsu + '</ultNSU></distNSU></distDFeInt>'
+  $soap = '<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body><' + $operation + ' xmlns="' + $serviceNs + '"><' + $messageElement + '>' + $dist + '</' + $messageElement + '></' + $operation + '></soap12:Body></soap12:Envelope>'
+
+  $handler = [System.Net.Http.HttpClientHandler]::new()
+  $handler.ClientCertificateOptions = [System.Net.Http.ClientCertificateOption]::Manual
+  [void]$handler.ClientCertificates.Add($cert)
+  $client = [System.Net.Http.HttpClient]::new($handler)
+  $client.Timeout = [TimeSpan]::FromSeconds(120)
+  try {
+    $content = [System.Net.Http.StringContent]::new($soap, [Text.Encoding]::UTF8)
+    $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"')
+    $response = $client.PostAsync($endpoint, $content).GetAwaiter().GetResult()
+    $responseText = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    if (-not $response.IsSuccessStatusCode) { throw ('SEFAZ respondeu HTTP ' + [int]$response.StatusCode + ': ' + $responseText.Substring(0, [Math]::Min(500, $responseText.Length))) }
+    [xml]$soapXml = $responseText
+    $ret = $soapXml.SelectSingleNode("//*[local-name()='retDistDFeInt']")
+    if (-not $ret) { throw 'Resposta da SEFAZ sem retDistDFeInt.' }
+    $statusNode = $ret.SelectSingleNode("./*[local-name()='cStat']")
+    $messageNode = $ret.SelectSingleNode("./*[local-name()='xMotivo']")
+    $lastNode = $ret.SelectSingleNode("./*[local-name()='ultNSU']")
+    $maxNode = $ret.SelectSingleNode("./*[local-name()='maxNSU']")
+    $documents = @()
+    foreach ($docNode in $ret.SelectNodes(".//*[local-name()='docZip']")) {
+      $compressed = [Convert]::FromBase64String($docNode.InnerText.Trim())
+      $memory = [IO.MemoryStream]::new($compressed)
+      $gzip = [IO.Compression.GZipStream]::new($memory, [IO.Compression.CompressionMode]::Decompress)
+      $reader = [IO.StreamReader]::new($gzip, [Text.Encoding]::UTF8)
+      try { $documentXml = $reader.ReadToEnd() } finally { $reader.Dispose(); $gzip.Dispose(); $memory.Dispose() }
+      $keyMatch = [regex]::Match($documentXml, '<ch(?:NFe|CTe)>(\d{44})</ch(?:NFe|CTe)>')
+      if (-not $keyMatch.Success) { $keyMatch = [regex]::Match($documentXml, 'Id="(?:NFe|CTe)(\d{44})"') }
+      if ($keyMatch.Success) { $key = $keyMatch.Groups[1].Value } else { $key = '' }
+      $documents += [PSCustomObject]@{
+        nsu = $docNode.GetAttribute('NSU')
+        schema = $docNode.GetAttribute('schema')
+        key = $key
+        xmlBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($documentXml))
+      }
+    }
+    [PSCustomObject]@{
+      documentType = $type
+      statusCode = $(if ($statusNode) { $statusNode.InnerText } else { '' })
+      message = $(if ($messageNode) { $messageNode.InnerText } else { '' })
+      lastNSU = $(if ($lastNode) { $lastNode.InnerText } else { $lastNsu })
+      maxNSU = $(if ($maxNode) { $maxNode.InnerText } else { $lastNsu })
+      documents = $documents
+    } | ConvertTo-Json -Depth 5 -Compress
+  } finally {
+    if ($client) { $client.Dispose() }
+    if ($handler) { $handler.Dispose() }
+  }
+} finally {
+  $store.Close()
+}`;
+  const output = await runPowerShell(script, {
+    DOCPRONTO_CERT_THUMBPRINT: cleanThumbprint,
+    DOCPRONTO_CNPJ: cleanCnpj,
+    DOCPRONTO_CUF: cleanUf,
+    DOCPRONTO_DFE_TYPE: type,
+    DOCPRONTO_LAST_NSU: nsu
+  }, 180000);
+  let result;
+  try { result = JSON.parse(output.trim()); }
+  catch { throw new Error("Não foi possível interpretar a resposta da SEFAZ."); }
+  const documents = Array.isArray(result.documents) ? result.documents : (result.documents ? [result.documents] : []);
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  result.documents = [];
+  for (const document of documents) {
+    const safeNsu = String(document.nsu || "").replace(/\D/g, "").padStart(15, "0").slice(-15);
+    const key = String(document.key || "").replace(/\D/g, "").slice(0, 44);
+    const fileId = `${type.toLowerCase()}-${key || safeNsu}.xml`;
+    const bytes = Buffer.from(String(document.xmlBase64 || ""), "base64");
+    if (bytes.length) await writeFile(join(dataDir, fileId), bytes);
+    result.documents.push({ nsu: safeNsu, schema: String(document.schema || ""), key, fileId });
+  }
+  return result;
+}
+
+async function readStoredFiscalDocument({ fileId }) {
+  const clean = String(fileId || "");
+  if (!/^(nfe|cte)-[a-zA-Z0-9-]+\.xml$/.test(clean)) throw new Error("Documento fiscal inválido.");
+  const dataDir = resolve(root, "data");
+  const filePath = resolve(dataDir, clean);
+  if (relative(dataDir, filePath).startsWith("..") || !existsSync(filePath)) throw new Error("XML não encontrado no agente local.");
+  const content = await readFile(filePath);
+  return { filename: clean, contentBase64: content.toString("base64") };
 }
 
 async function listWindowsCertificates() {
