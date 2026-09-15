@@ -15,12 +15,23 @@ echo.
 
 where node >nul 2>nul
 if errorlevel 1 (
-  echo [ERRO] O Node.js ainda nao esta instalado.
-  echo Instale a versao LTS e execute este arquivo novamente.
+  if exist "%ProgramFiles%\nodejs\node.exe" set "PATH=%ProgramFiles%\nodejs;%PATH%"
+)
+where node >nul 2>nul
+if errorlevel 1 (
+  if exist "%LOCALAPPDATA%\Programs\nodejs\node.exe" set "PATH=%LOCALAPPDATA%\Programs\nodejs;%PATH%"
+)
+where node >nul 2>nul
+if errorlevel 1 (
+  echo [ERRO] O Node.js nao foi localizado neste Windows.
+  echo Conclua a instalacao do Node.js LTS ou reinicie o computador.
+  echo Depois execute este arquivo novamente.
   start "" "https://nodejs.org/en/download"
   pause
   exit /b 1
 )
+echo Node.js localizado:
+node --version
 
 set "AGENT_DIR=%LOCALAPPDATA%\DocProntoAgent"
 if not exist "%AGENT_DIR%" mkdir "%AGENT_DIR%"
