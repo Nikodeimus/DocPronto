@@ -9,7 +9,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.11";
+const agentVersion = "2026.09.15-cert.12";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -278,12 +278,27 @@ try {
 
   $contentType = 'application/soap+xml; charset=utf-8; action="' + $serviceNs + '/' + $operation + '"'
   try {
-    $webResponse = Invoke-WebRequest -Uri $endpoint -Method Post -Certificate $cert -ContentType $contentType -Body ([Text.Encoding]::UTF8.GetBytes($soap)) -UseBasicParsing -DisableKeepAlive -TimeoutSec 75
-    $responseText = [string]$webResponse.Content
+    $payload = [Text.Encoding]::UTF8.GetBytes($soap)
+    $webRequest = [Net.HttpWebRequest]::Create($endpoint)
+    $webRequest.Method = 'POST'
+    $webRequest.ContentType = $contentType
+    $webRequest.ContentLength = $payload.Length
+    $webRequest.KeepAlive = $false
+    $webRequest.Proxy = $null
+    $webRequest.Timeout = 45000
+    $webRequest.ReadWriteTimeout = 45000
+    [void]$webRequest.ClientCertificates.Add($cert)
+    $requestStream = $webRequest.GetRequestStream()
+    try { $requestStream.Write($payload, 0, $payload.Length) } finally { $requestStream.Dispose() }
+    $webResponse = $webRequest.GetResponse()
+    try {
+      $reader = [IO.StreamReader]::new($webResponse.GetResponseStream(), [Text.Encoding]::UTF8)
+      try { $responseText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally { $webResponse.Dispose() }
   } catch {
     $httpMessage = $_.Exception.Message
     if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $httpMessage = $_.ErrorDetails.Message }
-    throw ('Falha HTTPS do Windows ao consultar a SEFAZ: ' + $httpMessage)
+    throw ('Falha na conexão direta do Windows com a SEFAZ: ' + $httpMessage)
   }
 
   [xml]$soapXml = $responseText
@@ -329,8 +344,8 @@ try {
       DOCPRONTO_CUF: cleanUf,
       DOCPRONTO_DFE_TYPE: type,
       DOCPRONTO_LAST_NSU: nsu
-    }, 90000, {
-      timeoutMessage: "A conexão HTTPS do Windows excedeu 90 segundos. Verifique proxy, firewall ou antivírus e tente novamente."
+    }, 60000, {
+      timeoutMessage: "A conexão direta do Windows excedeu 60 segundos. Verifique firewall ou antivírus e tente novamente."
     });
   } catch (error) {
     const raw = String(error.message || error);
