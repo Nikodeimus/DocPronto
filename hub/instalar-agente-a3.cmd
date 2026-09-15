@@ -35,7 +35,7 @@ if errorlevel 1 (
 
 echo.
 echo Iniciando em 127.0.0.1:4173...
-start "DocPronto - Agente A3 (mantenha aberto)" cmd /k "cd /d \"%AGENT_DIR%\" && node server.mjs"
+start "DocPronto - Agente A3 (mantenha aberto)" /D "%AGENT_DIR%" cmd /k node server.mjs
 timeout /t 3 /nobreak >nul
 start "" "https://nikodeimus.github.io/DocPronto/hub/?v=a3-3"
 
