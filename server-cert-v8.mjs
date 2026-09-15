@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.13";
+const agentVersion = "2026.09.15-cert.14";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -261,6 +261,7 @@ $cnpj = $env:DOCPRONTO_CNPJ
 $cuf = $env:DOCPRONTO_CUF
 $lastNsu = $env:DOCPRONTO_LAST_NSU
 $type = $env:DOCPRONTO_DFE_TYPE
+$certificateMode = $env:DOCPRONTO_CERT_MODE
 
 $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'CurrentUser')
 $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
@@ -297,8 +298,9 @@ try {
     $webRequest.ContentLength = $payload.Length
     $webRequest.KeepAlive = $false
     $webRequest.Proxy = $null
-    $webRequest.Timeout = 45000
-    $webRequest.ReadWriteTimeout = 45000
+    $requestTimeout = $(if ($certificateMode -eq 'A3') { 120000 } else { 45000 })
+    $webRequest.Timeout = $requestTimeout
+    $webRequest.ReadWriteTimeout = $requestTimeout
     [void]$webRequest.ClientCertificates.Add($cert)
     $requestStream = $webRequest.GetRequestStream()
     try { $requestStream.Write($payload, 0, $payload.Length) } finally { $requestStream.Dispose() }
@@ -355,9 +357,13 @@ try {
       DOCPRONTO_CNPJ: cleanCnpj,
       DOCPRONTO_CUF: cleanUf,
       DOCPRONTO_DFE_TYPE: type,
-      DOCPRONTO_LAST_NSU: nsu
-    }, 60000, {
-      timeoutMessage: "A conexão direta do Windows excedeu 60 segundos. Verifique firewall ou antivírus e tente novamente."
+      DOCPRONTO_LAST_NSU: nsu,
+      DOCPRONTO_CERT_MODE: mode
+    }, mode === "A3" ? 135000 : 60000, {
+      windowsHide: mode !== "A3",
+      timeoutMessage: mode === "A3"
+        ? "O A3 não respondeu. Verifique o leitor, desbloqueie o token e informe o PIN na janela do Windows."
+        : "A conexão direta do Windows excedeu 60 segundos. Verifique firewall ou antivírus e tente novamente."
     });
   } catch (error) {
     const raw = String(error.message || error);
@@ -767,7 +773,7 @@ function escapePdfString(value) {
 function runPowerShell(script, env = {}, timeoutMs = 30000, options = {}) {
   return new Promise((resolveOutput, reject) => {
     const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
-      windowsHide: true,
+      windowsHide: options.windowsHide !== false,
       env: { ...process.env, ...env }
     });
     let stdout = "";
