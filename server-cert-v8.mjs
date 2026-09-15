@@ -9,7 +9,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.8";
+const agentVersion = "2026.09.15-cert.9";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -263,15 +263,17 @@ try {
     $fiscalNs = 'http://www.portalfiscal.inf.br/cte'
     $operation = 'cteDistDFeInteresse'
     $messageElement = 'cteDadosMsg'
+    $layoutVersion = '1.00'
   } else {
     $endpoint = 'https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx'
     $serviceNs = 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe'
     $fiscalNs = 'http://www.portalfiscal.inf.br/nfe'
     $operation = 'nfeDistDFeInteresse'
     $messageElement = 'nfeDadosMsg'
+    $layoutVersion = '1.01'
   }
 
-  $dist = '<distDFeInt xmlns="' + $fiscalNs + '" versao="1.01"><tpAmb>1</tpAmb><cUFAutor>' + $cuf + '</cUFAutor><CNPJ>' + $cnpj + '</CNPJ><distNSU><ultNSU>' + $lastNsu + '</ultNSU></distNSU></distDFeInt>'
+  $dist = '<distDFeInt xmlns="' + $fiscalNs + '" versao="' + $layoutVersion + '"><tpAmb>1</tpAmb><cUFAutor>' + $cuf + '</cUFAutor><CNPJ>' + $cnpj + '</CNPJ><distNSU><ultNSU>' + $lastNsu + '</ultNSU></distNSU></distDFeInt>'
   $soap = '<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body><' + $operation + ' xmlns="' + $serviceNs + '"><' + $messageElement + '>' + $dist + '</' + $messageElement + '></' + $operation + '></soap12:Body></soap12:Envelope>'
 
   $curlPath = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
@@ -384,7 +386,8 @@ async function syncFiscalDocumentsA1({ pfxBase64, pfxPassword, cnpj, cuf, type, 
   const fiscalNs = isCte ? "http://www.portalfiscal.inf.br/cte" : "http://www.portalfiscal.inf.br/nfe";
   const operation = isCte ? "cteDistDFeInteresse" : "nfeDistDFeInteresse";
   const messageElement = isCte ? "cteDadosMsg" : "nfeDadosMsg";
-  const dist = '<distDFeInt xmlns="' + fiscalNs + '" versao="1.01"><tpAmb>1</tpAmb><cUFAutor>' + cuf + '</cUFAutor><CNPJ>' + cnpj + '</CNPJ><distNSU><ultNSU>' + nsu + '</ultNSU></distNSU></distDFeInt>';
+  const layoutVersion = isCte ? "1.00" : "1.01";
+  const dist = '<distDFeInt xmlns="' + fiscalNs + '" versao="' + layoutVersion + '"><tpAmb>1</tpAmb><cUFAutor>' + cuf + '</cUFAutor><CNPJ>' + cnpj + '</CNPJ><distNSU><ultNSU>' + nsu + '</ultNSU></distNSU></distDFeInt>';
   const soap = '<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body><' + operation + ' xmlns="' + serviceNs + '"><' + messageElement + '>' + dist + '</' + messageElement + '></' + operation + '></soap12:Body></soap12:Envelope>';
   const responseText = await postSoapWithA1(endpoint, soap, serviceNs + "/" + operation, pfx, password);
   const result = parseDfeDistributionResponse(responseText, type, nsu);
