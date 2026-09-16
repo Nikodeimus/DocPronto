@@ -12,6 +12,7 @@ test("site, manifesto, instalador e agente usam a mesma release", async () => {
   const manifest = JSON.parse(manifestText);
   assert.match(server, new RegExp(`agentVersion = ["']${manifest.version.replaceAll(".", "\\.")}["']`));
   assert.match(installer, new RegExp(`set "RELEASE=${manifest.version.replaceAll(".", "\\.")}"`));
+  assert.ok(installer.includes(manifest.server), "o instalador deve baixar exatamente a fonte declarada no manifesto");
   assert.match(html, new RegExp(`<script src="\\./app\\.js\\?v=${manifest.version.replaceAll(".", "\\.")}"></script>`));
   assert.doesNotMatch(html, /app-v\d+/);
   assert.match(app, /agent-release\.json/);
