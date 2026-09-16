@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.16-cert.17";
+const agentVersion = "2026.09.16-cert.18";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -618,7 +618,8 @@ async function testA3Reader({ thumbprint }) {
   if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione o certificado A3 instalado.");
   await signBufferWithWindowsCertificate(cleanThumbprint, Buffer.from("DocPronto - teste local do leitor A3", "utf8"), {
     windowsHide: false,
-    timeoutMessage: "O leitor A3 não respondeu em 2 minutos. Confirme o PIN e verifique o driver do token."
+    timeoutMs: 30000,
+    timeoutMessage: "O token não liberou a chave privada em 30 segundos. Procure a janela do PIN atrás do navegador; se ela não apareceu, abra o gerenciador do token e faça login."
   });
   return { ready: true, agentVersion, message: "Leitor, PIN e chave privada do A3 validados localmente." };
 }
@@ -655,7 +656,7 @@ try {
     const output = (await runPowerShell(script, {
       DOCPRONTO_CERT_THUMBPRINT: cleanThumbprint,
       DOCPRONTO_SIGN_INPUT: inputPath
-    }, 120000, options)).trim();
+    }, Number(options.timeoutMs) || 120000, options)).trim();
     debugLog(`windows-sign:done:${output.length}`);
     return output;
   } finally {
