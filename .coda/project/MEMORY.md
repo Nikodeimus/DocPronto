@@ -27,6 +27,6 @@ O DocPronto reúne o conversor original e o Hub fiscal. O Hub preserva o convers
 
 ## Estado atual
 
-Release alvo: `2026.09.16-cert.21`.
+Release alvo: `2026.09.16-cert.22`.
 
 Validação real pendente: teste em Windows com o token/cartão A3 e middleware do fabricante. O ambiente Linux não possui o hardware nem PowerShell para confirmar essa etapa.

@@ -27,11 +27,19 @@ test("hash publicado protege o arquivo do agente", async () => {
   assert.match(await read("hub/instalar-agente.cmd"), new RegExp(hash));
 });
 
-test("o instalador nao encerra processos Node sem identificar o DocPronto", async () => {
+test("o instalador migra agentes antigos sem encerrar processos alheios", async () => {
   const installer = await read("hub/instalar-agente.cmd");
   assert.match(installer, /Win32_Process/);
   assert.match(installer, /CommandLine/);
-  assert.match(installer, /nao sera encerrada/);
+  assert.match(installer, /server-\(cert\|a3\)/);
+  assert.match(installer, /--docpronto-agent/);
+  assert.match(installer, /instalacao\.log/);
+  assert.match(installer, /notepad\.exe/);
+  const knownAgent = /(?:^|[\/"\s])server(?:-(?:cert|a3)(?:-v\d+)?)?\.mjs(?=$|["\s])/i;
+  assert.ok(knownAgent.test("node server-cert-v20.mjs"));
+  assert.ok(knownAgent.test("node server-a3-v5.mjs"));
+  assert.ok(knownAgent.test("node server.mjs --docpronto-agent"));
+  assert.equal(knownAgent.test("node sistema-de-terceiro.mjs"), false);
 });
 
 test("agente e Hub exigem pareamento local", async () => {

@@ -31,7 +31,7 @@ test("servidor local entrega o Hub e o manifesto canônicos", async t => {
   assert.equal(page.status, 200);
   assert.equal(app.status, 200);
   assert.equal(release.status, 200);
-  assert.match(await page.text(), /\.\/app\.js\?v=2026\.09\.16-cert\.21/);
+  assert.match(await page.text(), /\.\/app\.js\?v=2026\.09\.16-cert\.22/);
   assert.match(await app.text(), /agent-release\.json/);
-  assert.equal((await release.json()).version, "2026.09.16-cert.21");
+  assert.equal((await release.json()).version, "2026.09.16-cert.22");
 });

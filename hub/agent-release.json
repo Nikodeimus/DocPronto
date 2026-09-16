@@ -1,6 +1,6 @@
 {
-  "version": "2026.09.16-cert.21",
+  "version": "2026.09.16-cert.22",
   "installer": "./instalar-agente.cmd",
   "server": "https://raw.githubusercontent.com/Nikodeimus/DocPronto/main/server-cert-v8.mjs",
-  "sha256": "aaa358644c9adc2e026293bfef733e193e0b448f39443273a55bd8f424138f3a"
+  "sha256": "d403533f11aa3b87ab76d1aa60f2233407b2fc7e9c87c781393bbf049352586c"
 }

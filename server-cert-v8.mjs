@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4174);
-const agentVersion = "2026.09.16-cert.21";
+const agentVersion = "2026.09.16-cert.22";
 const agentCapabilities = ["CERTIFICATE_LIST", "A1_FILE", "A1_WINDOWS", "A3_READER", "A3_32BIT_FALLBACK", "DFE_NFE", "DFE_CTE"];
 const agentToken = String(process.env.DOCPRONTO_AGENT_TOKEN || "").trim();
 const mimeTypes = {

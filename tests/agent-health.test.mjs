@@ -31,6 +31,6 @@ test("agente inicia e publica o contrato de health", async t => {
   assert.equal(response.status, 200);
   const health = await response.json();
   assert.equal(health.status, "ONLINE");
-  assert.equal(health.agentVersion, "2026.09.16-cert.21");
+  assert.equal(health.agentVersion, "2026.09.16-cert.22");
   assert.ok(health.capabilities.includes("A3_32BIT_FALLBACK"));
 });

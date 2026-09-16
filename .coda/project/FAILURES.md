@@ -31,3 +31,9 @@ Resultado: PowerShell 5.1 não aceitou a chamada de dois argumentos. A chamada c
 Resultado: site, cache, instalador e agente ficaram em versões diferentes; surgiram branches divergentes e botões apontando para V19 enquanto a página anunciava V20.
 
 Prevenção: fonte canônica, manifesto de release e teste automático de consistência.
+
+## F-007 — Instalador V21 não migrou o agente V20
+
+Resultado: a porta 4174 estava ocupada pelo processo legítimo `server-cert-v20.mjs`, mas o instalador reconhecia somente o nome canônico `server.mjs`. O instalador entrava no fluxo de erro, mostrava `pause` e fechava após uma tecla.
+
+Prevenção: reconhecer somente nomes históricos conhecidos do DocPronto, iniciar a versão canônica com marcador próprio e sempre abrir um log persistente quando a instalação falhar.
