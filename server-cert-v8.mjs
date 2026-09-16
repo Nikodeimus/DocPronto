@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.16-cert.19";
+const agentVersion = "2026.09.16-cert.20";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -653,10 +653,25 @@ try {
 }
 `;
   try {
-    const output = (await runPowerShell(script, {
+    const environment = {
       DOCPRONTO_CERT_THUMBPRINT: cleanThumbprint,
       DOCPRONTO_SIGN_INPUT: inputPath
-    }, Number(options.timeoutMs) || 120000, options)).trim();
+    };
+    let output;
+    try {
+      output = (await runPowerShell(script, environment, Number(options.timeoutMs) || 120000, options)).trim();
+    } catch (error) {
+      const message = String(error.message || error);
+      const windowsDirectory = process.env.WINDIR || process.env.SystemRoot || "C:\\Windows";
+      const powershell32 = join(windowsDirectory, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const keysetUnavailable = /keyset|conjunto de chaves|NTE_BAD_KEYSET|0x80090016/i.test(message);
+      if (!keysetUnavailable || !existsSync(powershell32)) throw error;
+      debugLog("windows-sign:retry-powershell-32bit");
+      output = (await runPowerShell(script, environment, Number(options.timeoutMs) || 120000, {
+        ...options,
+        executable: powershell32
+      })).trim();
+    }
     debugLog(`windows-sign:done:${output.length}`);
     return output;
   } finally {
@@ -847,7 +862,8 @@ function escapePdfString(value) {
 function runPowerShell(script, env = {}, timeoutMs = 30000, options = {}) {
   return new Promise((resolveOutput, reject) => {
     const utf8Script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $OutputEncoding = [Console]::OutputEncoding;\n" + script;
-    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", utf8Script], {
+    const executable = options.executable || "powershell.exe";
+    const child = spawn(executable, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", utf8Script], {
       windowsHide: options.windowsHide !== false,
       env: { ...process.env, ...env }
     });
