@@ -20,7 +20,7 @@ if(typeof state.a3.sync.includeNfe!=="boolean")state.a3.sync.includeNfe=true;
 if(typeof state.a3.sync.includeCte!=="boolean")state.a3.sync.includeCte=false;
 if(!state.xmlExport)state.xmlExport={companyTaxId:"",companyName:""};
 if(!state.a3.sync.cooldownMigrated){if(state.a3.sync.cnpj&&/consumo indevido/i.test(state.a3.sync.lastMessage||"")){state.a3.sync.cooldownByCompany[state.a3.sync.cnpj+"_NFE"]=(Date.parse(state.a3.sync.lastCheck)||Date.now())+3600000;state.a3.sync.error="A SEFAZ aplicou espera de 1 hora para este CNPJ. O DocPronto bloqueou novas tentativas para não renovar a rejeição 656."}state.a3.sync.cooldownMigrated=true;}
-var AGENT_URL="http://127.0.0.1:4174",REQUIRED_AGENT_VERSION="2026.09.16-cert.18";
+var AGENT_URL="http://127.0.0.1:4174",REQUIRED_AGENT_VERSION="2026.09.16-cert.19";
 state.a3.status="PENDENTE";
 var currentView="dashboard",validated=null,timer=null,page=1,perPage=20,filter="",sourceFilter="all",selectedDocs={};
 function seed(){
