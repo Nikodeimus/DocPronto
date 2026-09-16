@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.15-cert.16";
+const agentVersion = "2026.09.16-cert.17";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -557,13 +557,46 @@ async function listWindowsCertificates() {
 $ErrorActionPreference = 'Stop'
 $now = Get-Date
 Get-ChildItem Cert:\\CurrentUser\\My |
-  Where-Object { $_.HasPrivateKey -and $_.NotAfter -gt $now } |
+  Where-Object { $_.HasPrivateKey -and $_.NotBefore -le $now -and $_.NotAfter -gt $now } |
   Sort-Object NotAfter |
   ForEach-Object {
+    $certificateType = 'UNKNOWN'
+    $providerName = ''
+    $rsa = $null
+    try {
+      $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($_)
+      if ($rsa -is [System.Security.Cryptography.RSACryptoServiceProvider]) {
+        $keyInfo = $rsa.CspKeyContainerInfo
+        $providerName = [string]$keyInfo.ProviderName
+        if ($keyInfo.HardwareDevice) { $certificateType = 'A3' } else { $certificateType = 'A1' }
+      } elseif ($rsa -and $rsa.GetType().FullName -eq 'System.Security.Cryptography.RSACng') {
+        $providerName = [string]$rsa.Key.Provider.Provider
+        if ($providerName -match '(?i)smart.?card|token|safesign|etoken|watchdata|oberthur|gemalto|valid|soluti|certisign') {
+          $certificateType = 'A3'
+        } elseif ($providerName -match '(?i)microsoft.*(software|rsa|key storage)') {
+          $certificateType = 'A1'
+        } elseif ($rsa.Key.ExportPolicy.ToString() -match 'AllowExport') {
+          $certificateType = 'A1'
+        }
+      }
+    } catch {
+      $certificateType = 'UNKNOWN'
+    } finally {
+      if ($rsa) { $rsa.Dispose() }
+    }
+    if ($certificateType -eq 'UNKNOWN' -and $providerName -match '(?i)smart.?card|token|safesign|etoken|watchdata|oberthur|gemalto|valid|soluti|certisign') { $certificateType = 'A3' }
+    $certificateTypeLabel = switch ($certificateType) {
+      'A3' { 'A3 — token/cartão' }
+      'A1' { 'A1 — instalado no Windows' }
+      default { 'Tipo não confirmado' }
+    }
     [PSCustomObject]@{
       subject = $_.Subject
       thumbprint = $_.Thumbprint
       notAfter = $_.NotAfter.ToString('yyyy-MM-dd HH:mm:ss')
+      certificateType = $certificateType
+      certificateTypeLabel = $certificateTypeLabel
+      keyProvider = $providerName
       label = ($_.Subject -replace '^CN=', '' -replace ', OU=.*$', '') + ' - vence ' + $_.NotAfter.ToString('dd/MM/yyyy')
     }
   } | ConvertTo-Json -Compress
@@ -573,7 +606,6 @@ Get-ChildItem Cert:\\CurrentUser\\My |
   const parsed = JSON.parse(output);
   return Array.isArray(parsed) ? parsed : [parsed];
 }
-
 async function signWithWindowsCertificate({ thumbprint, contentBase64 }) {
   const cleanThumbprint = String(thumbprint || "").replace(/\s/g, "");
   if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione um certificado instalado valido.");
