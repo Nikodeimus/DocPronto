@@ -1,11 +1,11 @@
 @echo off
 setlocal
-title DocPronto - Agente de Certificados V18
+title DocPronto - Agente de Certificados V19
 color 0F
 
 echo.
 echo =============================================
-echo       DOCPRONTO - AGENTE DE CERTIFICADOS V18
+echo       DOCPRONTO - AGENTE DE CERTIFICADOS V19
 echo =============================================
 echo.
 echo Esta versao bloqueia consultas ate o A3 ser liberado.
@@ -38,7 +38,7 @@ set "AGENT_DIR=%LOCALAPPDATA%\DocProntoAgent"
 if not exist "%AGENT_DIR%" mkdir "%AGENT_DIR%"
 
 echo Baixando a versao atual do agente...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Nikodeimus/DocPronto/main/server-cert-v8.mjs?v=cert-18' -OutFile '%AGENT_DIR%\server-cert-v18.mjs' } catch { Write-Host $_.Exception.Message; exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Nikodeimus/DocPronto/main/server-cert-v8.mjs?v=cert-19' -OutFile '%AGENT_DIR%\server-cert-v19.mjs' } catch { Write-Host $_.Exception.Message; exit 1 }"
 if errorlevel 1 (
   echo [ERRO] Nao foi possivel baixar o agente.
   pause
@@ -50,12 +50,12 @@ echo Encerrando a versao antiga do agente na porta 4174...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$items = Get-NetTCPConnection -LocalPort 4174 -State Listen -ErrorAction SilentlyContinue; foreach ($item in $items) { $process = Get-Process -Id $item.OwningProcess -ErrorAction SilentlyContinue; if ($process -and $process.ProcessName -eq 'node') { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } }"
 timeout /t 2 /nobreak >nul
 echo Iniciando a versao atual em 127.0.0.1:4174...
-start "DocPronto - Agente V18 (mantenha aberto)" /D "%AGENT_DIR%" cmd /k "set PORT=4174&& node server-cert-v18.mjs"
+start "DocPronto - Agente V19 (mantenha aberto)" /D "%AGENT_DIR%" cmd /k "set PORT=4174&& node server-cert-v19.mjs"
 timeout /t 3 /nobreak >nul
-start "" "https://nikodeimus.github.io/DocPronto/hub/?v=cert-18"
+start "" "https://nikodeimus.github.io/DocPronto/hub/?v=cert-19"
 
 echo.
-echo Agente de certificados V18 iniciado. Mantenha a nova janela aberta.
+echo Agente de certificados V19 iniciado. Mantenha a nova janela aberta.
 timeout /t 5 /nobreak >nul
 endlocal
 
