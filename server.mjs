@@ -39,7 +39,8 @@ createServer(async (request, response) => {
   }
 
   const requestedPath = requested === "/" ? "index.html" : requested.replace(/^\/+/, "");
-  const filePath = resolve(root, requestedPath);
+  let filePath = resolve(root, requestedPath);
+  if (existsSync(filePath) && statSync(filePath).isDirectory()) filePath = resolve(filePath, "index.html");
   const pathFromRoot = relative(root, filePath);
 
   if (pathFromRoot.startsWith("..") || isAbsolute(pathFromRoot) || !existsSync(filePath) || statSync(filePath).isDirectory()) {

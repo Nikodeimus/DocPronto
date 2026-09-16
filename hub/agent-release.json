@@ -1,0 +1,6 @@
+{
+  "version": "2026.09.16-cert.21",
+  "installer": "./instalar-agente.cmd",
+  "server": "../server-cert-v8.mjs",
+  "sha256": "aaa358644c9adc2e026293bfef733e193e0b448f39443273a55bd8f424138f3a"
+}

@@ -9,8 +9,10 @@ import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
-const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.16-cert.20";
+const port = Number(process.env.PORT || 4174);
+const agentVersion = "2026.09.16-cert.21";
+const agentCapabilities = ["CERTIFICATE_LIST", "A1_FILE", "A1_WINDOWS", "A3_READER", "A3_32BIT_FALLBACK", "DFE_NFE", "DFE_CTE"];
+const agentToken = String(process.env.DOCPRONTO_AGENT_TOKEN || "").trim();
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -80,7 +82,7 @@ async function handleApi(request, response, requested) {
     response.setHeader("Vary", "Origin");
   }
   response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-DocPronto-Token");
   if (request.headers["access-control-request-private-network"] === "true") {
     response.setHeader("Access-Control-Allow-Private-Network", "true");
   }
@@ -90,13 +92,22 @@ async function handleApi(request, response, requested) {
     response.end();
     return;
   }
+  if (agentToken && request.headers["x-docpronto-token"] !== agentToken) {
+    writeJson(response, 401, {
+      error: "O site não está pareado com este agente local.",
+      code: "AGENT_PAIRING_REQUIRED",
+      stage: "AGENT",
+      guidance: "Execute o instalador atual; ele abrirá o DocPronto já pareado com segurança."
+    });
+    return;
+  }
   try {
     if (request.method === "GET" && requested === "/api/health") {
-      writeJson(response, 200, { agentVersion, status: "ONLINE" });
+      writeJson(response, 200, { agentVersion, status: "ONLINE", capabilities: agentCapabilities });
       return;
     }
     if (request.method === "GET" && requested === "/api/certificates") {
-      writeJson(response, 200, { agentVersion, certificates: await listWindowsCertificates() });
+      writeJson(response, 200, { agentVersion, capabilities: agentCapabilities, certificates: await listWindowsCertificates() });
       return;
     }
     if (request.method === "POST" && requested === "/api/certificate/test-a3") {
@@ -129,8 +140,23 @@ async function handleApi(request, response, requested) {
     }
     writeJson(response, 404, { error: "API nao encontrada." });
   } catch (error) {
-    writeJson(response, 400, { error: error.message || "Falha ao processar assinatura local." });
+    writeJson(response, 400, {
+      error: error.message || "Falha ao processar assinatura local.",
+      code: error.code || "LOCAL_AGENT_ERROR",
+      stage: error.stage || "AGENT",
+      guidance: error.guidance || null,
+      attempts: Array.isArray(error.attempts) ? error.attempts : []
+    });
   }
+}
+
+function diagnosticError(message, { code = "LOCAL_AGENT_ERROR", stage = "AGENT", guidance = null, attempts = [] } = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.stage = stage;
+  error.guidance = guidance;
+  error.attempts = attempts;
+  return error;
 }
 
 async function convertOfficeDocument({ filename, contentBase64 }, target) {
@@ -615,13 +641,40 @@ async function signWithWindowsCertificate({ thumbprint, contentBase64 }) {
 
 async function testA3Reader({ thumbprint }) {
   const cleanThumbprint = String(thumbprint || "").replace(/\s/g, "");
-  if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) throw new Error("Selecione o certificado A3 instalado.");
-  await signBufferWithWindowsCertificate(cleanThumbprint, Buffer.from("DocPronto - teste local do leitor A3", "utf8"), {
-    windowsHide: false,
-    timeoutMs: 30000,
-    timeoutMessage: "O token não liberou a chave privada em 30 segundos. Procure a janela do PIN atrás do navegador; se ela não apareceu, abra o gerenciador do token e faça login."
-  });
-  return { ready: true, agentVersion, message: "Leitor, PIN e chave privada do A3 validados localmente." };
+  if (!/^[a-fA-F0-9]{40}$/.test(cleanThumbprint)) {
+    throw diagnosticError("Selecione um certificado A3 instalado.", { code: "CERTIFICATE_NOT_SELECTED", stage: "CERTIFICATE" });
+  }
+  const certificate = (await listWindowsCertificates()).find(item => String(item.thumbprint || "").replace(/\s/g, "").toUpperCase() === cleanThumbprint.toUpperCase());
+  if (!certificate) {
+    throw diagnosticError("O certificado selecionado não está mais disponível no Windows.", {
+      code: "CERTIFICATE_NOT_FOUND",
+      stage: "CERTIFICATE",
+      guidance: "Reconecte o token, abra o gerenciador do certificado e detecte os certificados novamente."
+    });
+  }
+  try {
+    const result = await signBufferWithWindowsCertificate(cleanThumbprint, Buffer.from("DocPronto - teste local do leitor A3", "utf8"), {
+      windowsHide: false,
+      timeoutMs: 30000,
+      diagnostics: true,
+      timeoutMessage: "O token não liberou a chave privada em 30 segundos. Procure a janela do PIN atrás do navegador."
+    });
+    return {
+      ready: true,
+      agentVersion,
+      architecture: result.architecture,
+      attempts: result.attempts,
+      message: "Etapas 1–3 concluídas: agente, certificado e assinatura local validados em " + result.architecture + ". A consulta à SEFAZ está liberada."
+    };
+  } catch (error) {
+    if (error.stage) throw error;
+    throw diagnosticError(String(error.message || error), {
+      code: "A3_PRIVATE_KEY_UNAVAILABLE",
+      stage: "PRIVATE_KEY",
+      guidance: "Abra o gerenciador do token, confirme que o certificado possui chave privada, faça login com o PIN e repita o teste. Se 64 e 32 bits falharem, repare o driver/middleware do fabricante.",
+      attempts: error.attempts || []
+    });
+  }
 }
 
 async function signBufferWithWindowsCertificate(thumbprint, content, options = {}) {
@@ -657,27 +710,49 @@ try {
       DOCPRONTO_CERT_THUMBPRINT: cleanThumbprint,
       DOCPRONTO_SIGN_INPUT: inputPath
     };
+    const attempts = [];
     let output;
+    let architecture = "PowerShell 64 bits";
     try {
       output = (await runPowerShell(script, environment, Number(options.timeoutMs) || 120000, options)).trim();
-    } catch (error) {
-      const message = String(error.message || error);
+      attempts.push({ architecture: "64-bit", status: "PASS" });
+    } catch (error64) {
+      const message64 = String(error64.message || error64);
+      attempts.push({ architecture: "64-bit", status: "FAIL", error: sanitizeDiagnostic(message64) });
       const windowsDirectory = process.env.WINDIR || process.env.SystemRoot || "C:\\Windows";
       const powershell32 = join(windowsDirectory, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe");
-      const keysetUnavailable = /keyset|conjunto de chaves|NTE_BAD_KEYSET|0x80090016/i.test(message);
-      if (!keysetUnavailable || !existsSync(powershell32)) throw error;
+      const keyProviderFailure = /keyset|conjunto de chaves|NTE_BAD_KEYSET|0x80090016|unknown credentials|credenciais desconhecidas/i.test(message64);
+      if (!keyProviderFailure || !existsSync(powershell32)) {
+        error64.attempts = attempts;
+        throw error64;
+      }
       debugLog("windows-sign:retry-powershell-32bit");
-      output = (await runPowerShell(script, environment, Number(options.timeoutMs) || 120000, {
-        ...options,
-        executable: powershell32
-      })).trim();
+      architecture = "PowerShell 32 bits";
+      try {
+        output = (await runPowerShell(script, environment, Number(options.timeoutMs) || 120000, { ...options, executable: powershell32 })).trim();
+        attempts.push({ architecture: "32-bit", status: "PASS" });
+      } catch (error32) {
+        attempts.push({ architecture: "32-bit", status: "FAIL", error: sanitizeDiagnostic(String(error32.message || error32)) });
+        error32.attempts = attempts;
+        throw error32;
+      }
     }
     debugLog(`windows-sign:done:${output.length}`);
-    return output;
+    return options.diagnostics ? { signatureBase64: output, architecture, attempts } : output;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
     debugLog("windows-sign:temp-removed");
   }
+}
+
+function sanitizeDiagnostic(message) {
+  return String(message || "")
+    .replace(/\r?\n/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+No linha:.*$/i, "")
+    .replace(/\s+At line:.*$/i, "")
+    .trim()
+    .slice(0, 500);
 }
 
 async function signPdfWithWindowsCertificate({ filename, thumbprint, contentBase64, signerName, placement }) {

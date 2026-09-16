@@ -1,39 +1,28 @@
-# DocPronto Hub — MVP
+# DocPronto Hub
 
-Esta pasta contém a primeira versão funcional e demonstrável da plataforma de gestão PDF/XML, criada a partir dos quatro prompts mestres do projeto.
+Interface fiscal publicada em `/hub` e preservada separadamente do conversor original.
 
-## O que funciona
+## Fluxos disponíveis
 
-- Entrada manual, TXT e CSV.
-- Normalização, validação de 44 dígitos e dígito verificador.
-- Deduplicação e reaproveitamento de documentos existentes.
-- Lotes independentes, concorrência configurável, pausa, retomada e cancelamento.
-- Processamento assíncrono simulado com checkpoints, retry e fila de falhas.
-- Dashboard, histórico, documentos, detalhes, auditoria e configurações.
-- Exportação CSV e geração de XML demonstrativo para download.
-- Persistência no navegador por localStorage.
-- Layout responsivo e interface em português do Brasil.
+- entrada manual, TXT e CSV de chaves;
+- validação, deduplicação, lotes, pausa, retomada e falhas;
+- documentos, auditoria e exportação;
+- A1 por PFX ou certificado instalado;
+- A3 por token/cartão no leitor;
+- consulta oficial de NF-e e CT-e por NSU;
+- armazenamento local do XML oficial recebido.
 
-## Limites desta versão
+## Release do agente
 
-FSist e DocPronto estão representados por adapters, mas não foram conectados a endpoints inventados. A integração real deve usar exclusivamente API, webhook ou fluxo oficialmente autorizado. O sistema não tenta contornar CAPTCHA, autenticação ou mecanismos anti-bot.
+A fonte de verdade é `agent-release.json`. A interface ativa é `app.js` e o único instalador ativo é `instalar-agente.cmd`.
 
-Os PDFs e XMLs atuais são demonstrativos. XML reconstruído é identificado como RECONSTRUCTED e nunca deve ser confundido com XML fiscal original.
+O fluxo A3 valida primeiro a chave privada localmente, tenta o provedor Windows de 64 bits e usa 32 bits como fallback apenas quando a falha indica incompatibilidade de provedor. A consulta à SEFAZ permanece bloqueada enquanto esse teste não passar.
 
-## Próxima etapa de produção
+## Limites
 
-Arquitetura self-hosted recomendada:
+- O agente e o teste real do A3 exigem Windows, middleware do fabricante, token/cartão e PIN.
+- O PIN não é enviado ao site nem persistido.
+- NFS-e municipal exige conectores próprios e não faz parte do serviço nacional NF-e/CT-e.
+- XML reconstruído é demonstrativo; somente XML recebido da SEFAZ é tratado como oficial.
 
-- Frontend: Next.js + TypeScript
-- Backend: NestJS
-- Banco: PostgreSQL
-- Fila/cache: Redis + BullMQ
-- Storage: filesystem dedicado ou MinIO
-- Proxy: Nginx/Caddy
-- Implantação: Docker Compose em Linux
-
-Antes da integração real, são necessários os contratos/documentação oficiais do FSist e do serviço DocPronto, além da definição de autenticação, armazenamento, retenção e política LGPD.
-
-## Acesso
-
-No GitHub Pages, abra a rota /hub/ do projeto DocPronto.
+Execute `npm run validate` na raiz antes de publicar.

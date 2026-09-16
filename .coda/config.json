@@ -1,0 +1,7 @@
+{
+  "system": "C.O.D.A X SUPREME",
+  "project": "DocPronto",
+  "memoryRoot": ".coda/project",
+  "sourceOfTruth": "current-code",
+  "validationCommand": "npm run validate"
+}
