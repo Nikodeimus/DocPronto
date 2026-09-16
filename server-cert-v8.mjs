@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.PORT || 4173);
-const agentVersion = "2026.09.16-cert.18";
+const agentVersion = "2026.09.16-cert.19";
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -288,7 +288,7 @@ try {
       $signedCms = [System.Security.Cryptography.Pkcs.SignedCms]::new($contentInfo, $true)
       $signer = [System.Security.Cryptography.Pkcs.CmsSigner]::new($cert)
       $signer.IncludeOption = [System.Security.Cryptography.X509Certificates.X509IncludeOption]::EndCertOnly
-      $signedCms.ComputeSignature($signer, $false)
+      $signedCms.ComputeSignature($signer)
       if ($signedCms.Encode().Length -eq 0) { throw 'O token não produziu a assinatura de validação.' }
     } catch {
       throw ('Não foi possível desbloquear a chave privada do A3. Confirme o PIN na janela do token e verifique o driver do leitor. Detalhe: ' + $_.Exception.Message)
@@ -646,7 +646,7 @@ try {
   $signedCms = [System.Security.Cryptography.Pkcs.SignedCms]::new($contentInfo, $true)
   $signer = [System.Security.Cryptography.Pkcs.CmsSigner]::new($cert)
   $signer.IncludeOption = [System.Security.Cryptography.X509Certificates.X509IncludeOption]::EndCertOnly
-  $signedCms.ComputeSignature($signer, $false)
+  $signedCms.ComputeSignature($signer)
   [Convert]::ToBase64String($signedCms.Encode())
 } finally {
   $store.Close()
