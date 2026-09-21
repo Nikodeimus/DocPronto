@@ -651,13 +651,12 @@ async function extractEditableTextWithOcr(file) {
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: context, viewport }).promise;
-      const cropX = Math.round(canvas.width * 0.085);
-      const cropY = Math.round(canvas.height * (pageNumber === 1 ? 0.195 : 0.185));
-      // The editable body ends before the JUCESP validation strip. Keeping
-      // that vertical strip in the OCR region produced isolated letters and
-      // symbols that Word placed between the legal paragraphs.
-      const cropWidth = Math.round(canvas.width * 0.79);
-      const cropHeight = Math.round(canvas.height * 0.755);
+      // Keep a small neutral margin instead of cropping for one specific
+      // document family. Receipts, invoices and forms may use the full page.
+      const cropX = Math.round(canvas.width * 0.025);
+      const cropY = Math.round(canvas.height * 0.025);
+      const cropWidth = Math.round(canvas.width * 0.95);
+      const cropHeight = Math.round(canvas.height * 0.95);
       const ocrCanvas = document.createElement("canvas");
       ocrCanvas.width = cropWidth;
       ocrCanvas.height = cropHeight;
@@ -834,16 +833,19 @@ function documentDecisionEngine(extractedPages) {
 
 function classifyOcrCandidate(candidate) {
   const text = cleanOcrLine(candidate.text);
+  const meaningfulShort = isMeaningfulShortOcrText(text);
   const letters = (text.match(/[A-Za-zÀ-ÿ]/g) || []).length;
   const useful = (text.match(/[A-Za-zÀ-ÿ0-9]/g) || []).length;
   const suspicious = (text.match(/[|_=<>~`^*{}\[\]\\]/g) || []).length;
-  if (!text || useful < 3 || candidate.confidence < 58) return "noise";
-  if (text.length <= 3 && !/^\d{1,3}[ªº]?$/i.test(text)) return "noise";
-  if (suspicious > 1 || useful / Math.max(text.length, 1) < 0.55) return "noise";
-  const legalAnchor = /\b(?:cláusula|parágrafo|contrato|sócio|sociedade|assinad[oa]|alteração|capital|administração|foro|responsabilidade)\b/i.test(text);
-  const wordLikeTokens = text.split(/\s+/).filter(token => /^[A-Za-zÀ-ÿ]{4,}$/.test(token)).length;
-  if (text.length < 24 && !legalAnchor && wordLikeTokens < 2) return "noise";
-  return letters || /\d/.test(text) ? "editable" : "noise";
+  if (!text || (!meaningfulShort && useful < 1) || candidate.confidence < 58) return "noise";
+  if (!meaningfulShort && (suspicious > 1 || useful / Math.max(text.length, 1) < 0.55)) return "noise";
+  if (text.length <= 3 && !meaningfulShort) return "noise";
+  return meaningfulShort || letters || /\d/.test(text) ? "editable" : "noise";
+}
+
+function isMeaningfulShortOcrText(text) {
+  const value = String(text || "").trim();
+  return /^(?:\d{1,3}[ªº]?|R\$|UF|RG|CPF|CEP|ISS|IR|IPI|PIS|COFINS|INSS|CSLL|NF|NFS|SIM|NÃO)$/i.test(value);
 }
 
 // MOTOR 4 — removes only approved editable text rectangles. The previous
@@ -911,10 +913,11 @@ function validateDocumentPipeline(pages) {
 
 function isSuspiciousEditableText(text) {
   const value = String(text || "").trim();
+  const meaningfulShort = isMeaningfulShortOcrText(value);
   const useful = (value.match(/[A-Za-zÀ-ÿ0-9]/g) || []).length;
   const punctuation = (value.match(/[|_=<>~`^*{}\[\]\\]/g) || []).length;
-  if (!value || useful < 3) return true;
-  if (value.length <= 3 && !/^\d{1,3}[ªº]?$/i.test(value)) return true;
+  if (!value || (!meaningfulShort && useful < 1)) return true;
+  if (value.length <= 3 && !meaningfulShort) return true;
   return punctuation > Math.max(1, Math.floor(value.length * 0.04));
 }
 
@@ -929,7 +932,12 @@ function documentAssemblyEngine(lines) {
   for (const line of classified) {
     const previous = blocks[blocks.length - 1];
     const lineBottom = line.y + line.height;
-    const startsParagraph = /^(?:Cláusula|Parágrafo|Pelo presente|Único sócio|O sócio|Totalizando|Assinado|JUCESP)\b/i.test(line.text);
+    const startsParagraph = Boolean(previous) && (
+      line.role !== "body" ||
+      line.y - previous.bottom > Math.max(medianHeight * 1.35, 12) ||
+      Math.abs(line.x - previous.x) > 24 ||
+      /[.!?:]$/.test(previous.text)
+    );
     const canJoin = previous && line.role === "body" && previous.role === "body" && !startsParagraph &&
       line.y - previous.bottom < Math.max(medianHeight * 2.3, 18);
     if (canJoin) {
@@ -978,18 +986,15 @@ function cleanOcrLine(value) {
     .replace(/^[:;|]+\s*/, "")
     .replace(/\s+([,.;:])/g, "$1")
     .replace(/\.\s*\?\s*$/g, ".")
-    .replace(/\bda\s+lel\b/gi, "da lei")
-    .replace(/\bde\s+z\s+exercer\b/gi, "de exercer")
-    .replace(/\bE\s+ação\b/g, "ação")
     .trim();
 }
 
 function classifyDocumentLine(line, medianHeight) {
   const text = line.text.trim();
-  if (/^(?:Totalizando|[-–—]?\s*[\d.]+\s+Quotas?\b)/i.test(text) || (/R\$\s*[\d.]+,\d{2}/i.test(text) && /\d{1,3},\d{2}\s*%/i.test(text))) return "financial-row";
+  if ((/R\$\s*[\d.]+,\d{2}/i.test(text) && /\d{1,3},\d{2}\s*%/i.test(text)) || /^Total\b/i.test(text)) return "financial-row";
   const uppercase = /^[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ0-9ªº\s&.,:()–—-]+$/.test(text) && /[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ]{4}/.test(text);
   if (uppercase && (text.length < 110 || line.height > medianHeight * 1.12)) return "heading";
-  if (line.y > 780 || /^(?:Fone:|R: Bernardino|Documento assinado|Registro de Imóveis)/i.test(text)) return "footer";
+  if (line.y > 780) return "footer";
   return "body";
 }
 
@@ -1106,11 +1111,11 @@ function editableLayoutDocumentXml(pages) {
       if (page.blocks) {
         const fontSize = line.fontSize;
         const bold = line.role === "heading" ? "<w:b/>" : "";
-        const italic = line.role === "heading" && /PALIN|CONTRATO SOCIAL/i.test(line.text) ? "<w:i/>" : "";
+        const italic = "";
         const justification = line.alignment === "center" ? "center" : line.alignment === "both" ? "both" : "left";
-        const legalTextRightEdge = 515;
-        const safeX = Math.min(line.x, legalTextRightEdge - 40);
-        const availableWidth = Math.max(40, legalTextRightEdge - safeX);
+        const contentRightEdge = 565;
+        const safeX = Math.min(line.x, contentRightEdge - 40);
+        const availableWidth = Math.max(40, contentRightEdge - safeX);
         const boxWidth = Math.min(availableWidth, Math.max(80, line.width));
         const boxHeight = Math.max(line.height * 1.08, fontSize * 1.5);
         const runProperties = `<w:rPr>${bold}${italic}<w:noProof/><w:sz w:val="${Math.round(fontSize * 2)}"/><w:szCs w:val="${Math.round(fontSize * 2)}"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr>`;
