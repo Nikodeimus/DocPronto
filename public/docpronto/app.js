@@ -1945,12 +1945,29 @@ async function pdfToAbrasfXml([file]) {
   const rawLines = pages.flat();
   const lines = rawLines.map(line => stripLayoutMarkers(line).replace(/\s+/g, " ").trim()).filter(Boolean);
   const text = lines.join("\n");
+  const cancellation = detectNfseCancellation(text);
+  if (cancellation.cancelled) {
+    const details = [cancellation.date && `em ${cancellation.date}`, cancellation.reason && `motivo: ${cancellation.reason}`].filter(Boolean).join(" · ");
+    throw new Error(`Esta NFS-e está cancelada${details ? ` (${details})` : ""}. O DOCPronto não gera CompNfse ativa para documento cancelado.`);
+  }
   const invoice = parseSupportedNfse(rawLines, text);
   validateAbrasfInvoice(invoice, document.querySelector("#abrasfStrictValidation")?.checked !== false);
   const xml = buildAbrasfCompNfse(invoice);
   const parsed = new DOMParser().parseFromString(xml, "application/xml");
   if (parsed.querySelector("parsererror")) throw new Error("O XML ABRASF gerado não passou na validação de sintaxe.");
+  validateAbrasf204Document(parsed);
   download(xml, `NFSe-${invoice.number}-ABRASF.xml`, "application/xml;charset=utf-8");
+}
+
+function detectNfseCancellation(text) {
+  const source = String(text || "").replace(/\r/g, "");
+  const watermark = /(?:^|\n)\s*(?:NFS-?e\s+)?CANCELAD[AO]\s*(?:\n|$)/im.test(source);
+  const dateMatch = source.match(/Data(?:\s+e\s+Hora)?\s+d[oa]\s+Cancelamento[^\d]{0,40}(\d{2}\/\d{2}\/\d{4}(?:\s+\d{2}:\d{2}(?::\d{2})?)?)/i);
+  const status = /(?:Situa[cç][aã]o|Status)(?:\s+da\s+NFS-?e)?[^\n]{0,30}\bCANCELAD[AO]\b/i.test(source);
+  const protocol = /(?:NfseCancelamento|Confirma[cç][aã]o\s+de\s+Cancelamento|Pedido\s+de\s+Cancelamento)/i.test(source);
+  const cancelled = [watermark, Boolean(dateMatch), status, protocol].filter(Boolean).length >= 2;
+  const reason = cancelled ? (source.match(/Motivo(?:\s+d[oa]\s+Cancelamento)?\s*[:\-]?\s*([^\n]{3,240})/i) || [])[1]?.trim() || "" : "";
+  return { cancelled, date: dateMatch?.[1] || "", reason };
 }
 
 function parseSupportedNfse(rawLines, text) {
@@ -2410,20 +2427,53 @@ function extractBarueriDescription(lines) {
 }
 
 function validateAbrasfInvoice(invoice, strict) {
+  if (!invoice || typeof invoice !== "object") throw new Error("A leitura da NFS-e não produziu dados fiscais válidos.");
+  if (!String(invoice.number || "").trim() || !String(invoice.auth || "").trim()) throw new Error("Número da NFS-e ou código de verificação não foi identificado.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(invoice.issueDate || "") || !/^\d{2}:\d{2}:\d{2}$/.test(invoice.time || "")) throw new Error("Data ou hora de emissão da NFS-e está ausente ou inválida.");
   if (![11, 14].includes(onlyDigits(invoice.provider.taxId).length) || ![11, 14].includes(onlyDigits(invoice.customer.taxId).length)) throw new Error("CPF/CNPJ do prestador ou tomador está ausente ou incompleto.");
+  if (!String(invoice.provider.name || "").trim() || !String(invoice.customer.name || "").trim()) throw new Error("Razão social do prestador ou do tomador não foi identificada.");
   if (!invoice.municipality?.code || !/^\d{7}$/.test(invoice.municipality.code)) throw new Error("Código IBGE do município emissor não foi identificado.");
+  if (!String(invoice.item?.code || "").trim()) throw new Error("Código do serviço não foi identificado; o XML não será preenchido por suposição.");
+  const requiredMoney = { "valor do serviço": invoice.total, "deduções": invoice.deductions, "base de cálculo": invoice.base, "ISSQN": invoice.iss, "valor líquido": invoice.net };
+  const missingMoney = Object.entries(requiredMoney).filter(([, value]) => !Number.isFinite(value)).map(([label]) => label);
+  if (missingMoney.length) throw new Error(`Campos fiscais ausentes: ${missingMoney.join(", ")}. O DOCPronto não substitui campos ausentes por 0,00.`);
+  if (!Number.isFinite(invoice.item.rate) || invoice.item.rate < 0) throw new Error("Alíquota do serviço está ausente ou inválida.");
+  const retentionEntries = Object.entries(invoice.retentions || {});
+  if (!retentionEntries.length || retentionEntries.some(([, value]) => !Number.isFinite(Number(value)))) throw new Error("As retenções não foram identificadas de forma segura.");
   const retentionTotal = Object.values(invoice.retentions).reduce((sum, value) => sum + Number(value || 0), 0);
   const expectedNet = roundFiscal(invoice.total - retentionTotal);
   if (strict && Math.abs(expectedNet - invoice.net) > 0.02) {
     throw new Error(`Os valores não fecham: bruto ${formatMoney(invoice.total)}, retenções ${formatMoney(retentionTotal)} e líquido ${formatMoney(invoice.net)}.`);
   }
-  if (strict && (!Number.isFinite(invoice.item.rate) || invoice.item.rate <= 0)) throw new Error("Não foi possível identificar a alíquota do serviço.");
+  if (strict && invoice.item.rate <= 0) throw new Error("Não foi possível identificar uma alíquota positiva do serviço.");
   if (strict && Number.isFinite(invoice.base) && Number.isFinite(invoice.deductions) && Math.abs(roundFiscal(invoice.total - invoice.deductions) - invoice.base) > 0.02) {
     throw new Error(`Valor do serviço (${formatMoney(invoice.total)}), deduções (${formatMoney(invoice.deductions)}) e base de cálculo (${formatMoney(invoice.base)}) não conferem.`);
   }
   if (strict && Number.isFinite(invoice.iss) && Math.abs(roundFiscal(invoice.base * invoice.item.rate / 100) - invoice.iss) > 0.02) {
     throw new Error(`Base (${formatMoney(invoice.base)}), alíquota (${Number(invoice.item.rate).toFixed(2)}%) e ISSQN (${formatMoney(invoice.iss)}) não conferem.`);
   }
+}
+
+function validateAbrasf204Document(documentNode) {
+  const root = documentNode.documentElement;
+  if (!root || root.localName !== "CompNfse" || root.namespaceURI !== "http://www.abrasf.org.br/nfse.xsd") throw new Error("A raiz ou o namespace do XML não corresponde ao CompNfse ABRASF.");
+  const one = name => {
+    const nodes = root.getElementsByTagNameNS("*", name);
+    if (nodes.length !== 1) throw new Error(`Estrutura ABRASF inválida: esperado exatamente um campo ${name}.`);
+    return nodes[0];
+  };
+  const required = ["Nfse", "InfNfse", "Numero", "CodigoVerificacao", "DataEmissao", "ValoresNfse", "DeclaracaoPrestacaoServico", "Servico", "Prestador", "TomadorServico"];
+  required.forEach(one);
+  if (one("Nfse").getAttribute("versao") !== "2.04") throw new Error("A versão do bloco Nfse não é 2.04.");
+  const moneyFields = ["BaseCalculo", "ValorLiquidoNfse", "ValorServicos", "ValorDeducoes"];
+  moneyFields.forEach(name => {
+    const value = one(name).textContent?.trim() || "";
+    if (!/^\d+\.\d{2}$/.test(value)) throw new Error(`Campo monetário ABRASF inválido: ${name}.`);
+  });
+  const allText = root.textContent || "";
+  if (/\b(?:NaN|undefined|null)\b/i.test(allText)) throw new Error("O XML contém campo não identificado e foi bloqueado antes do download.");
+  const ids = [...root.querySelectorAll("[Id]")].map(node => node.getAttribute("Id"));
+  if (new Set(ids).size !== ids.length) throw new Error("O XML contém identificadores duplicados.");
 }
 
 function buildAbrasfCompNfse(invoice) {
