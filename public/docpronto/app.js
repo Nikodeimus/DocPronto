@@ -222,7 +222,7 @@ function renderOptions(type) {
     "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
     "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
     "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
-    "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — funciona online</option><option value="installed">Certificado instalado no Windows — requer conector local</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">O Chrome mostra certificados no gov.br porque aquele serviço solicita autenticação por certificado. Para assinar qualquer arquivo com o certificado do Windows, mantenha o conector do DOCPronto aberto e atualizado. <a href="/docpronto/downloads/DOCPronto-Conector-Windows.zip" download>Baixar ou atualizar o conector</a>.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em conectar e carregar</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Conectar e carregar</button></div><small>A chave privada permanece protegida no repositório do Windows.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>A senha é usada somente na memória desta página e não é armazenada.</small></div><small>PDFs recebem assinatura embutida. Outros formatos geram um arquivo de assinatura separada .p7s.</small>`,
+    "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — assinatura separada .p7s</option><option value="installed">Certificado instalado no Windows — PDF com assinatura embutida</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">O Chrome mostra certificados no gov.br porque aquele serviço solicita autenticação por certificado. Para assinar qualquer arquivo com o certificado do Windows, mantenha o conector do DOCPronto aberto e atualizado. <a href="/docpronto/downloads/DOCPronto-Conector-Windows.zip" download>Baixar ou atualizar o conector</a>.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em conectar e carregar</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Conectar e carregar</button></div><small>PDFs recebem assinatura digital embutida. Nos outros formatos, a assinatura é entregue como arquivo .p7s.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>O modo A1 online gera uma assinatura separada .p7s, inclusive para PDFs. A senha é usada somente na memória desta página.</small></div><small>Escolha o modo conforme o formato de assinatura que o sistema de destino aceita.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`,
     "pdf-xml-abrasf": `<div class="notice visible">O motor reconhece layouts de Barueri, São José do Rio Preto e DANFSe/NFS-e Nacional, identifica prestador e tomador por seção, confere retenções e gera CompNfse ABRASF 2.04.</div><label><input id="abrasfStrictValidation" type="checkbox" checked> Bloquear o XML se os totais não fecharem</label><small>Municípios validados nesta versão: Barueri/SP, São José do Rio Preto/SP, Criciúma/SC e Novo Hamburgo/RS.</small>`
   };
@@ -1657,6 +1657,8 @@ async function xlsxToCsv([file]) {
   const target = relation?.getAttribute("Target") || "worksheets/sheet1.xml";
   const sheetPath = target.startsWith("/") ? target.slice(1) : `xl/${target.replace(/^\.?\//, "")}`;
   const sharedStrings = await readSharedStrings(zip);
+  const styles = await readXlsxStyles(zip);
+  const date1904 = workbook.getElementsByTagNameNS("*", "workbookPr")[0]?.getAttribute("date1904") === "1";
   const sheet = parseXml(await requireZipEntry(zip, sheetPath).async("string"));
   const rows = [];
   [...sheet.getElementsByTagNameNS("*", "row")].forEach(row => {
@@ -1674,6 +1676,7 @@ async function xlsxToCsv([file]) {
       let value = inlineNode?.textContent ?? valueNode?.textContent ?? "";
       if (type === "s") value = sharedStrings[Number(value)] ?? "";
       if (type === "b") value = value === "1" ? "VERDADEIRO" : "FALSO";
+      if (!type && value !== "") value = formatXlsxStoredValue(value, cell.getAttribute("s"), styles, date1904);
       values[column - 1] = value;
     });
     rows.push(values);
@@ -3276,7 +3279,50 @@ function quoteCsv(value, delimiter) {
 }
 function neutralizeCsvFormula(value) {
   const string = String(value ?? "");
+  if (isPlainCsvNumber(string)) return string;
   return /^[=+\-@]/.test(string) ? `'${string}` : string;
+}
+
+function isPlainCsvNumber(value) {
+  return /^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(String(value || "").trim());
+}
+
+async function readXlsxStyles(zip) {
+  const entry = zip.file("xl/styles.xml");
+  if (!entry) return [];
+  const xml = parseXml(await entry.async("string"));
+  const custom = new Map([...xml.getElementsByTagNameNS("*", "numFmt")].map(node => [Number(node.getAttribute("numFmtId")), node.getAttribute("formatCode") || ""]));
+  const cellXfs = xml.getElementsByTagNameNS("*", "cellXfs")[0];
+  return cellXfs ? [...cellXfs.children].map(node => {
+    const numFmtId = Number(node.getAttribute("numFmtId") || 0);
+    return { numFmtId, formatCode: custom.get(numFmtId) || "" };
+  }) : [];
+}
+
+function formatXlsxStoredValue(value, styleIndex, styles, date1904 = false) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return value;
+  const style = styles[Number(styleIndex)] || { numFmtId: 0, formatCode: "" };
+  const formatCode = String(style.formatCode || "").replace(/"[^"]*"|\\.|\[[^\]]*\]/g, "");
+  const dateStyle = [14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47].includes(style.numFmtId) || /[dmy]/i.test(formatCode);
+  if (dateStyle) return excelSerialToCsvDate(number, date1904);
+  const percentStyle = [9, 10].includes(style.numFmtId) || /%/.test(formatCode);
+  if (percentStyle) {
+    const decimals = (formatCode.match(/0\.([0#]+)/)?.[1].length) || (style.numFmtId === 10 ? 2 : 0);
+    return `${(number * 100).toFixed(decimals).replace(".", ",")}%`;
+  }
+  return value;
+}
+
+function excelSerialToCsvDate(serial, date1904 = false) {
+  const wholeDays = Math.floor(serial);
+  if (!Number.isFinite(wholeDays) || wholeDays < 0) return String(serial);
+  const epoch = date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 31);
+  const adjustedDays = !date1904 && wholeDays >= 60 ? wholeDays - 1 : wholeDays;
+  const date = new Date(epoch + adjustedDays * 86400000);
+  if (!Number.isFinite(date.getTime())) return String(serial);
+  const pad = value => String(value).padStart(2, "0");
+  return `${pad(date.getUTCDate())}/${pad(date.getUTCMonth() + 1)}/${date.getUTCFullYear()}`;
 }
 function columnLetters(number) {
   let result = "";
