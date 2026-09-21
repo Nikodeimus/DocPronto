@@ -1631,6 +1631,13 @@ function bytesFromBase64(value) {
 }
 
 async function createTextPdf(text) {
+  const normalizedText = String(text || "").replace(/\t/g, "    ");
+  const unsupported = findUnsupportedWinAnsiCharacters(normalizedText);
+  if (unsupported.length) {
+    const preview = unsupported.slice(0, 12).map(formatUnsupportedCharacter).join(", ");
+    const remaining = unsupported.length > 12 ? ` e mais ${unsupported.length - 12}` : "";
+    throw new Error(`O TXT contém caracteres incompatíveis com o PDF básico: ${preview}${remaining}. Nenhum caractere foi substituído; remova esses símbolos ou salve o texto com caracteres latinos compatíveis.`);
+  }
   const document = await PDFLib.PDFDocument.create();
   const font = await document.embedFont(PDFLib.StandardFonts.Helvetica);
   const size = 11;
@@ -1638,7 +1645,7 @@ async function createTextPdf(text) {
   const height = 841.89;
   const margin = 52;
   const lineHeight = 16;
-  const lines = wrapTextByWidth(text, font, size, width - margin * 2);
+  const lines = wrapTextByWidth(normalizedText, font, size, width - margin * 2);
   let page = document.addPage([width, height]);
   let y = height - margin;
   for (const line of lines) {
@@ -1650,6 +1657,18 @@ async function createTextPdf(text) {
     y -= lineHeight;
   }
   return document.save();
+}
+
+function findUnsupportedWinAnsiCharacters(text) {
+  return [...new Set(Array.from(String(text || "")).filter(character =>
+    character !== "\n" && character !== "\r" && !/[\x20-\x7E\u00A0-\u00FF]/.test(character)
+  ))];
+}
+
+function formatUnsupportedCharacter(character) {
+  const codePoint = character.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+  const visible = /\s/.test(character) ? "espaço especial" : `“${character}”`;
+  return `${visible} (U+${codePoint})`;
 }
 
 async function docxToText([file]) {
