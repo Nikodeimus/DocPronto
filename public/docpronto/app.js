@@ -43,6 +43,7 @@ let activeTool = null;
 let selectedFiles = [];
 let isProcessing = false;
 let activeTrigger = null;
+let processingAbortController = null;
 
 renderTools();
 bindNavigation();
@@ -109,8 +110,16 @@ function bindUpload() {
   }));
   elements.dropZone.addEventListener("drop", event => setFiles([...event.dataTransfer.files]));
   elements.process.addEventListener("click", processFiles);
+  elements.dialog.addEventListener("click", event => {
+    if (!isProcessing || !event.target.closest("[data-cancel]")) return;
+    event.preventDefault();
+    cancelCurrentProcessing();
+  });
   elements.dialog.addEventListener("cancel", event => {
-    if (isProcessing) event.preventDefault();
+    if (isProcessing) {
+      event.preventDefault();
+      cancelCurrentProcessing();
+    }
   });
   elements.dialog.addEventListener("close", resetDialog);
 }
@@ -119,7 +128,11 @@ function bindAccessibleDialogs() {
   document.querySelectorAll("dialog").forEach(dialog => {
     dialog.addEventListener("keydown", event => {
       if (event.key === "Escape") {
-        if (isProcessing && dialog === elements.dialog) return;
+        if (isProcessing && dialog === elements.dialog) {
+          event.preventDefault();
+          cancelCurrentProcessing();
+          return;
+        }
         event.preventDefault();
         dialog.close("cancel");
         return;
@@ -271,18 +284,24 @@ function bindDigitalSignOptions() {
 async function processFiles() {
   if (!activeTool || !selectedFiles.length) return;
   isProcessing = true;
-  document.querySelectorAll("[data-cancel]").forEach(button => { button.disabled = true; });
+  processingAbortController = new AbortController();
+  document.querySelectorAll("[data-cancel]").forEach(button => { button.disabled = false; });
   elements.process.disabled = true;
   elements.process.textContent = "Processando...";
-  showStatus("Processando localmente. Mantenha esta página aberta.");
+  showStatus("Processando localmente. Use Cancelar se quiser interromper com segurança.");
   try {
     await activeTool.action(selectedFiles);
+    throwIfProcessingCancelled();
     showStatus("Pronto. O download foi iniciado.");
   } catch (error) {
-    console.error(error);
-    showStatus(humanizeError(error), true);
+    if (error?.name === "AbortError") showStatus("Processamento cancelado. Nenhum arquivo incompleto foi baixado.");
+    else {
+      console.error(error);
+      showStatus(humanizeError(error), true);
+    }
   } finally {
     isProcessing = false;
+    processingAbortController = null;
     document.querySelectorAll("[data-cancel]").forEach(button => { button.disabled = false; });
     elements.process.disabled = false;
     elements.process.textContent = "Processar arquivos";
@@ -292,6 +311,7 @@ async function processFiles() {
 async function mergePdfs(files) {
   const output = await PDFLib.PDFDocument.create();
   for (const file of files) {
+    throwIfProcessingCancelled();
     const source = await PDFLib.PDFDocument.load(await file.arrayBuffer());
     const pages = await output.copyPages(source, source.getPageIndices());
     pages.forEach(page => output.addPage(page));
@@ -312,6 +332,7 @@ async function splitPdf([file]) {
   const source = await PDFLib.PDFDocument.load(await file.arrayBuffer());
   const zip = new JSZip();
   for (let index = 0; index < source.getPageCount(); index += 1) {
+    throwIfProcessingCancelled();
     const output = await PDFLib.PDFDocument.create();
     const [page] = await output.copyPages(source, [index]);
     output.addPage(page);
@@ -356,6 +377,7 @@ async function watermarkPdf([file]) {
 async function imagesToPdf(files) {
   const document = await PDFLib.PDFDocument.create();
   for (const file of files) {
+    throwIfProcessingCancelled();
     const bytes = await file.arrayBuffer();
     const image = file.type === "image/png" || file.name.toLowerCase().endsWith(".png")
       ? await document.embedPng(bytes)
@@ -398,6 +420,17 @@ async function wordToPdf([file]) {
   }
 }
 
+function cancelCurrentProcessing() {
+  if (!processingAbortController || processingAbortController.signal.aborted) return;
+  processingAbortController.abort();
+  showStatus("Cancelando com segurança...");
+}
+
+function throwIfProcessingCancelled() {
+  if (!processingAbortController?.signal.aborted) return;
+  throw new DOMException("Processamento cancelado pelo usuário.", "AbortError");
+}
+
 async function createRenderedDocxPdf(file) {
   if (!window.docx?.renderAsync || !window.html2canvas) {
     throw new Error("O motor visual do Word não foi carregado. Atualize a página com Ctrl + F5 e tente novamente.");
@@ -431,6 +464,7 @@ async function createRenderedDocxPdf(file) {
     if (!renderedPages.length) throw new Error("O Word não produziu páginas renderizáveis.");
     const pdf = await PDFLib.PDFDocument.create();
     for (let index = 0; index < renderedPages.length; index += 1) {
+      throwIfProcessingCancelled();
       showStatus(`Renderizando página ${index + 1} de ${renderedPages.length} com alta fidelidade...`);
       const section = renderedPages[index];
       const canvas = await window.html2canvas(section, {
@@ -641,6 +675,7 @@ async function extractEditableTextWithOcr(file) {
   const pageTexts = [];
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      throwIfProcessingCancelled();
       const page = await pdf.getPage(pageNumber);
       const base = page.getViewport({ scale: 1 });
       const viewport = page.getViewport({ scale: Math.min(3.2, 2700 / Math.max(base.width, base.height)) });
@@ -671,9 +706,12 @@ async function extractEditableTextWithOcr(file) {
           langPath: "https://tessdata.projectnaptha.com/4.0.0/",
           tessedit_pageseg_mode: "6",
           preserve_interword_spaces: "1",
-          logger: message => showStatus(`OCR página ${pageNumber} de ${pdf.numPages}: ${message.status || "processando"} ${Math.round((message.progress || 0) * 100)}%`)
+          logger: message => { throwIfProcessingCancelled(); showStatus(`OCR página ${pageNumber} de ${pdf.numPages}: ${message.status || "processando"} ${Math.round((message.progress || 0) * 100)}%`); }
         });
       } catch (error) {
+        if (error?.name === "AbortError" || processingAbortController?.signal.aborted) {
+          throw new DOMException("Processamento cancelado pelo usuário.", "AbortError");
+        }
         throw new Error("Não foi possível executar o OCR. Verifique a conexão e tente novamente; o idioma português é baixado na primeira utilização.");
       }
       pageTexts.push(cleanEditableOcrText(result.data?.text || ""));
@@ -758,6 +796,7 @@ async function pdfRasterEngine(file) {
   const pages = [];
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      throwIfProcessingCancelled();
       showStatus(`Motor de imagem: página ${pageNumber} de ${pdf.numPages}...`);
       const page = await pdf.getPage(pageNumber);
       const base = page.getViewport({ scale: 1 });
@@ -784,6 +823,7 @@ async function pdfRasterEngine(file) {
 async function textExtractionEngine(rasterPages) {
   const pages = [];
   for (const rasterPage of rasterPages) {
+    throwIfProcessingCancelled();
     const { canvas, region, pageNumber, pageCount } = rasterPage;
     const ocrCanvas = document.createElement("canvas");
     ocrCanvas.width = region.width;
@@ -800,9 +840,12 @@ async function textExtractionEngine(rasterPages) {
         langPath: "https://tessdata.projectnaptha.com/4.0.0/",
         tessedit_pageseg_mode: "6",
         preserve_interword_spaces: "1",
-        logger: message => showStatus(`Motor de extração ${pageNumber}/${pageCount}: ${message.status || "OCR"} ${Math.round((message.progress || 0) * 100)}%`)
+        logger: message => { throwIfProcessingCancelled(); showStatus(`Motor de extração ${pageNumber}/${pageCount}: ${message.status || "OCR"} ${Math.round((message.progress || 0) * 100)}%`); }
       }, { text: true, blocks: true, tsv: true, hocr: true });
     } catch (error) {
+      if (error?.name === "AbortError" || processingAbortController?.signal.aborted) {
+        throw new DOMException("Processamento cancelado pelo usuário.", "AbortError");
+      }
       throw new Error(`Motor de extração, página ${pageNumber}: não foi possível executar o OCR.`);
     }
     pages.push({
@@ -853,6 +896,7 @@ function isMeaningfulShortOcrText(text) {
 async function graphicPreservationEngine(analyzedPages) {
   const output = [];
   for (const page of analyzedPages) {
+    throwIfProcessingCancelled();
     showStatus(`Motor gráfico: protegendo selos e reconstruindo a página ${page.pageNumber}...`);
     const canvas = document.createElement("canvas");
     canvas.width = page.canvas.width;
@@ -1909,6 +1953,7 @@ async function extractTransactionsFromPdf(file) {
   let transactions = [];
   const allLines = [];
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    throwIfProcessingCancelled();
     const page = await pdf.getPage(pageNumber);
     const textContent = await page.getTextContent();
     const lines = groupPdfTextLines(textContent.items);
@@ -1934,6 +1979,7 @@ async function extractTextFromPdf(file, reportProgress = false) {
   const pdf = await loadingTask.promise;
   const pages = [];
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    throwIfProcessingCancelled();
     if (reportProgress) showStatus(`Extraindo texto: página ${pageNumber} de ${pdf.numPages}...`);
     const page = await pdf.getPage(pageNumber);
     const textContent = await page.getTextContent();
@@ -2837,6 +2883,7 @@ async function extractTransactionsWithOcr(pdf) {
   if (pdf.numPages > 20) throw new Error(`Este PDF possui ${pdf.numPages} páginas. O OCR seguro aceita no máximo 20; divida o documento para evitar um OFX incompleto.`);
   const pageLimit = pdf.numPages;
   for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
+    throwIfProcessingCancelled();
     showStatus(`Executando OCR local: página ${pageNumber} de ${pageLimit}...`);
     const page = await pdf.getPage(pageNumber);
     const viewport = page.getViewport({ scale: 2 });
@@ -2853,10 +2900,14 @@ async function extractTransactionsWithOcr(pdf) {
         langPath: "https://tessdata.projectnaptha.com/4.0.0/",
         logger: message => {
           const percentage = Math.round((message.progress || 0) * 100);
+          throwIfProcessingCancelled();
           showStatus(`OCR página ${pageNumber}: ${message.status || "processando"} ${percentage}%`);
         }
       });
     } catch (error) {
+      if (error?.name === "AbortError" || processingAbortController?.signal.aborted) {
+        throw new DOMException("Processamento cancelado pelo usuário.", "AbortError");
+      }
       throw new Error("Não foi possível carregar ou executar o OCR. Verifique sua conexão e tente novamente; na primeira utilização o modelo em português precisa ser baixado.");
     }
     lines.push(...result.data.text.split(/\r?\n/).map(line => line.trim()).filter(Boolean));
@@ -3221,6 +3272,7 @@ async function createDocxFromPdfImages(file) {
   const images = [];
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      throwIfProcessingCancelled();
       showStatus(`Convertendo página ${pageNumber} de ${pdf.numPages} para o Word...`);
       const page = await pdf.getPage(pageNumber);
       const base = page.getViewport({ scale: 1 });
@@ -3427,6 +3479,7 @@ function toWinAnsi(text) {
   return String(text || "").replace(/[^\x20-\x7E\u00A0-\u00FF]/g, "□");
 }
 function download(data, filename, type) {
+  throwIfProcessingCancelled();
   const blob = data instanceof Blob ? data : new Blob([data], { type });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
