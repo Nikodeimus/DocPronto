@@ -29,6 +29,9 @@ const tools = [
 
 const elements = {
   grid: document.querySelector("#toolsGrid"),
+  search: document.querySelector("#toolSearch"),
+  resultCount: document.querySelector("#toolResultCount"),
+  empty: document.querySelector("#toolsEmpty"),
   dialog: document.querySelector("#toolDialog"),
   fileInput: document.querySelector("#fileInput"),
   fileList: document.querySelector("#fileList"),
@@ -44,6 +47,7 @@ let selectedFiles = [];
 let isProcessing = false;
 let activeTrigger = null;
 let processingAbortController = null;
+let activeFilter = "todos";
 
 renderTools();
 bindNavigation();
@@ -71,6 +75,7 @@ function renderTools() {
 function bindNavigation() {
   document.querySelector("#exploreButton").addEventListener("click", () => {
     document.querySelector("#ferramentas").scrollIntoView({ behavior: "smooth" });
+    window.setTimeout(() => elements.search.focus(), 450);
   });
   document.querySelectorAll("[data-filter]").forEach(button => {
     button.addEventListener("click", () => {
@@ -79,16 +84,33 @@ function bindNavigation() {
       filterTools(filter);
     });
   });
+  elements.search.addEventListener("input", updateToolVisibility);
 }
 
 function filterTools(filter) {
+  activeFilter = filter;
   document.querySelectorAll(".filter-button").forEach(button => {
     button.classList.toggle("active", button.dataset.filter === filter);
     button.setAttribute("aria-pressed", String(button.dataset.filter === filter));
   });
+  updateToolVisibility();
+}
+
+function updateToolVisibility() {
+  const query = normalizeSearchText(elements.search.value);
+  let visibleCount = 0;
+
   document.querySelectorAll(".tool-card").forEach(card => {
-    card.classList.toggle("hidden", filter !== "todos" && card.dataset.category !== filter);
+    const tool = tools.find(item => item.id === card.dataset.tool);
+    const matchesFilter = activeFilter === "todos" || card.dataset.category === activeFilter;
+    const searchableText = normalizeSearchText(`${tool.title} ${tool.description} ${tool.category}`);
+    const visible = matchesFilter && (!query || searchableText.includes(query));
+    card.classList.toggle("hidden", !visible);
+    if (visible) visibleCount += 1;
   });
+
+  elements.resultCount.textContent = `${visibleCount} ${visibleCount === 1 ? "ferramenta" : "ferramentas"}`;
+  elements.empty.hidden = visibleCount !== 0;
 }
 
 function bindUpload() {

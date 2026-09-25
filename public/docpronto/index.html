@@ -9,7 +9,7 @@
   <meta property="og:type" content="website">
   <title>DocPronto | Seus arquivos, resolvidos</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2314251f'/%3E%3Cpath d='M19 14h15c9 0 15 7 15 18S43 50 34 50H19V14zm10 9v18h4c4 0 7-3 7-9s-3-9-7-9h-4z' fill='%23c9f36a'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=20260714-1">
+  <link rel="stylesheet" href="styles.css?v=20260925-1">
 </head>
 <body>
   <header class="site-header">
@@ -23,27 +23,19 @@
       <button class="nav-link" data-filter="planilha">Planilhas</button>
       <button class="nav-link" data-filter="financeiro">OFX</button>
     </nav>
-    <span class="privacy-pill"><span class="status-dot"></span> Processamento local</span>
+    <span class="privacy-pill"><span class="status-dot"></span> Arquivos processados localmente</span>
   </header>
 
   <main>
     <section class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">SIMPLES. RÁPIDO. PRIVADO.</p>
-        <h1>Seus arquivos.<br><span>Resolvidos.</span></h1>
-        <p class="hero-text">Ferramentas para PDF, Word, Excel, XML ABRASF e OFX processadas diretamente no seu dispositivo. Sem cadastro e sem retenção de arquivos.</p>
+        <p class="eyebrow">DOCPronto</p>
+        <h1>Converta. Organize. <span>Assine.</span></h1>
+        <p class="hero-text">Ferramentas para PDF, Word, Excel, XML ABRASF e OFX executadas no navegador ou pelo conector local protegido deste computador.</p>
         <div class="hero-actions">
           <button class="primary-button" id="exploreButton">Explorar ferramentas</button>
-          <span>Sem cadastro. Sem upload.</span>
+          <span>Sem cadastro e sem envio remoto dos arquivos.</span>
         </div>
-      </div>
-      <div class="hero-visual" aria-hidden="true">
-        <div class="visual-orbit orbit-one"></div>
-        <div class="visual-orbit orbit-two"></div>
-        <div class="file-card file-pdf"><b>PDF</b><span>Documento</span></div>
-        <div class="file-card file-sheet"><b>XLSX</b><span>Planilha</span></div>
-        <div class="file-card file-doc"><b>DOCX</b><span>Texto</span></div>
-        <div class="visual-core">+</div>
       </div>
     </section>
 
@@ -61,7 +53,15 @@
           <button class="filter-button" data-filter="financeiro" aria-pressed="false">OFX</button>
         </div>
       </div>
+      <div class="tools-controls">
+        <label class="tool-search" for="toolSearch">
+          <span aria-hidden="true">⌕</span>
+          <input id="toolSearch" type="search" placeholder="Buscar ferramenta" autocomplete="off">
+        </label>
+        <span id="toolResultCount" class="tool-result-count" role="status" aria-live="polite"></span>
+      </div>
       <div class="tools-grid" id="toolsGrid"></div>
+      <p class="tools-empty" id="toolsEmpty" hidden>Nenhuma ferramenta encontrada. Tente outro termo ou categoria.</p>
     </section>
 
     <section class="trust-section" id="privacidade">
@@ -71,7 +71,7 @@
       </div>
       <p>As ferramentas comuns são executadas no navegador. Conversões pelo Microsoft Word e assinaturas com certificado instalado usam somente o servidor local deste computador, em <code>127.0.0.1</code>. O DocPronto não envia os arquivos para um servidor remoto.</p>
       <div class="trust-items">
-        <span><b>01</b> Sem servidor</span>
+        <span><b>01</b> Sem envio remoto</span>
         <span><b>02</b> Sem cadastro</span>
         <span><b>03</b> Sem retenção</span>
       </div>
@@ -208,6 +208,6 @@
   <script src="vendor/tesseract.min.js"></script>
   <script src="vendor/docx-preview.min.js"></script>
   <script src="vendor/html2canvas.min.js"></script>
-  <script src="app.js?v=20260914-1"></script>
+  <script src="app.js?v=20260925-1"></script>
 </body>
 </html>
