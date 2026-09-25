@@ -167,7 +167,7 @@
         <div>
           <p class="eyebrow">PDF PARA OFX</p>
           <h2 id="ofxReviewTitle">Revisar lançamentos</h2>
-          <p>Confira e edite os lançamentos extraídos antes de gerar o arquivo.</p>
+          <p id="ofxReviewContext">Confira e edite os lançamentos extraídos antes de gerar o arquivo.</p>
         </div>
       </div>
       <div class="review-warning" id="ofxReviewWarning" role="status"></div>
@@ -185,7 +185,8 @@
         </table>
       </div>
       <div class="dialog-actions">
-        <button class="secondary-button" value="cancel">Cancelar</button>
+        <button class="secondary-button" type="button" id="ofxReviewCancelQueue" hidden>Cancelar fila</button>
+        <button class="secondary-button" value="cancel" id="ofxReviewCancel">Cancelar</button>
         <span class="review-error-count" id="ofxReviewErrorCount"></span>
         <button class="primary-button" value="confirm" id="ofxReviewConfirm">Gerar OFX conferido</button>
       </div>
@@ -208,6 +209,6 @@
   <script src="vendor/tesseract.min.js"></script>
   <script src="vendor/docx-preview.min.js"></script>
   <script src="vendor/html2canvas.min.js"></script>
-  <script src="app.js?v=20260925-6"></script>
+  <script src="app.js?v=20260925-7"></script>
 </body>
 </html>

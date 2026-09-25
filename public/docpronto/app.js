@@ -4,6 +4,7 @@ const MAX_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_ARCHIVE_SIZE = 12 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 5000;
 const MAX_ARCHIVE_EXPANDED_SIZE = 180 * 1024 * 1024;
+const MAX_OFX_QUEUE_FILES = 30;
 
 const tools = [
   { id: "merge-pdf", number: "01", category: "pdf", title: "Juntar PDF", description: "Combine vários PDFs na ordem selecionada.", accept: ".pdf", multiple: true, action: mergePdfs },
@@ -19,7 +20,7 @@ const tools = [
   { id: "ofx-csv", number: "11", category: "financeiro", title: "OFX para CSV", description: "Converta o extrato bancário em uma tabela compatível com planilhas.", accept: ".ofx", multiple: false, option: "ofx-delimiter", action: ofxToCsv },
   { id: "ofx-xlsx", number: "12", category: "financeiro", title: "OFX para XLSX", description: "Transforme as transações do OFX em uma planilha Excel.", accept: ".ofx", multiple: false, action: ofxToXlsx },
   { id: "ofx-summary", number: "13", category: "financeiro", title: "OFX para PDF", description: "Gere um PDF com saldos, entradas, saídas e transações.", accept: ".ofx", multiple: false, action: ofxToSummaryPdf },
-  { id: "pdf-ofx", number: "14", category: "financeiro", title: "PDF para OFX", description: "Extraia movimentações e confira cada lançamento antes de gerar o OFX.", accept: ".pdf", multiple: false, option: "pdf-ofx", warning: "A detecção automática pode errar datas, valores ou natureza do lançamento. A geração só acontece após sua conferência.", action: pdfToOfx },
+  { id: "pdf-ofx", number: "14", category: "financeiro", title: "PDF para OFX", description: "Processe vários extratos e confira cada lançamento antes de gerar os OFXs.", accept: ".pdf", multiple: true, option: "pdf-ofx", warning: "A detecção automática pode errar datas, valores ou natureza do lançamento. Cada arquivo passa pela sua conferência antes de entrar no ZIP.", action: pdfToOfx },
   { id: "word-pdf", number: "15", category: "documento", title: "Word para PDF", description: "Reconstrua visualmente cada página do DOCX em PDF.", accept: ".docx", multiple: false, option: "word-pdf", warning: "O motor online preserva imagens, cabeçalhos, rodapés, tabelas e posições. Fontes que não existirem no dispositivo podem ser substituídas.", action: wordToPdf },
   { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDFs, inclusive digitalizações, em texto editável no Word usando OCR.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "Em documentos escaneados, o OCR pode demorar alguns minutos. O modo de texto editável nunca insere a página como imagem.", action: pdfToWord },
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
@@ -48,6 +49,7 @@ let isProcessing = false;
 let activeTrigger = null;
 let processingAbortController = null;
 let activeFilter = "todos";
+let ofxQueueItems = [];
 
 renderTools();
 bindNavigation();
@@ -131,6 +133,14 @@ function bindUpload() {
     elements.dropZone.classList.remove("dragging");
   }));
   elements.dropZone.addEventListener("drop", event => setFiles([...event.dataTransfer.files]));
+  elements.fileList.addEventListener("click", event => {
+    const remove = event.target.closest("[data-file-remove]");
+    if (!remove || isProcessing) return;
+    const index = Number(remove.dataset.fileRemove);
+    selectedFiles.splice(index, 1);
+    ofxQueueItems.splice(index, 1);
+    renderFileList();
+  });
   elements.process.addEventListener("click", processFiles);
   elements.dialog.addEventListener("click", event => {
     if (!isProcessing || !event.target.closest("[data-cancel]")) return;
@@ -181,6 +191,7 @@ function openTool(tool, trigger = document.activeElement) {
   activeTrigger = trigger instanceof HTMLElement ? trigger : null;
   activeTool = tool;
   selectedFiles = [];
+  ofxQueueItems = [];
   document.querySelector("#dialogNumber").textContent = tool.number;
   document.querySelector("#dialogCategory").textContent = tool.category;
   document.querySelector("#dialogTitle").textContent = tool.title;
@@ -189,6 +200,7 @@ function openTool(tool, trigger = document.activeElement) {
   document.querySelector("#acceptedTypes").textContent = `Aceita ${tool.accept.replaceAll(".", "").toUpperCase()} · máximo ${limit} por arquivo`;
   elements.fileInput.accept = tool.accept;
   elements.fileInput.multiple = tool.multiple;
+  elements.process.textContent = tool.id === "pdf-ofx" ? "Processar fila" : "Processar arquivos";
   elements.notice.textContent = tool.warning || "";
   elements.notice.classList.toggle("visible", Boolean(tool.warning));
   renderOptions(tool.option);
@@ -202,6 +214,7 @@ function openTool(tool, trigger = document.activeElement) {
 function resetDialog() {
   activeTool = null;
   selectedFiles = [];
+  ofxQueueItems = [];
   elements.fileInput.value = "";
   elements.process.disabled = true;
   clearStatus();
@@ -233,18 +246,31 @@ async function setFiles(files) {
   } else if (!activeTool.multiple && valid.length > 1) {
     showStatus("Esta ferramenta aceita um arquivo por vez; somente o primeiro foi selecionado.", true);
   }
-  selectedFiles = activeTool.multiple ? valid : valid.slice(0, 1);
+  if (activeTool.id === "pdf-ofx") {
+    const existing = new Set(selectedFiles.map(file => `${file.name}|${file.size}|${file.lastModified}`));
+    const combined = [...selectedFiles, ...valid.filter(file => !existing.has(`${file.name}|${file.size}|${file.lastModified}`))];
+    selectedFiles = combined.slice(0, MAX_OFX_QUEUE_FILES);
+    ofxQueueItems = selectedFiles.map((file, index) => ofxQueueItems[index]?.file === file
+      ? ofxQueueItems[index]
+      : { file, status: "queued", detail: "Na fila" });
+    if (combined.length > MAX_OFX_QUEUE_FILES) showStatus(`A fila aceita até ${MAX_OFX_QUEUE_FILES} PDFs por vez.`, true);
+  } else {
+    selectedFiles = activeTool.multiple ? valid : valid.slice(0, 1);
+  }
+  elements.fileInput.value = "";
   renderFileList();
 }
 
 function renderFileList() {
-  elements.fileList.innerHTML = selectedFiles.map((file, index) => `
-    <div class="file-item">
-      <span>${escapeHtml(file.name)}</span>
-      <small>${formatBytes(file.size)} · ${index + 1}</small>
-    </div>
-  `).join("");
+  const isOfxQueue = activeTool?.id === "pdf-ofx";
+  elements.fileList.classList.toggle("ofx-queue", isOfxQueue);
+  elements.fileList.innerHTML = selectedFiles.map((file, index) => {
+    if (!isOfxQueue) return `<div class="file-item"><span>${escapeHtml(file.name)}</span><small>${formatBytes(file.size)} · ${index + 1}</small></div>`;
+    const item = ofxQueueItems[index] || { status: "queued", detail: "Na fila" };
+    return `<div class="file-item queue-item ${escapeHtml(item.status)}" data-queue-index="${index}"><span class="queue-position">${index + 1}</span><span class="queue-file"><strong>${escapeHtml(file.name)}</strong><small>${formatBytes(file.size)}</small></span><span class="queue-state" data-queue-state>${escapeHtml(item.detail)}</span><button class="file-remove" type="button" data-file-remove="${index}" aria-label="Remover ${escapeHtml(file.name)}" title="Remover">×</button></div>`;
+  }).join("");
   elements.process.disabled = selectedFiles.length === 0;
+  document.querySelector("#ofxQueueCount")?.replaceChildren(document.createTextNode(`${selectedFiles.length}/${MAX_OFX_QUEUE_FILES}`));
 }
 
 function renderOptions(type) {
@@ -254,7 +280,7 @@ function renderOptions(type) {
     watermark: `<label for="watermark">Texto da marca d'água</label><input id="watermark" maxlength="80" value="CONFIDENCIAL"><label for="opacity">Opacidade</label><input id="opacity" type="range" min="0.1" max="0.8" step="0.1" value="0.25">`,
     delimiter: `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=",">Vírgula (,)</option><option value=";">Ponto e vírgula (;)</option><option value="tab">Tabulação</option></select>`,
     "ofx-delimiter": `<label for="delimiter">Separador do CSV</label><select id="delimiter"><option value=";">Ponto e vírgula (;)</option><option value=",">Vírgula (,)</option><option value="tab">Tabulação</option></select><small>Datas, valores, documento, descrição, tipo e identificador serão exportados.</small>`,
-    "pdf-ofx": `<div class="notice visible">Banco, conta e moeda serão detectados automaticamente. Basta selecionar o PDF.</div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><small>O OCR pode demorar alguns minutos em documentos longos.</small>`,
+    "pdf-ofx": `<div class="queue-meta"><span>Fila <strong id="ofxQueueCount">0/${MAX_OFX_QUEUE_FILES}</strong></span><span>Saída <strong>ZIP com OFXs</strong></span></div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><progress id="ofxQueueProgress" max="1" value="0" hidden></progress><small id="ofxQueueProgressText">Os arquivos serão processados na ordem da fila.</small>`,
     "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
     "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — assinatura separada .p7s</option><option value="installed">Certificado instalado no Windows — PDF com assinatura embutida</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">O Chrome mostra certificados no gov.br porque aquele serviço solicita autenticação por certificado. Para assinar qualquer arquivo com o certificado do Windows, mantenha o conector do DOCPronto aberto e atualizado. <a href="/docpronto/downloads/DOCPronto-Conector-Windows.zip" download>Baixar ou atualizar o conector</a>.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em conectar e carregar</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Conectar e carregar</button></div><small>PDFs recebem assinatura digital embutida. Nos outros formatos, a assinatura é entregue como arquivo .p7s.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>O modo A1 online gera uma assinatura separada .p7s, inclusive para PDFs. A senha é usada somente na memória desta página.</small></div><small>Escolha o modo conforme o formato de assinatura que o sistema de destino aceita.</small>`,
@@ -308,13 +334,14 @@ async function processFiles() {
   isProcessing = true;
   processingAbortController = new AbortController();
   document.querySelectorAll("[data-cancel]").forEach(button => { button.disabled = false; });
+  elements.fileList.querySelectorAll(".file-remove").forEach(button => { button.hidden = true; });
   elements.process.disabled = true;
   elements.process.textContent = "Processando...";
   showStatus("Processando localmente. Use Cancelar se quiser interromper com segurança.");
   try {
-    await activeTool.action(selectedFiles);
+    const outcome = await activeTool.action(selectedFiles);
     throwIfProcessingCancelled();
-    showStatus("Pronto. O download foi iniciado.");
+    showStatus(outcome?.message || "Pronto. O download foi iniciado.");
   } catch (error) {
     if (error?.name === "AbortError") showStatus("Processamento cancelado. Nenhum arquivo incompleto foi baixado.");
     else {
@@ -325,8 +352,9 @@ async function processFiles() {
     isProcessing = false;
     processingAbortController = null;
     document.querySelectorAll("[data-cancel]").forEach(button => { button.disabled = false; });
+    elements.fileList.querySelectorAll(".file-remove").forEach(button => { button.hidden = false; });
     elements.process.disabled = false;
-    elements.process.textContent = "Processar arquivos";
+    elements.process.textContent = activeTool?.id === "pdf-ofx" ? "Processar fila" : "Processar arquivos";
   }
 }
 
@@ -1856,17 +1884,78 @@ async function ofxToSummaryPdf([file]) {
 const docProntoScriptUrl = document.currentScript?.src || window.location.href;
 const docProntoBaseUrl = new URL(".", docProntoScriptUrl);
 
-async function pdfToOfx([file]) {
-  const result = await extractTransactionsFromPdf(file);
-  if (!result.transactions.length) {
-    throw new Error("Não encontramos transações com data e valor neste PDF. Se ele contém movimentações financeiras, tente novamente com OCR ativado.");
+async function pdfToOfx(files) {
+  const outputs = [];
+  const usedNames = new Set();
+  let queueCancelled = false;
+  const progress = document.querySelector("#ofxQueueProgress");
+  const progressText = document.querySelector("#ofxQueueProgressText");
+  if (progress) { progress.hidden = false; progress.max = files.length; progress.value = 0; }
+  for (let index = 0; index < files.length; index += 1) {
+    throwIfProcessingCancelled();
+    const file = files[index];
+    elements.process.textContent = `Processando ${index + 1} de ${files.length}`;
+    updateOfxQueueItem(index, "processing", "Extraindo lançamentos");
+    if (progressText) progressText.textContent = `${index + 1} de ${files.length} · ${file.name}`;
+    try {
+      const result = await extractTransactionsFromPdf(file);
+      if (!result.transactions.length) throw new Error("Nenhuma transação com data e valor foi encontrada.");
+      updateOfxQueueItem(index, "review", "Aguardando conferência");
+      const reviewed = await reviewOfxData(result, { fileName: file.name, index, total: files.length });
+      if (reviewed?.cancelQueue) {
+        queueCancelled = true;
+        updateOfxQueueItem(index, "skipped", "Fila cancelada");
+        for (let pending = index + 1; pending < files.length; pending += 1) updateOfxQueueItem(pending, "skipped", "Não processado");
+        break;
+      } else if (!reviewed) {
+        updateOfxQueueItem(index, "skipped", "Pulado");
+      } else {
+        const filename = uniqueOfxFilename(file.name, usedNames);
+        outputs.push({ filename, data: new TextEncoder().encode(buildOfx(reviewed)) });
+        updateOfxQueueItem(index, "done", "OFX pronto");
+      }
+    } catch (error) {
+      if (error?.name === "AbortError" || processingAbortController?.signal.aborted) throw error;
+      console.error(error);
+      updateOfxQueueItem(index, "error", humanizeError(error));
+    }
+    if (progress) progress.value = index + 1;
   }
-  const reviewed = await reviewOfxData(result);
-  const ofx = buildOfx(reviewed);
-  download(new TextEncoder().encode(ofx), `${baseName(file.name)}-convertido.ofx`, "application/x-ofx");
+  if (outputs.length === 1 && files.length === 1) {
+    download(outputs[0].data, outputs[0].filename, "application/x-ofx");
+  } else if (outputs.length) {
+    const zip = new JSZip();
+    outputs.forEach(output => zip.file(output.filename, output.data));
+    download(await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" }), "ofx-convertidos.zip", "application/zip");
+  }
+  const failed = ofxQueueItems.filter(item => item.status === "error").length;
+  const skipped = ofxQueueItems.filter(item => item.status === "skipped").length;
+  const detail = [failed ? `${failed} com erro` : "", skipped ? `${skipped} pulado${skipped === 1 ? "" : "s"}` : "", queueCancelled ? "fila cancelada" : ""].filter(Boolean).join(" · ");
+  return { message: outputs.length ? `${outputs.length} OFX${outputs.length === 1 ? "" : "s"} gerado${outputs.length === 1 ? "" : "s"}${detail ? ` · ${detail}` : ""}.` : `Fila concluída sem OFXs${detail ? ` · ${detail}` : ""}.` };
 }
 
-async function reviewOfxData(result) {
+function updateOfxQueueItem(index, status, detail) {
+  if (!ofxQueueItems[index]) return;
+  ofxQueueItems[index].status = status;
+  ofxQueueItems[index].detail = detail;
+  const row = elements.fileList.querySelector(`[data-queue-index="${index}"]`);
+  if (!row) return;
+  row.className = `file-item queue-item ${status}`;
+  const state = row.querySelector("[data-queue-state]");
+  if (state) state.textContent = detail;
+  row.querySelector(".file-remove")?.toggleAttribute("hidden", isProcessing);
+}
+
+function uniqueOfxFilename(sourceName, usedNames) {
+  const base = `${baseName(sourceName)}-convertido`;
+  let filename = `${base}.ofx`;
+  let suffix = 2;
+  while (usedNames.has(filename.toLowerCase())) filename = `${base}-${suffix++}.ofx`;
+  usedNames.add(filename.toLowerCase());
+  return filename;
+}
+
+async function reviewOfxData(result, context = {}) {
   const dialog = document.querySelector("#ofxReviewDialog");
   const metadata = document.querySelector("#ofxReviewMetadata");
   const rows = document.querySelector("#ofxReviewRows");
@@ -1876,6 +1965,17 @@ async function reviewOfxData(result) {
   const count = document.querySelector("#ofxReviewCount");
   const errorCount = document.querySelector("#ofxReviewErrorCount");
   const confirmButton = document.querySelector("#ofxReviewConfirm");
+  const cancelButton = document.querySelector("#ofxReviewCancel");
+  const cancelQueueButton = document.querySelector("#ofxReviewCancelQueue");
+  const reviewContext = document.querySelector("#ofxReviewContext");
+  if (reviewContext) reviewContext.textContent = context.fileName ? `${context.index + 1} de ${context.total} · ${context.fileName}` : "Confira e edite os lançamentos extraídos antes de gerar o arquivo.";
+  if (cancelButton) cancelButton.textContent = context.total > 1 ? "Pular este PDF" : "Cancelar";
+  if (cancelQueueButton) {
+    cancelQueueButton.hidden = !(context.total > 1);
+    cancelQueueButton.onclick = () => {
+      dialog.close("cancel-queue");
+    };
+  }
   metadata.innerHTML = `<label>Banco<input id="reviewBank" value="${escapeHtml(result.metadata.bankId)}" maxlength="32" required></label><label>Agência<input id="reviewAgency" value="${escapeHtml(result.metadata.agencyId || "")}" maxlength="20"></label><label>Conta<input id="reviewAccount" value="${escapeHtml(result.metadata.accountId)}" maxlength="40" required></label><label>Moeda<select id="reviewCurrency"><option>BRL</option><option>USD</option><option>EUR</option></select></label><label>Tipo<select id="reviewAccountType"><option value="CHECKING">Conta corrente</option><option value="SAVINGS">Poupança</option><option value="CREDITCARD">Cartão</option></select></label><label>Saldo final (opcional)<input id="reviewFinalBalance" type="number" step="0.01" value="${Number.isFinite(result.metadata.finalBalance) ? Number(result.metadata.finalBalance).toFixed(2) : ""}" placeholder="Não informado"></label>`;
   document.querySelector("#reviewCurrency").value = result.metadata.currency || "BRL";
   document.querySelector("#reviewAccountType").value = result.metadata.creditCard ? "CREDITCARD" : result.metadata.accountType || "CHECKING";
@@ -1955,7 +2055,8 @@ async function reviewOfxData(result) {
     dialog.addEventListener("close", onClose);
     dialog.showModal();
   });
-  if (value !== "confirm") throw new Error("Geração do OFX cancelada durante a conferência.");
+  if (value === "cancel-queue") return { cancelQueue: true };
+  if (value !== "confirm") return null;
   const transactions = [...rows.querySelectorAll("[data-review-row]")].filter(row => row.querySelector(".review-use").checked).map(row => {
     const date = row.querySelector(".review-date").value;
     const memo = row.querySelector(".review-memo").value.trim();
