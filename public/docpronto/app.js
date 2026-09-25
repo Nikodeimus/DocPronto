@@ -1886,6 +1886,7 @@ async function reviewOfxData(result) {
     const allRows = [...rows.querySelectorAll("[data-review-row]")];
     const query = search.value.trim().toLowerCase();
     let errors = 0;
+    let duplicateWarnings = 0;
     const seen = new Set();
     allRows.forEach((row, index) => {
       row.querySelector(".review-index").textContent = index + 1;
@@ -1902,9 +1903,12 @@ async function reviewOfxData(result) {
       const key = `${date}|${memo.toLowerCase()}|${direction}|${credit}|${debit}`;
       const duplicate = enabled && seen.has(key);
       if (enabled) seen.add(key);
-      const invalid = enabled && (!isValidIsoDate(date) || !memo || !parseOfxReviewAmount(creditRaw, debitRaw) || duplicate);
+      const blockingDuplicate = duplicate && !result.metadata.creditCard;
+      const invalid = enabled && (!isValidIsoDate(date) || !memo || !parseOfxReviewAmount(creditRaw, debitRaw) || blockingDuplicate);
       row.classList.toggle("invalid", invalid);
+      row.classList.toggle("duplicate", duplicate && result.metadata.creditCard);
       row.title = duplicate ? "Possível lançamento duplicado." : "";
+      if (duplicate && result.metadata.creditCard) duplicateWarnings += 1;
       if (invalid) errors += 1;
       const searchable = `${date} ${memo} ${credit} ${debit}`.toLowerCase();
       row.classList.toggle("filtered", Boolean(query) && !searchable.includes(query));
@@ -1929,8 +1933,8 @@ async function reviewOfxData(result) {
     const totalErrors = errors + reconciliation.length;
     errorCount.textContent = totalErrors ? `${totalErrors} ${totalErrors === 1 ? "erro" : "erros"}` : "";
     const hasReferenceTotals = expectedCredits !== null || expectedDebits !== null || initialBalance !== null || finalBalance !== null;
-    warning.textContent = errors ? "Existem linhas duplicadas ou incompletas, ou faltam banco/conta. Lançamentos de 0,00 são aceitos quando constam no extrato." : reconciliation.length ? `Conferência financeira pendente: ${reconciliation.join("; ")}.` : hasReferenceTotals ? "Valores conferidos com os totais disponíveis do extrato." : "Revise os lançamentos: o PDF não trouxe totais ou saldos suficientes para reconciliação automática.";
-    warning.classList.toggle("visible", totalErrors > 0);
+    warning.textContent = errors ? "Existem linhas duplicadas ou incompletas, ou faltam banco/conta. Lançamentos de 0,00 são aceitos quando constam no extrato." : reconciliation.length ? `Conferência financeira pendente: ${reconciliation.join("; ")}.` : duplicateWarnings ? `${duplicateWarnings} ${duplicateWarnings === 1 ? "lançamento idêntico foi encontrado" : "lançamentos idênticos foram encontrados"}. Confira se são compras distintas antes de gerar o OFX.` : hasReferenceTotals ? "Valores conferidos com os totais disponíveis do extrato." : "Revise os lançamentos: o PDF não trouxe totais ou saldos suficientes para reconciliação automática.";
+    warning.classList.toggle("visible", totalErrors > 0 || duplicateWarnings > 0);
     confirmButton.disabled = totalErrors > 0;
   };
   rows.oninput = event => {
@@ -2655,7 +2659,7 @@ function parseStatementLine(line, metadata = {}) {
   } else if (direction < 0) {
     amount = -Math.abs(amount);
   } else if (metadata.creditCard) {
-    amount = /\b(?:pagamento|cr[eé]dito|estorno|cashback|devolu[çc][aã]o)\b/i.test(line)
+    amount = amount < 0 || /\b(?:pagamento|pagto|pgto|deb(?:ito)?\s+(?:autom(?:atico)?\s+de\s+fatura|conta)|deb\s+em\s+c\/?c|cr[eé]dito|estorno|cashback|devolu[çc][aã]o)\b/i.test(line)
       ? Math.abs(amount)
       : -Math.abs(amount);
   }
@@ -2687,7 +2691,7 @@ function inferStatementDirection(line, metadata = {}, amountMatch = null) {
   const incoming = /\b(?:recebimento|recebido|recebida|pix recebido|transferencia recebida|ted recebida|doc recebido|deposito|credito em conta|salario|proventos|rendimento|resgate|estorno|cashback|devolucao|reembolso)\b/;
   if (incoming.test(normalized)) return 1;
 
-  if (metadata.creditCard && /\b(?:pagamento(?:\s+(?:de |da )?fatura)?|credito|estorno|cashback|devolucao|reembolso)\b/.test(normalized)) {
+  if (metadata.creditCard && /\b(?:pagamento(?:\s+(?:de |da )?fatura)?|pagto|pgto|deb(?:ito)?\s+(?:autom(?:atico)?\s+de\s+fatura|conta)|deb\s+em\s+c\/?c|credito|estorno|cashback|devolucao|reembolso)\b/.test(normalized)) {
     return 1;
   }
 
@@ -2718,21 +2722,27 @@ function parseStatementLines(lines, metadata = {}) {
     if (consumedTrailing) candidate = `${candidate} ${lines[index + 1]}`;
     const direct = parseStatementLine(candidate, metadata);
     if (direct) {
-      transactions.push(confirmTransactionWithBalance(direct, candidate, previousBalance));
-      const detectedBalance = findStatementBalance(candidate);
-      if (Number.isFinite(detectedBalance)) previousBalance = detectedBalance;
+      transactions.push(metadata.creditCard ? direct : confirmTransactionWithBalance(direct, candidate, previousBalance));
+      if (!metadata.creditCard) {
+        const detectedBalance = findStatementBalance(candidate);
+        if (Number.isFinite(detectedBalance)) previousBalance = detectedBalance;
+      }
       if (consumedTrailing) index += 1;
       continue;
     }
     const hasDate = findStatementDate(lines[index], metadata.referenceDate);
     if (!hasDate) continue;
-    for (let span = 1; span <= 3 && index + span < lines.length; span += 1) {
+    const maxSpan = metadata.creditCard ? 6 : 3;
+    for (let span = 1; span <= maxSpan && index + span < lines.length; span += 1) {
+      if (span > 1 && findStatementDate(lines[index + span], metadata.referenceDate)) break;
       const combined = lines.slice(index, index + span + 1).join(" ");
       const transaction = parseStatementLine(combined, metadata);
       if (transaction) {
-        transactions.push(confirmTransactionWithBalance(transaction, combined, previousBalance));
-        const detectedBalance = findStatementBalance(combined);
-        if (Number.isFinite(detectedBalance)) previousBalance = detectedBalance;
+        transactions.push(metadata.creditCard ? transaction : confirmTransactionWithBalance(transaction, combined, previousBalance));
+        if (!metadata.creditCard) {
+          const detectedBalance = findStatementBalance(combined);
+          if (Number.isFinite(detectedBalance)) previousBalance = detectedBalance;
+        }
         index += span;
         break;
       }
@@ -2755,21 +2765,24 @@ function confirmTransactionWithBalance(transaction, line, previousBalance) {
 }
 
 function findStatementDate(line, referenceDate = null) {
-  const full = line.match(/\b(\d{2})[\/.-](\d{2})[\/.-](\d{2,4})\b/);
-  if (full) return { text: full[0], index: full.index || 0, normalized: normalizeStatementDate(full[1], full[2], full[3]) };
-  const iso = line.match(/\b(\d{4})[\/.-](\d{2})[\/.-](\d{2})\b/);
-  if (iso) return { text: iso[0], index: iso.index || 0, normalized: `${iso[1]}-${iso[2]}-${iso[3]}` };
-  const namedMonth = line.match(/\b(\d{1,2})[\/.-](jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)(?:[\/.-](\d{2,4}))?\b/i);
+  const plainLine = stripLayoutMarkers(line);
+  const fullDates = [...plainLine.matchAll(/\b(\d{2})[\/.-](\d{2})[\/.-](\d{2,4})\b/g)];
+  const full = /(?:about:blank|\bIBPJ\b)/i.test(plainLine) && fullDates.length > 1 ? fullDates[fullDates.length - 1] : fullDates[0];
+  if (full) return { text: full[0], index: String(line).indexOf(full[0]), normalized: normalizeStatementDate(full[1], full[2], full[3]) };
+  const iso = plainLine.match(/\b(\d{4})[\/.-](\d{2})[\/.-](\d{2})\b/);
+  if (iso) return { text: iso[0], index: String(line).indexOf(iso[0]), normalized: `${iso[1]}-${iso[2]}-${iso[3]}` };
+  const namedMonth = plainLine.match(/\b(\d{1,2})[\/.-](jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)(?:[\/.-](\d{2,4}))?\b/i);
   if (namedMonth) {
     const months = { jan: 1, fev: 2, mar: 3, abr: 4, mai: 5, jun: 6, jul: 7, ago: 8, set: 9, out: 10, nov: 11, dez: 12 };
     const month = months[namedMonth[2].toLowerCase()];
     const year = namedMonth[3] ? normalizeYear(namedMonth[3]) : inferTransactionYear(month, referenceDate);
-    return { text: namedMonth[0], index: namedMonth.index || 0, normalized: `${year}-${String(month).padStart(2, "0")}-${String(namedMonth[1]).padStart(2, "0")}` };
+    return { text: namedMonth[0], index: String(line).indexOf(namedMonth[0]), normalized: `${year}-${String(month).padStart(2, "0")}-${String(namedMonth[1]).padStart(2, "0")}` };
   }
-  const short = line.match(/^\s*(\d{2})[\/.-](\d{2})(?=\s)/);
+  const short = plainLine.match(/^\s*(\d{2})[\/.-](\d{2})(?=\s)/);
   if (short) {
     const year = referenceDate?.getFullYear?.() || new Date().getFullYear();
-    return { text: short[0].trim(), index: short.index || 0, normalized: `${year}-${short[2]}-${short[1]}` };
+    const text = short[0].trim();
+    return { text, index: String(line).indexOf(text), normalized: `${year}-${short[2]}-${short[1]}` };
   }
   return null;
 }
@@ -2784,18 +2797,35 @@ function inferFinancialMetadata(lines) {
   const referenceDate = referenceMatch
     ? new Date(Number(referenceMatch[3]), Number(referenceMatch[2]) - 1, Number(referenceMatch[1]))
     : new Date();
-  const cardFinal = normalizedText.match(/(?:cartao\s*(?:n[\u00BAo.:?]*|numero)?\s*[:.-]?\s*\d{0,8}\*+|n[\u00BAo?]\s*|final\s*)(\d{4})/i) || normalizedText.match(/\b\d{4}\*{4,}(\d{4})\b/);
+  const cardFinal = normalizedText.match(/(?:[x*]{4}[.\s-]*){3}(\d{4})\b/i)
+    || normalizedText.match(/(?:cartao\s*(?:n[\u00BAo.:?]*|numero)?\s*[:.-]?\s*\d{0,8}\*+|n[\u00BAo?]\s*|final\s*)(\d{4})/i)
+    || normalizedText.match(/\bcartao\s+(\d{4})\b/i)
+    || normalizedText.match(/\b\d{4}\*{4,}(\d{4})\b/);
   const bankName = normalizedText.match(/\b(itau|bradesco|santander|sicredi|sicoob|nubank|inter|caixa|banco do brasil|btg|c6)\b/i);
+  const knownBankId = /\b(?:bb\.com\.br|ouvidoria bb|central de relacionamento bb)\b/i.test(normalizedText)
+    ? "BANCO-DO-BRASIL"
+    : null;
   const bankCode = normalizedText.match(/\bbanco\s*:\s*(\d{3,4})\b/i);
   const agency = normalizedText.match(/\bagencia\s*:\s*([\d.-]+)/i);
   const checkingAccount = normalizedText.match(/\bconta\s+corrente\s*:\s*([\d.-]+)/i);
   const account = checkingAccount || normalizedText.match(/\bconta\s*:\s*([\d.-]+)/i);
   const headerLine = lines.find(line => /d[eé]bito/i.test(line) && /cr[eé]dito/i.test(line) && /saldo/i.test(line));
-  const normalizedHeader = normalizeSearchText(headerLine || "");
   const statementColumns = headerLine ? {
     debit: layoutXAt(headerLine, String(headerLine).toLowerCase().indexOf("débito")),
     credit: layoutXAt(headerLine, String(headerLine).toLowerCase().indexOf("crédito")),
     balance: layoutXAt(headerLine, String(headerLine).toLowerCase().lastIndexOf("saldo"))
+  } : null;
+  const cardHeaderLine = lines.find(line => {
+    const normalized = normalizeSearchText(line);
+    const hasLocal = /r\$|valor em reais/.test(normalized);
+    const hasForeign = /us\$|valor em dolar/.test(normalized);
+    return hasLocal && hasForeign && /(?:data|historico|descricao|compra)/.test(normalized);
+  });
+  const localCurrencyIndex = cardHeaderLine ? String(cardHeaderLine).search(/(?:R\$|valor em reais)/i) : -1;
+  const foreignCurrencyIndex = cardHeaderLine ? String(cardHeaderLine).search(/(?:US\$|valor em d[oó]lar)/i) : -1;
+  const cardAmountColumns = cardHeaderLine ? {
+    local: localCurrencyIndex >= 0 ? layoutXAt(cardHeaderLine, localCurrencyIndex) : null,
+    foreign: foreignCurrencyIndex >= 0 ? layoutXAt(cardHeaderLine, foreignCurrencyIndex) : null
   } : null;
   const readSummaryValue = label => {
     const match = normalizedText.match(new RegExp(`${label}\\s+(-?(?:\\d{1,3}(?:[.\\s]\\d{3})+|\\d+),\\d{2})`, "i"));
@@ -2808,13 +2838,14 @@ function inferFinancialMetadata(lines) {
   const creditCard = /\b(?:fatura|cartao|mastercard|visa|elo|amex)\b/i.test(normalizedText);
   return {
     referenceDate,
-    currency: /\b(?:R\$|reais|BRL)\b/i.test(text) ? "BRL" : /\b(?:US\$|USD|d[oó]lar)\b/i.test(text) ? "USD" : "BRL",
-    accountId: account ? account[1] : cardFinal ? `CARTAO-${cardFinal[1]}` : `PDF-${simpleHash(text.slice(0, 500))}`,
+    currency: Number.isFinite(cardAmountColumns?.local) || /(?:R\$|\breais\b|\bBRL\b)/i.test(text) ? "BRL" : /(?:US\$|\bUSD\b|d[oó]lar)/i.test(text) ? "USD" : "BRL",
+    accountId: creditCard && cardFinal ? `CARTAO-${cardFinal[1]}` : account ? account[1] : cardFinal ? `CARTAO-${cardFinal[1]}` : `PDF-${simpleHash(text.slice(0, 500))}`,
     agencyId: agency ? agency[1] : "",
-    bankId: bankCode ? bankCode[1] : bankName ? bankName[1].toUpperCase().replace(/\s+/g, "-") : "PDF",
+    bankId: bankCode ? bankCode[1] : knownBankId || (bankName ? bankName[1].toUpperCase().replace(/\s+/g, "-") : "PDF"),
     accountType: creditCard ? "CREDITCARD" : "CHECKING",
     creditCard,
     statementColumns,
+    cardAmountColumns,
     initialBalance,
     finalBalance,
     expectedCredits,
@@ -2842,23 +2873,28 @@ function isTrailingContinuation(line) {
 
 function isHeaderOrSummary(line) {
   const normalized = normalizeSearchText(line);
-  return /\b(?:transacoes|data e hora|historico de despesas|descricao|valor origem|cotacao|total cartao|resumo da fatura|vencimento|limite|pagamento minimo|opcoes de pagamento|opcoes de parcelamento|programa de recompensa|encargos|legenda|fechamento da proxima fatura|total de parcelas|recibo do pagador|autenticacao|beneficiario|nosso numero|sacador|avalista|codigo de barra|local do pagamento|instrucoes|\d+ de \d+)\b/i.test(normalized);
+  return /\b(?:transacoes|data e hora|data historico|historico de despesas|descricao|valor origem|cotacao|total cartao|resumo da fatura|vencimento|limite|pagamento minimo|opcoes de pagamento|opcoes de parcelamento|programa de recompensa|encargos financeiros|encargos vigentes|taxas mensais|legenda|fechamento da proxima fatura|total de parcelas|recibo do pagador|autenticacao|beneficiario|nosso numero|sacador|avalista|codigo de barra|local do pagamento|instrucoes|\d+ de \d+)\b/i.test(normalized);
 }
 
 function isCreditCardTransactionSection(line) {
-  const normalized = normalizeSearchText(line);
-  return /\b(?:despesas no brasil|despesas no exterior|lancamentos nacionais|lancamentos internacionais)\b/i.test(normalized);
+  const normalized = normalizeSearchText(line).replace(/\s+/g, " ").trim();
+  return /\b(?:demonstrativo das transacoes|detalhe do extrato|detalhes da fatura|despesas no brasil|despesas no exterior|lancamentos nacionais|lancamentos internacionais)\b/i.test(normalized)
+    || /^transacoes\s*$/.test(normalized);
 }
 
 function isCreditCardSectionEnd(line) {
   const normalized = normalizeSearchText(line);
-  return /\b(?:subtotal|autenticacao|recibo do pagador|opcoes de parcelamento|encargos vigentes|programa de recompensa|sacador|avalista|codigo de barra)\b/i.test(normalized);
+  return /\b(?:total da fatura|legenda|atendimento 24 horas|taxa ao mes|taxas mensais|autenticacao|recibo do pagador|opcoes de parcelamento|encargos financeiros|encargos vigentes|programa de recompensa|sacador|avalista|codigo de barra)\b/i.test(normalized)
+    || /^\s*total\s*:/.test(normalized);
 }
 
 function simplifyCreditCardMemo(value) {
   return String(value)
+    .replace(/\b\d{2}[\/.-]\d{2}[\/.-]\d{4},?\s*\d{2}:\d{2}\s+IBPJ\s+about:blank\s+\d+\/\d+\b/gi, " ")
+    .replace(/\b\d{2}[\/.-]\d{2}[\/.-]\d{4},?\s*\d{2}:\d{2}\s+IBPJ\b/gi, " ")
+    .replace(/\b(?:IBPJ\s+)?about:blank\s+\d+\/\d+\b/gi, " ")
     .replace(/\b(?:BRL|R\$|USD|US\$|EUR)\b[\s\S]*$/i, " ")
-    .replace(/\b\d{1,4}[,.]\d{2}\b(?:\s+\d{1,4}[,.]\d{2})*\s*$/i, " ");
+    .replace(/(?:\s+(?:BRL|R\$|USD|US\$|EUR)?\s*\(?[+-]?(?:\d{1,3}(?:[.\s]\d{3})+|\d+)[,.]\d{2,4}\)?){1,4}\s*$/i, " ");
 }
 
 function normalizeSearchText(value) {
@@ -2876,7 +2912,7 @@ function simpleHash(value) {
 }
 
 function findStatementAmounts(line) {
-  const pattern = /(?<![\d/])(?:R\$\s*)?(\(?[+-]?(?:\d{1,3}(?:[.\s]\d{3})+|\d+)[,.]\d{2}\)?)(?:\s*([DC]))?(?![\d/])/gi;
+  const pattern = /(?<![\d/])(\(?[+-]?\s*(?:R\$\s*)?(?:\d{1,3}(?:[.\s]\d{3})+|\d+)[,.]\d{2}\)?)(?:\s*([DC]))?(?![\d/])/gi;
   return [...line.matchAll(pattern)].map(match => ({
     full: match[0],
     value: match[1],
@@ -2888,6 +2924,19 @@ function findStatementAmounts(line) {
 }
 
 function chooseTransactionAmount(line, amounts, metadata = {}) {
+  if (metadata.creditCard && amounts.length >= 2) {
+    const nonZero = amounts.filter(item => Math.abs(parseStatementAmount(item.value, item.marker, item.context)) > 0);
+    if (nonZero.length === 1) return nonZero[0];
+  }
+  if (metadata.creditCard && Number.isFinite(metadata.cardAmountColumns?.local)) {
+    const positioned = amounts.filter(item => Number.isFinite(item.x));
+    if (positioned.length) {
+      const localAmount = positioned.reduce((closest, item) => (
+        Math.abs(item.x - metadata.cardAmountColumns.local) < Math.abs(closest.x - metadata.cardAmountColumns.local) ? item : closest
+      ));
+      if (Math.abs(localAmount.x - metadata.cardAmountColumns.local) <= 65) return localAmount;
+    }
+  }
   if (metadata.statementColumns && amounts.length >= 2) {
     const balance = metadata.statementColumns.balance;
     const nonBalance = amounts.filter(item => item.x === null || Math.abs(item.x - balance) > 45);
@@ -2901,7 +2950,7 @@ function chooseTransactionAmount(line, amounts, metadata = {}) {
 
 function parseStatementAmount(value, debitCredit, context = "") {
   const negativeParentheses = /^\(.*\)$/.test(String(value).trim());
-  let normalized = String(value).replace(/[()\s]/g, "");
+  let normalized = String(value).replace(/[()\s]/g, "").replace(/R\$/gi, "");
   const lastComma = normalized.lastIndexOf(",");
   const lastDot = normalized.lastIndexOf(".");
   if (lastComma > lastDot) normalized = normalized.replace(/\./g, "").replace(",", ".");
@@ -2915,7 +2964,7 @@ function parseStatementAmount(value, debitCredit, context = "") {
 }
 
 function isBalanceLine(line) {
-  return /^\s*(?:\d{2}[\/.-]\d{2}(?:[\/.-]\d{2,4})?\s+)?(?:saldo\s+(?:anterior|final|dispon[ií]vel|do dia)|saldo|total\s+(?:do dia|geral)|limite)\b/i.test(stripLayoutMarkers(line));
+  return /^\s*(?:\d{2}[\/.-]\d{2}(?:[\/.-]\d{2,4})?\s+)?(?:saldo\s+(?:fatura\s+anterior|anterior|final|dispon[ií]vel|do dia)|saldo|total\s+(?:do dia|geral)|limite)\b/i.test(stripLayoutMarkers(line));
 }
 
 async function extractTransactionsWithOcr(pdf) {

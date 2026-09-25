@@ -373,6 +373,7 @@ dialog::backdrop { background: rgba(8, 19, 15, 0.7); backdrop-filter: blur(6px);
 .review-table .credit-input { color: #05823f; font-weight: 750; }
 .review-table .debit-input { color: #d92d20; font-weight: 750; }
 .review-table tr.invalid { background: #fff0ef; }
+.review-table tr.duplicate:not(.invalid) { background: #fff8df; }
 .review-table tr.invalid input { border-color: #f97066; background: #fff8f7; }
 .review-table tr.filtered { display: none; }
 .review-delete { border: 0; background: transparent; color: #d92d20; font-size: 19px; cursor: pointer; }
