@@ -65,8 +65,9 @@ function createHarness({
   };
   const calls = { service: 0, store: 0, window: 0, updater: 0, updaterDispose: 0, optional: 0, export: 0 };
   const fatalErrors = [];
+  const lifecycleEvents = [];
   return {
-    app, store, service, window, diagnostics, ipcHandlers, calls, fatalErrors,
+    app, store, service, window, diagnostics, ipcHandlers, calls, fatalErrors, lifecycleEvents,
     trustedEvent() {
       const senderFrame = { url: `${service.origin}/` };
       return { senderFrame, sender: { mainFrame: senderFrame } };
@@ -114,6 +115,7 @@ function createHarness({
       },
       chooseDiagnosticDestination: async () => "C:\\Users\\Test\\Desktop\\docpronto-diagnostico.zip",
       reportFatalError: error => { fatalErrors.push(error); },
+      onLifecycleEvent: event => { lifecycleEvents.push(event); },
       preloadPath: "C:\\app\\desktop\\preload.cjs",
     },
   };
@@ -140,10 +142,33 @@ test("segunda instancia restaura, mostra e foca a janela existente", async () =>
   const harness = createHarness();
   const runtime = createDesktopRuntime(harness.dependencies);
   await runtime.start();
+  assert.equal(harness.window.showCalls, 1);
   harness.app.emit("second-instance");
   assert.equal(harness.window.restoreCalls, 1);
-  assert.equal(harness.window.showCalls, 1);
+  assert.equal(harness.window.showCalls, 2);
   assert.equal(harness.window.focusCalls, 1);
+  assert.ok(harness.lifecycleEvents.some(event => event.type === "second-instance"));
+});
+
+test("runtime publica marcos minimos para o smoke empacotado", async () => {
+  const optionalError = Object.assign(new Error("Word ausente"), { code: "WORD_UNAVAILABLE" });
+  const harness = createHarness({ optionalError });
+  const runtime = createDesktopRuntime(harness.dependencies);
+
+  await runtime.start();
+  assert.ok(harness.lifecycleEvents.some(event => (
+    event.type === "service-ready" && event.origin === harness.service.origin
+  )));
+  assert.ok(harness.lifecycleEvents.some(event => event.type === "ui-ready"));
+
+  harness.window.emit("ready-to-show");
+  await runtime.optionalReady;
+  assert.ok(harness.lifecycleEvents.some(event => (
+    event.type === "optional-capability-failed" && event.code === "WORD_UNAVAILABLE"
+  )));
+
+  await runtime.stop();
+  assert.ok(harness.lifecycleEvents.some(event => event.type === "stopping"));
 });
 
 test("before-quit fecha store e servico exatamente uma vez", async () => {

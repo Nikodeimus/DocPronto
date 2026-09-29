@@ -22,6 +22,7 @@
     "desktop:dev": "node scripts/desktop-command.mjs --channel lab",
     "desktop:test": "node --test tests/desktop/*.test.mjs",
     "desktop:test:update": "node --test tests/desktop/update-manager.test.mjs",
+    "desktop:verify": "node --test tests/*.test.mjs tests/desktop/*.test.mjs && node scripts/build-desktop.mjs --channel lab --dir --skip-tests && node scripts/smoke-desktop.mjs",
     "desktop:package:lab": "node scripts/build-desktop.mjs --channel lab",
     "desktop:package:lab:ci": "node scripts/build-desktop.mjs --channel lab --skip-tests",
     "desktop:package:stable": "node scripts/build-desktop.mjs --channel stable",

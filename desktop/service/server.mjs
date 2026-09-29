@@ -61,6 +61,7 @@ export async function startDocProntoService({
   port = 0,
   sessionToken,
   onDiagnostic,
+  appInfo,
 } = {}) {
   if (host !== LOOPBACK_HOST) throw new Error("DocPronto Desktop must bind only to the IPv4 loopback host.");
   if (port !== 0) {
@@ -112,7 +113,12 @@ export async function startDocProntoService({
         return;
       }
       if (request.method === "GET" && requested === "/api/health") {
-        writeJson(response, 200, { ok: true, service: "DocPronto Desktop" });
+        writeJson(response, 200, {
+          ok: true,
+          service: "DocPronto Desktop",
+          ...(typeof appInfo?.version === "string" ? { version: appInfo.version } : {}),
+          ...(typeof appInfo?.channel === "string" ? { channel: appInfo.channel } : {}),
+        });
         return;
       }
       writeJson(response, 404, { error: "API nao encontrada." });

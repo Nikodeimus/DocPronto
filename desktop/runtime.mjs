@@ -92,6 +92,7 @@ export function createDesktopRuntime({
   reportFatalError = () => {},
   initializeOptionalCapabilities = async () => {},
   healthCheck = defaultHealthCheck,
+  onLifecycleEvent = () => {},
   assetsRoot,
   preloadPath,
   sessionToken,
@@ -108,6 +109,14 @@ export function createDesktopRuntime({
   let ipcRegistered = false;
   let lifecycleRegistered = false;
   let gracefulExitStarted = false;
+
+  function emitLifecycleEvent(event) {
+    try {
+      onLifecycleEvent({ ...event, timestamp: new Date().toISOString() });
+    } catch {
+      // Smoke observability is best-effort and cannot affect the application.
+    }
+  }
 
   async function recordDiagnostic(event) {
     if (!store) return;
@@ -226,6 +235,10 @@ export function createDesktopRuntime({
       try {
         await operation();
       } catch (error) {
+        emitLifecycleEvent({
+          type: "optional-capability-failed",
+          code: error?.code ?? code,
+        });
         await recordDiagnostic({
           level: "warning",
           tool: "desktop",
@@ -241,6 +254,7 @@ export function createDesktopRuntime({
   async function stop() {
     if (stopPromise) return stopPromise;
     stopPromise = (async () => {
+      emitLifecycleEvent({ type: "stopping" });
       if (ipcRegistered) {
         for (const name of IPC_CHANNELS) ipcMain.removeHandler?.(name);
         ipcRegistered = false;
@@ -269,7 +283,10 @@ export function createDesktopRuntime({
   function registerLifecycle() {
     if (lifecycleRegistered) return;
     lifecycleRegistered = true;
-    app.on("second-instance", bringWindowToFront);
+    app.on("second-instance", () => {
+      emitLifecycleEvent({ type: "second-instance" });
+      bringWindowToFront();
+    });
     app.on("before-quit", event => {
       if (gracefulExitStarted) return;
       gracefulExitStarted = true;
@@ -307,6 +324,7 @@ export function createDesktopRuntime({
         onDiagnostic: event => { void recordDiagnostic(event); },
       });
       await healthCheck({ origin: service.origin, sessionToken });
+      emitLifecycleEvent({ type: "service-ready", origin: service.origin });
 
       startupStage = "ipc";
       registerIpc();
@@ -327,6 +345,8 @@ export function createDesktopRuntime({
 
       startupStage = "window-load";
       await (mainWindow.docprontoLoadPromise ?? Promise.resolve());
+      mainWindow?.show?.();
+      emitLifecycleEvent({ type: "ui-ready" });
       return true;
     } catch (cause) {
       const code = cause?.code === "DESKTOP_WINDOW_LOAD_FAILED"

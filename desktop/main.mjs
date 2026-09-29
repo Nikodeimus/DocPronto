@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
+import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
@@ -28,6 +30,48 @@ const channel = resolveRuntimeChannel({
   environment: process.env,
 });
 const sessionToken = randomBytes(32).toString("hex");
+const smokeMode = process.env.DOCPRONTO_SMOKE === "1";
+
+function smokePath(name) {
+  const candidate = process.env[name];
+  if (!smokeMode || !candidate) return null;
+  const temporaryRoot = resolve(tmpdir());
+  const resolved = resolve(candidate);
+  const fromTemporaryRoot = relative(temporaryRoot, resolved);
+  if (fromTemporaryRoot.startsWith("..") || fromTemporaryRoot === "" || fromTemporaryRoot.includes("..")) {
+    throw Object.assign(new Error(`${name} must be inside the system temporary directory.`), {
+      code: "INVALID_SMOKE_PATH",
+    });
+  }
+  return resolved;
+}
+
+const smokeReportPath = smokePath("DOCPRONTO_SMOKE_REPORT");
+const smokeControlPath = smokePath("DOCPRONTO_SMOKE_CONTROL");
+function reportSmoke(event) {
+  if (!smokeReportPath) return;
+  appendFileSync(smokeReportPath, `${JSON.stringify({
+    ...event,
+    pid: process.pid,
+    timestamp: new Date().toISOString(),
+    uptimeMs: Math.round(process.uptime() * 1_000),
+  })}\n`, { encoding: "utf8", flag: "a" });
+}
+
+let smokeControlTimer;
+if (smokeControlPath) {
+  smokeControlTimer = setInterval(() => {
+    try {
+      if (!existsSync(smokeControlPath)) return;
+      const command = readFileSync(smokeControlPath, "utf8").trim();
+      unlinkSync(smokeControlPath);
+      if (command === "quit") app.quit();
+    } catch (error) {
+      reportSmoke({ type: "control-failed", code: error.code ?? "SMOKE_CONTROL_FAILED" });
+    }
+  }, 50);
+  smokeControlTimer.unref();
+}
 
 async function checkServiceHealth({ origin }) {
   const response = await fetch(`${origin}/api/health`, {
@@ -47,9 +91,13 @@ const runtime = createDesktopRuntime({
   ipcMain,
   shell,
   channel,
-  startService: startDocProntoService,
+  startService: options => startDocProntoService({
+    ...options,
+    appInfo: { version: app.getVersion(), channel },
+  }),
   createStore: options => new DiagnosticStore(options),
   createUpdateManager: options => {
+    if (smokeMode) return { start: async () => false, dispose() {} };
     if (!app.isPackaged) return { start: async () => false, dispose() {} };
     return createUpdateManager({
       ...options,
@@ -75,12 +123,25 @@ const runtime = createDesktopRuntime({
     );
   },
   initializeOptionalCapabilities: async () => {
+    if (smokeMode && process.env.DOCPRONTO_SMOKE_MISSING_OPTIONALS === "1") {
+      reportSmoke({ type: "optional-capability-failed", capability: "word", code: "WORD_UNAVAILABLE" });
+      reportSmoke({ type: "optional-capability-failed", capability: "certificate", code: "CERTIFICATE_NOT_FOUND" });
+      return;
+    }
     if (process.platform === "win32") await listWindowsCertificates();
   },
   healthCheck: checkServiceHealth,
   assetsRoot: join(currentDirectory, "..", "public", "docpronto"),
   preloadPath: join(currentDirectory, "preload.cjs"),
   sessionToken,
+  onLifecycleEvent: event => {
+    if (event.type === "service-ready") {
+      reportSmoke({ ...event, sessionToken, version: app.getVersion(), channel });
+    } else {
+      reportSmoke(event);
+    }
+    if (event.type === "stopping" && smokeControlTimer) clearInterval(smokeControlTimer);
+  },
 });
 
 void runtime.start().catch(error => {

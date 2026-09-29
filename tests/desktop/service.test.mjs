@@ -87,6 +87,24 @@ test("serves_health_and_static_assets", async t => {
   assert.equal(await laboratoryModule.text(), "export const laboratory = true;");
 });
 
+test("health_expõe_versao_e_canal_do_executavel_quando_fornecidos", async t => {
+  const assetsRoot = await createAssets(t);
+  const service = await startDocProntoService({
+    assetsRoot,
+    appInfo: { version: "0.1.0-lab.0", channel: "lab" },
+  });
+  t.after(() => service.close());
+
+  const response = await fetch(`${service.origin}/api/health`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    service: "DocPronto Desktop",
+    version: "0.1.0-lab.0",
+    channel: "lab",
+  });
+});
+
 test("rejects_wrong_host_and_path_traversal", async t => {
   const assetsRoot = await createAssets(t);
   const service = await startDocProntoService({ assetsRoot });
