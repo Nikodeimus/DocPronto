@@ -369,19 +369,57 @@ test("rejects_oversized_Word_output_before_reading_or_serializing_it", async t =
   assert.deepEqual(await readdir(tempRoot), []);
 });
 
-test("Word_COM_cleanup_quits_only_an_instance_owned_by_the_operation", async () => {
-  await convertOfficeDocument(
-    { filename: "relatorio.docx", contentBase64: Buffer.from("document").toString("base64") },
-    "pdf",
-    {
-      runPowerShell: async script => {
-        assert.match(script, /\$ownsWordProcess\s*=\s*\$false/);
-        assert.match(script, /if \(\$ownsWordProcess\)\s*\{\s*\$word\.Quit\(\)/s);
+test("Word_COM_cleanup_owns_the_new_instance_before_configuration_or_tracking", async () => {
+  for (const [filename, target] of [["relatorio.docx", "pdf"], ["relatorio.pdf", "docx"]]) {
+    await convertOfficeDocument(
+      { filename, contentBase64: Buffer.from("document").toString("base64") },
+      target,
+      {
+        runPowerShell: async script => {
+          assert.match(
+            script,
+            /New-Object -ComObject Word\.Application\s+\$ownsWordProcess\s*=\s*\$true\s+try\s*\{/s,
+          );
+          assert.match(script, /if \(\$ownsWordProcess\)\s*\{\s*\$word\.Quit\(\)/s);
+          assert.match(
+            script,
+            /\} finally \{\s*try \{\s*if \(\$ownsWordProcess\) \{ \$word\.Quit\(\) \}\s*\} finally \{\s*\[System\.Runtime\.InteropServices\.Marshal\]::ReleaseComObject/s,
+          );
+        },
+        statOutputFile: async () => ({ size: 8 }),
+        readOutputFile: async () => Buffer.from("converted"),
       },
-      statOutputFile: async () => ({ size: 8 }),
-      readOutputFile: async () => Buffer.from("%PDF-test"),
-    },
+    );
+  }
+});
+
+test("Word_timeout_without_tracking_kills_only_the_PowerShell_operation_tree", async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-word-fallback-test-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const child = new EventEmitter();
+  child.pid = 2468;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => { child.killed = true; };
+  const killedTrees = [];
+
+  await assert.rejects(
+    convertOfficeDocument(
+      { filename: "relatorio.docx", contentBase64: Buffer.from("document").toString("base64") },
+      "pdf",
+      {
+        tempRoot,
+        timeoutMs: 10,
+        spawnPowerShell: () => child,
+        terminateTrackedWordProcess: async () => false,
+        killProcessTree: async pid => killedTrees.push(pid),
+      },
+    ),
+    hasCode("LOCAL_OPERATION_TIMEOUT"),
   );
+  assert.deepEqual(killedTrees, [2468]);
+  assert.notEqual(child.killed, true);
+  assert.deepEqual(await readdir(tempRoot), []);
 });
 
 test("Word_timeout_kills_only_the_tracked_tree_and_preserves_the_timeout_error", async t => {
@@ -524,6 +562,62 @@ test("validates_detached_p7s_integrity_single_signer_and_requested_thumbprint", 
 
   assert.equal(signature, Buffer.from("detached-test-signature").toString("base64"));
   assert.equal(verified, true);
+});
+
+test("valid_p7s_survives_late_cleanup_failure_with_retry_options", async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-p7s-cleanup-test-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  let cleanupCalls = 0;
+  const signature = await signWithWindowsCertificate({
+    thumbprint: VALID_THUMBPRINT,
+    contentBase64: Buffer.from("document").toString("base64"),
+  }, {
+    tempRoot,
+    runPowerShell: createPdfSigningRunner(),
+    removeTemporaryDirectory: async (path, options) => {
+      cleanupCalls += 1;
+      assert.equal(options.maxRetries, 3);
+      await rm(path, options);
+      if (cleanupCalls === 2) throw new Error("late cleanup failure");
+    },
+  });
+
+  assert.equal(signature, Buffer.from("detached-test-signature").toString("base64"));
+  assert.equal(cleanupCalls, 2);
+  assert.deepEqual(await readdir(tempRoot), []);
+});
+
+test("p7s_validation_error_is_not_replaced_by_cleanup_failure", async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-p7s-primary-error-test-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const validationError = Object.assign(new Error("signature integrity failed"), {
+    code: "SIGNATURE_INVALID",
+  });
+  let cleanupCalls = 0;
+
+  await assert.rejects(
+    signWithWindowsCertificate({
+      thumbprint: VALID_THUMBPRINT,
+      contentBase64: Buffer.from("document").toString("base64"),
+    }, {
+      tempRoot,
+      runPowerShell: async script => {
+        if (script.includes("$signedCms.ComputeSignature")) {
+          return Buffer.from("detached-test-signature").toString("base64");
+        }
+        if (script.includes("$cms.CheckSignature")) throw validationError;
+        assert.fail("Unexpected PowerShell operation");
+      },
+      removeTemporaryDirectory: async (path, options) => {
+        cleanupCalls += 1;
+        await rm(path, options);
+        if (cleanupCalls === 2) throw new Error("cleanup replaced primary error");
+      },
+    }),
+    error => error === validationError,
+  );
+  assert.equal(cleanupCalls, 2);
+  assert.deepEqual(await readdir(tempRoot), []);
 });
 
 test("maps_certificate_provider_failures_to_a_stable_code", async () => {

@@ -209,7 +209,6 @@ $operationStartedTicks = [Int64]$env:DOCPRONTO_WORD_OPERATION_STARTED_TICKS
 if ($startedAtTicks -lt $operationStartedTicks) {
   throw 'A instancia do Word e anterior a esta operacao.'
 }
-$ownsWordProcess = $true
 [PSCustomObject]@{
   pid = [int]$wordProcessId
   startedAtTicks = [string]$startedAtTicks
@@ -223,7 +222,7 @@ $inputPath = $env:DOCPRONTO_INPUT
 $outputPath = $env:DOCPRONTO_OUTPUT
 ${WORD_NATIVE_METHODS_SCRIPT}
 $word = New-Object -ComObject Word.Application
-$ownsWordProcess = $false
+$ownsWordProcess = $true
 try {
   $word.Visible = $false
   $word.DisplayAlerts = 0
@@ -235,8 +234,11 @@ try {
     $doc.Close($false)
   }
 } finally {
-  if ($ownsWordProcess) { $word.Quit() }
-  [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+  try {
+    if ($ownsWordProcess) { $word.Quit() }
+  } finally {
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+  }
 }
 `;
 
@@ -246,7 +248,7 @@ $inputPath = $env:DOCPRONTO_INPUT
 $outputPath = $env:DOCPRONTO_OUTPUT
 ${WORD_NATIVE_METHODS_SCRIPT}
 $word = New-Object -ComObject Word.Application
-$ownsWordProcess = $false
+$ownsWordProcess = $true
 try {
   $word.Visible = $false
   $word.DisplayAlerts = 0
@@ -258,8 +260,11 @@ try {
     $doc.Close($false)
   }
 } finally {
-  if ($ownsWordProcess) { $word.Quit() }
-  [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+  try {
+    if ($ownsWordProcess) { $word.Quit() }
+  } finally {
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+  }
 }
 `;
 
@@ -343,7 +348,7 @@ async function verifyDetachedWindowsSignature(thumbprint, content, signatureBase
       DOCPRONTO_CERT_THUMBPRINT: thumbprint,
     }, 30_000, dependencies, "certificate");
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    await cleanupTemporaryDirectory(tempDir, dependencies);
   }
 }
 
@@ -744,16 +749,27 @@ function defaultRunPowerShell(script, env = {}, timeoutMs = 30_000, dependencies
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      let trackedTreeTerminated = false;
+      let operationTreeTerminated = false;
       try {
         if (env.DOCPRONTO_WORD_PROCESS_FILE) {
-          await (dependencies.terminateTrackedWordProcess || terminateTrackedWordProcess)(
+          trackedTreeTerminated = await (dependencies.terminateTrackedWordProcess || terminateTrackedWordProcess)(
             env.DOCPRONTO_WORD_PROCESS_FILE,
             dependencies,
           );
         }
       } catch {
         // Keep the primary timeout error even if process cleanup fails.
-      } finally {
+      }
+      if (!trackedTreeTerminated && Number.isSafeInteger(child.pid) && child.pid > 0) {
+        try {
+          await (dependencies.killProcessTree || defaultKillProcessTree)(child.pid);
+          operationTreeTerminated = true;
+        } catch {
+          // Fall back to terminating the PowerShell host below.
+        }
+      }
+      if (!operationTreeTerminated) {
         child.kill("SIGKILL");
       }
       reject(codedError("LOCAL_OPERATION_TIMEOUT", "Operacao local demorou demais e foi cancelada."));
