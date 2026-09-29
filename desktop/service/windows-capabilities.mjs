@@ -334,7 +334,8 @@ async function validateSignedPdfOutput(output, expectedByteRange, expectedWidget
         const reference = annotations.get(index);
         const widget = document.context.lookup(reference, PDFDict);
         if (String(widget?.get(PDFName.of("Subtype"))) === "/Widget"
-          && String(widget?.get(PDFName.of("FT"))) === "/Sig") {
+          && String(widget?.get(PDFName.of("FT"))) === "/Sig"
+          && widget.get(PDFName.of("T"))?.decodeText?.() === expectedWidget.fieldName) {
           signatureWidgets.push(widget);
         }
       }
@@ -525,6 +526,7 @@ async function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placemen
     contentsHexStart: contentsStart + 1,
     placeholderHexLength,
     expectedWidget: {
+      fieldName: name,
       pageNumber,
       rectangle: [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height],
       appearanceBounds: [0, 0, rect.width, rect.height],

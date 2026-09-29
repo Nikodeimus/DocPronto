@@ -39,10 +39,37 @@ async function loadTestPdfLibrary() {
   return testPdfLibrary;
 }
 
-async function createPdfFixture() {
+async function createPdfFixture({ pageCount = 1, unsignedSignatureName } = {}) {
   const PDFLib = await loadTestPdfLibrary();
   const document = await PDFLib.PDFDocument.create();
-  document.addPage();
+  for (let index = 0; index < pageCount; index += 1) document.addPage();
+  if (unsignedSignatureName) {
+    const { PDFArray, PDFDict, PDFName, PDFString } = PDFLib;
+    const page = document.getPage(0);
+    document.getForm();
+    const acroForm = document.catalog.lookup(PDFName.of("AcroForm"), PDFDict);
+    let fields = acroForm.lookupMaybe(PDFName.of("Fields"), PDFArray);
+    if (!fields) {
+      fields = document.context.obj([]);
+      acroForm.set(PDFName.of("Fields"), fields);
+    }
+    const widget = document.context.register(document.context.obj({
+      Type: "Annot",
+      Subtype: "Widget",
+      FT: "Sig",
+      Rect: [12, 12, 112, 42],
+      T: PDFString.of(unsignedSignatureName),
+      P: page.ref,
+      F: 4,
+    }));
+    fields.push(widget);
+    let annotations = page.node.lookupMaybe(PDFName.of("Annots"), PDFArray);
+    if (!annotations) {
+      annotations = document.context.obj([]);
+      page.node.set(PDFName.of("Annots"), annotations);
+    }
+    annotations.push(widget);
+  }
   return Buffer.from(await document.save({ useObjectStreams: false }));
 }
 
@@ -67,7 +94,7 @@ function createPdfSigningRunner({ onVerify } = {}) {
   };
 }
 
-function inspectSignatureWidget(PDFLib, document, pageIndex) {
+function inspectSignatureWidget(PDFLib, document, pageIndex, fieldName = "Signature1") {
   const { PDFArray, PDFDict, PDFName } = PDFLib;
   const page = document.getPage(pageIndex);
   const annotations = page.node.lookupMaybe(PDFName.of("Annots"), PDFArray);
@@ -76,7 +103,8 @@ function inspectSignatureWidget(PDFLib, document, pageIndex) {
     const reference = annotations.get(index);
     const widget = document.context.lookup(reference, PDFDict);
     if (String(widget?.get(PDFName.of("Subtype"))) === "/Widget"
-      && String(widget?.get(PDFName.of("FT"))) === "/Sig") {
+      && String(widget?.get(PDFName.of("FT"))) === "/Sig"
+      && widget.get(PDFName.of("T"))?.decodeText?.() === fieldName) {
       return { page, reference, widget };
     }
   }
@@ -245,6 +273,50 @@ test("rejects_missing_displaced_or_invisible_serialized_signature_widgets", asyn
       hasCode("INVALID_SIGNED_PDF"),
     );
   }
+});
+
+test("rejects_a_serialized_signature_widget_associated_with_the_wrong_page", async () => {
+  const sourcePdf = await createPdfFixture({ pageCount: 2 });
+
+  await assert.rejects(
+    withSerializedMutation("/P 4 0 R", "/P 5 0 R", () => signPdfWithWindowsCertificate({
+      filename: "contrato.pdf",
+      thumbprint: VALID_THUMBPRINT,
+      contentBase64: sourcePdf.toString("base64"),
+      signerName: "Test Signer",
+      placement: { ...VALID_PLACEMENT },
+    }, {
+      runPowerShell: createPdfSigningRunner(),
+    })),
+    hasCode("INVALID_SIGNED_PDF"),
+  );
+});
+
+test("accepts_an_existing_unsigned_signature_widget_and_validates_the_generated_widget", async () => {
+  const PDFLib = await loadTestPdfLibrary();
+  const sourcePdf = await createPdfFixture({ unsignedSignatureName: "Signature1" });
+
+  const result = await signPdfWithWindowsCertificate({
+    filename: "contrato.pdf",
+    thumbprint: VALID_THUMBPRINT,
+    contentBase64: sourcePdf.toString("base64"),
+    signerName: "Test Signer",
+    placement: { ...VALID_PLACEMENT },
+  }, {
+    runPowerShell: createPdfSigningRunner(),
+  });
+
+  const reopened = await PDFLib.PDFDocument.load(Buffer.from(result.contentBase64, "base64"), {
+    ignoreEncryption: false,
+    throwOnInvalidObject: true,
+    updateMetadata: false,
+  });
+  const { PDFDict, PDFName } = PDFLib;
+  const existing = inspectSignatureWidget(PDFLib, reopened, 0, "Signature1").widget;
+  assert.equal(existing.has(PDFName.of("V")), false);
+  const generated = inspectSignatureWidget(PDFLib, reopened, 0, "Signature2").widget;
+  assert.equal(String(generated.lookup(PDFName.of("V"), PDFDict).get(PDFName.of("Type"))), "/Sig");
+  assert.ok(generated.has(PDFName.of("AP")));
 });
 
 test("reports_Word_or_PowerShell_unavailability_and_removes_temporaries", async t => {
