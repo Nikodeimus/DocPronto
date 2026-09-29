@@ -10,6 +10,7 @@ const RUNTIME_FILES = Object.freeze([
   "public/docpronto/**/*",
   "package.json",
   "!public/docpronto/downloads{,/**/*}",
+  "!public/docpronto/vendor/**/{README,README.*,readme,readme.*}",
   "!**/.env*",
   "!tests{,/**/*}",
   "!docs{,/**/*}",
@@ -23,6 +24,12 @@ const RUNTIME_FILES = Object.freeze([
   "!coverage{,/**/*}",
   "!**/*.{bak,backup,log}",
   "!**/*.map",
+  "!node_modules/**/{test,tests,__tests__,spec,specs,doc,docs,example,examples,benchmark,benchmarks}{,/**/*}",
+  "!node_modules/**/*.{test,spec}.{js,cjs,mjs,ts,tsx}",
+  "!node_modules/**/{test,spec}.{js,cjs,mjs,ts,tsx}",
+  "!node_modules/**/*.{d.ts,map}",
+  "!node_modules/**/{README,README.*,readme,readme.*,CHANGELOG,CHANGELOG.*,CHANGES,CHANGES.*,CONTRIBUTING,CONTRIBUTING.*,GOVERNANCE,GOVERNANCE.*,sponsors.md}",
+  "!node_modules/**/{.codeclimate.yml,.editorconfig,.eslintrc,.eslintrc.*,.jekyll-metadata,tsconfig.json,graph.svg,Makefile,component.json}",
 ]);
 
 function resolveBuilderConfig(channel, projectDir = __dirname) {
@@ -32,8 +39,7 @@ function resolveBuilderConfig(channel, projectDir = __dirname) {
   return {
     appId: identity.appId,
     productName: identity.productName,
-    asar: true,
-    asarUnpack: [],
+    asar: { smartUnpack: false },
     npmRebuild: false,
     electronVersion: "44.4.5",
     directories: {

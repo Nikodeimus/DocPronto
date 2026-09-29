@@ -1,3 +1,3 @@
 import channelData from "./channel-data.cjs";
 
-export const { CHANNELS, getChannelConfig, normalizeChannel } = channelData;
+export const { CHANNELS, getChannelConfig, normalizeChannel, resolveRuntimeChannel } = channelData;

@@ -6,6 +6,7 @@ import {
   CHANNELS,
   getChannelConfig,
   normalizeChannel,
+  resolveRuntimeChannel,
 } from "../../desktop/config/channel.mjs";
 
 const EXPECTED_SITES_SCRIPTS = {
@@ -73,4 +74,37 @@ test("sets_the_Electron_entrypoint_without_replacing_Sites_scripts", async () =>
   for (const [name, command] of Object.entries(EXPECTED_SITES_SCRIPTS)) {
     assert.equal(packageJson.scripts[name], command);
   }
+});
+
+test("packaged_stable_ignores_lab_argument_and_environment_override", () => {
+  assert.equal(resolveRuntimeChannel({
+    isPackaged: true,
+    packageChannel: "stable",
+    arguments: ["DOCPronto.exe", "--channel=lab"],
+    environment: { DOCPRONTO_CHANNEL: "lab" },
+  }), "stable");
+});
+
+test("packaged_lab_ignores_stable_argument_and_environment_override", () => {
+  assert.equal(resolveRuntimeChannel({
+    isPackaged: true,
+    packageChannel: "lab",
+    arguments: ["DOCPronto Laboratorio.exe", "--channel=stable"],
+    environment: { DOCPRONTO_CHANNEL: "stable" },
+  }), "lab");
+});
+
+test("development_allows_explicit_channel_overrides", () => {
+  assert.equal(resolveRuntimeChannel({
+    isPackaged: false,
+    packageChannel: "stable",
+    arguments: ["electron.exe", ".", "--channel=lab"],
+    environment: { DOCPRONTO_CHANNEL: "stable" },
+  }), "lab");
+  assert.equal(resolveRuntimeChannel({
+    isPackaged: false,
+    packageChannel: "lab",
+    arguments: [],
+    environment: { DOCPRONTO_CHANNEL: "stable" },
+  }), "stable");
 });

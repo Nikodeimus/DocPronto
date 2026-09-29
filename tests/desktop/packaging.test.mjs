@@ -58,8 +58,8 @@ test("executavel_empacotado_descobre_o_canal_sem_argumento_ou_ambiente", async (
 test("empacota_asar_alvos_windows_e_atalhos_do_instalador", () => {
   const config = resolveBuilderConfig("stable", projectDir);
 
-  assert.equal(config.asar, true);
-  assert.deepEqual(config.asarUnpack, []);
+  assert.deepEqual(config.asar, { smartUnpack: false });
+  assert.equal("asarUnpack" in config, false);
   assert.deepEqual(config.win.target, [
     { target: "nsis", arch: ["x64"] },
     { target: "portable", arch: ["x64"] },

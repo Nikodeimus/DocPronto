@@ -32,4 +32,27 @@ function getChannelConfig(channel) {
   return CHANNEL_CONFIGS[normalizeChannel(channel)];
 }
 
-module.exports = { CHANNELS, getChannelConfig, normalizeChannel };
+function resolveRuntimeChannel({
+  isPackaged = false,
+  packageChannel,
+  arguments: runtimeArguments = [],
+  environment = {},
+} = {}) {
+  if (isPackaged) {
+    if (!packageChannel) {
+      const error = new Error("Packaged DOCPronto is missing its release channel.");
+      error.code = "PACKAGED_CHANNEL_MISSING";
+      throw error;
+    }
+    return normalizeChannel(packageChannel);
+  }
+
+  const channelArgument = runtimeArguments.find(argument => argument.startsWith("--channel="));
+  return normalizeChannel(
+    channelArgument?.slice("--channel=".length)
+      || environment.DOCPRONTO_CHANNEL
+      || packageChannel,
+  );
+}
+
+module.exports = { CHANNELS, getChannelConfig, normalizeChannel, resolveRuntimeChannel };

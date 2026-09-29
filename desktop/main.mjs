@@ -8,6 +8,7 @@ import electronUpdater from "electron-updater";
 
 import { DiagnosticStore } from "./diagnostics/store.mjs";
 import { exportDiagnosticBundle } from "./diagnostics/export.mjs";
+import { resolveRuntimeChannel } from "./config/channel.mjs";
 import { createDesktopRuntime } from "./runtime.mjs";
 import { startDocProntoService } from "./service/server.mjs";
 import { listWindowsCertificates } from "./service/windows-capabilities.mjs";
@@ -15,11 +16,12 @@ import { listWindowsCertificates } from "./service/windows-capabilities.mjs";
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const packageMetadata = require("../package.json");
-const channelArgument = process.argv.find(argument => argument.startsWith("--channel="));
-const channel = channelArgument?.slice("--channel=".length)
-  || process.env.DOCPRONTO_CHANNEL
-  || packageMetadata.docprontoChannel
-  || "lab";
+const channel = resolveRuntimeChannel({
+  isPackaged: app.isPackaged,
+  packageChannel: packageMetadata.docprontoChannel,
+  arguments: process.argv,
+  environment: process.env,
+});
 const sessionToken = randomBytes(32).toString("hex");
 
 async function checkServiceHealth({ origin }) {

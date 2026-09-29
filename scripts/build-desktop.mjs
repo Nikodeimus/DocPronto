@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { normalizeChannel } from "../desktop/config/channel.mjs";
@@ -27,11 +27,11 @@ export function parseBuildArguments(arguments_) {
   };
 }
 
-function run(command, arguments_) {
+function run(command, arguments_, options = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(command, arguments_, {
       cwd: projectDir,
-      env: process.env,
+      env: options.env ?? process.env,
       shell: false,
       stdio: "inherit",
       windowsHide: true,
@@ -52,7 +52,14 @@ export async function buildDesktop(arguments_ = process.argv.slice(2)) {
     options.directory ? ["dir"] : ["nsis", "portable"],
     Arch.x64,
   );
-  return build({ projectDir, config, targets, publish: "never" });
+  const artifacts = await build({ projectDir, config, targets, publish: "never" });
+  await run(process.execPath, ["--test", "tests/desktop/packaged-output.test.mjs"], {
+    env: {
+      ...process.env,
+      DOCPRONTO_PACKAGED_RESOURCES: join(config.directories.output, "win-unpacked", "resources"),
+    },
+  });
+  return artifacts;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
