@@ -58,7 +58,7 @@ export async function exportDiagnosticBundle(options) {
   validateOptions(options);
   const { events, environment, destination } = options;
   const createdAt = new Date().toISOString();
-  const safeEvents = redactDiagnosticValue(events);
+  const safeEvents = redactDiagnosticValue(events.slice(-2_000));
   const safeEnvironment = redactDiagnosticValue(environment);
   const manifest = redactDiagnosticValue({
     format: "docpronto-diagnostics",

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import * as fileSystem from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,6 +28,29 @@ async function createUserData(t) {
   const userData = await mkdtemp(join(tmpdir(), "docpronto-diagnostics-test-"));
   t.after(() => rm(userData, { recursive: true, force: true }));
   return userData;
+}
+
+async function diagnosticJsonlPaths(root) {
+  const paths = [];
+  async function visit(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.name.endsWith(".jsonl")) paths.push(path);
+    }
+  }
+  await visit(join(root, "diagnostics"));
+  return paths.sort();
+}
+
+async function seedGeneration(userData, events) {
+  const diagnosticsDir = join(userData, "diagnostics");
+  await mkdir(diagnosticsDir, { recursive: true });
+  await writeFile(
+    join(diagnosticsDir, "events-000001-000001.jsonl"),
+    `${events.map(event => JSON.stringify(event)).join("\n")}\n`,
+  );
+  await writeFile(join(diagnosticsDir, "committed-000001"), "");
 }
 
 function input(overrides = {}) {
@@ -112,6 +136,37 @@ test("redacts_nested_secrets_document_material_personal_paths_and_stack_location
   assertSecretsAbsent(serialized);
 });
 
+test("redacts_tool_stage_and_code_before_persistence", async t => {
+  const userData = await createUserData(t);
+  const store = new DiagnosticStore({ userData });
+  t.after(() => store.close());
+
+  const event = await store.append(input({
+    tool: `converter ${PERSONAL_PATH}`,
+    stage: "arquivo FATURA-123.pdf",
+    code: `FAIL_${PERSONAL_PATH}`,
+    technical: {
+      nested: {
+        tool: PERSONAL_PATH,
+        stage: "FATURA-123.pdf",
+        code: `NESTED_${PERSONAL_PATH}`,
+      },
+    },
+  }));
+
+  assert.match(event.tool, /\[REDACTED_PATH\]/);
+  assert.match(event.stage, /\[REDACTED_FILE\]/);
+  assert.match(event.code, /\[REDACTED_PATH\]/);
+  assert.match(event.technical.nested.tool, /\[REDACTED_PATH\]/);
+  assert.match(event.technical.nested.stage, /\[REDACTED_FILE\]/);
+  assert.match(event.technical.nested.code, /\[REDACTED_PATH\]/);
+  assertSecretsAbsent(JSON.stringify(event));
+  const persisted = (await Promise.all(
+    (await diagnosticJsonlPaths(userData)).map(path => readFile(path, "utf8")),
+  )).join("\n");
+  assertSecretsAbsent(persisted);
+});
+
 test("redacts_before_persistence_and_retains_only_the_latest_2000_events", async t => {
   const userData = await createUserData(t);
   const store = new DiagnosticStore({ userData });
@@ -127,10 +182,8 @@ test("redacts_before_persistence_and_retains_only_the_latest_2000_events", async
       signature: "FULL-SIGNATURE-SECRET",
     },
   }));
-  const diagnosticsDir = join(userData, "diagnostics");
   const firstPersisted = (await Promise.all(
-    (await readdir(diagnosticsDir)).filter(name => name.endsWith(".jsonl"))
-      .map(name => readFile(join(diagnosticsDir, name), "utf8")),
+    (await diagnosticJsonlPaths(userData)).map(path => readFile(path, "utf8")),
   )).join("\n");
   assertSecretsAbsent(firstPersisted);
 
@@ -156,15 +209,22 @@ test("redacts_before_persistence_and_retains_only_the_latest_2000_events", async
   assert.equal(wordEvents.every(event => event.tool === "word"), true);
   assert.equal(runEvents.length, 400);
   assert.equal(runEvents.every(event => event.metadata.executionId === "run-a"), true);
-
   const persisted = (await Promise.all(
-    (await readdir(diagnosticsDir)).filter(name => name.endsWith(".jsonl"))
-      .map(name => readFile(join(diagnosticsDir, name), "utf8")),
+    (await diagnosticJsonlPaths(userData)).map(path => readFile(path, "utf8")),
   )).join("\n");
   assertSecretsAbsent(persisted);
 
   await store.clear();
   assert.deepEqual(await store.list(), []);
+});
+
+test("returns_no_events_when_list_limit_is_zero", async t => {
+  const userData = await createUserData(t);
+  const store = new DiagnosticStore({ userData });
+  t.after(() => store.close());
+  await store.append(input({ code: "VISIBLE_WITHOUT_LIMIT" }));
+
+  assert.deepEqual(await store.list({ limit: 0 }), []);
 });
 
 test("rotates_jsonl_at_5_MiB_and_keeps_at_most_five_files", async t => {
@@ -177,12 +237,11 @@ test("rotates_jsonl_at_5_MiB_and_keeps_at_most_five_files", async t => {
     await store.append(input({ code: `LARGE_${index}`, metadata: { payload } }));
   }
 
-  const diagnosticsDir = join(userData, "diagnostics");
-  const files = (await readdir(diagnosticsDir)).filter(name => name.endsWith(".jsonl"));
+  const files = await diagnosticJsonlPaths(userData);
   assert.equal(files.length, 5);
-  for (const name of files) {
-    const contents = await readFile(join(diagnosticsDir, name));
-    assert.equal(contents.byteLength <= 5 * 1024 * 1024, true, `${name} exceeded 5 MiB`);
+  for (const path of files) {
+    const contents = await readFile(path);
+    assert.equal(contents.byteLength <= 5 * 1024 * 1024, true, `${path} exceeded 5 MiB`);
   }
 
   const liveCodes = (await store.list()).map(event => event.code);
@@ -190,6 +249,66 @@ test("rotates_jsonl_at_5_MiB_and_keeps_at_most_five_files", async t => {
   const reopened = new DiagnosticStore({ userData });
   t.after(() => reopened.close());
   assert.deepEqual((await reopened.list()).map(event => event.code), liveCodes);
+});
+
+test("bounds_a_single_oversized_event_during_append", async t => {
+  const userData = await createUserData(t);
+  const store = new DiagnosticStore({ userData });
+  t.after(() => store.close());
+
+  const stored = await store.append(input({ code: "X".repeat(6 * 1024 * 1024) }));
+
+  assert.equal(stored.code, "DIAGNOSTIC_EVENT_TOO_LARGE");
+  for (const path of await diagnosticJsonlPaths(userData)) {
+    assert.equal((await stat(path)).size <= 5 * 1024 * 1024, true);
+  }
+});
+
+test("bounds_an_oversized_event_during_snapshot_rewrite", async t => {
+  const userData = await createUserData(t);
+  const seeded = Array.from({ length: 1_999 }, (_, index) => createDiagnosticEvent(input({
+    code: `SEED_${index}`,
+  })));
+  seeded.push(createDiagnosticEvent(input({ code: "Y".repeat(6 * 1024 * 1024) })));
+  await seedGeneration(userData, seeded);
+
+  const store = new DiagnosticStore({ userData });
+  t.after(() => store.close());
+  await store.append(input({ code: "TRIGGER_SNAPSHOT" }));
+
+  assert.equal((await store.list()).some(event => event.code === "DIAGNOSTIC_EVENT_TOO_LARGE"), true);
+  for (const path of await diagnosticJsonlPaths(userData)) {
+    assert.equal((await stat(path)).size <= 5 * 1024 * 1024, true);
+  }
+});
+
+test("keeps_the_previous_snapshot_readable_when_generation_commit_fails", async t => {
+  const userData = await createUserData(t);
+  const seeded = Array.from({ length: 2_000 }, (_, index) => createDiagnosticEvent(input({
+    code: `SAFE_${index}`,
+  })));
+  await seedGeneration(userData, seeded);
+  const injectedFileSystem = {
+    ...fileSystem,
+    async rename(source, destination) {
+      if (destination.endsWith("committed-000002")) throw new Error("injected commit failure");
+      return fileSystem.rename(source, destination);
+    },
+  };
+  const store = new DiagnosticStore({ userData, fileSystem: injectedFileSystem });
+
+  await assert.rejects(
+    store.append(input({ code: "MUST_NOT_COMMIT" })),
+    /injected commit failure/,
+  );
+  await store.close();
+
+  const reopened = new DiagnosticStore({ userData });
+  t.after(() => reopened.close());
+  const events = await reopened.list();
+  assert.equal(events.length, 2_000);
+  assert.equal(events[0].code, "SAFE_0");
+  assert.equal(events.at(-1).code, "SAFE_1999");
 });
 
 test("exports_a_readable_re_redacted_zip_without_document_bytes", async t => {
@@ -240,4 +359,24 @@ test("exports_a_readable_re_redacted_zip_without_document_bytes", async t => {
     }),
     error => error.code === "DOCUMENT_BYTES_NOT_ALLOWED",
   );
+});
+
+test("exports_only_the_newest_2000_events", async t => {
+  const userData = await createUserData(t);
+  const destination = join(userData, "bounded.zip");
+  const events = Array.from({ length: 2_005 }, (_, index) => ({
+    ...input({ code: `EXPORT_${index}` }),
+    id: `id-${index}`,
+    timestamp: new Date(index).toISOString(),
+  }));
+
+  await exportDiagnosticBundle({ events, environment: {}, destination });
+
+  const archive = await JSZip.loadAsync(await readFile(destination));
+  const exportedEvents = JSON.parse(await archive.file("events.json").async("string"));
+  const manifest = JSON.parse(await archive.file("manifest.json").async("string"));
+  assert.equal(exportedEvents.length, 2_000);
+  assert.equal(exportedEvents[0].code, "EXPORT_5");
+  assert.equal(exportedEvents.at(-1).code, "EXPORT_2004");
+  assert.equal(manifest.eventCount, 2_000);
 });

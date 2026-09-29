@@ -1,21 +1,28 @@
-import {
-  appendFile,
-  mkdir,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import * as nodeFileSystem from "node:fs/promises";
 import { join } from "node:path";
 
 import { createDiagnosticEvent } from "./events.mjs";
+import { redactDiagnosticValue } from "./redact.mjs";
 
 const MAX_EVENTS = 2_000;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_FILES = 5;
-const FILE_PATTERN = /^events-(\d{6})\.jsonl$/;
+const EVENT_FILE_PATTERN = /^events-(\d{6})-(\d{6})\.jsonl$/;
+const LEGACY_FILE_PATTERN = /^events-(\d{6})\.jsonl$/;
+const COMMIT_MARKER_PATTERN = /^committed-(\d{6})$/;
+
+function generationName(generation) {
+  return String(generation).padStart(6, "0");
+}
+
+function eventFileName(generation, fileNumber) {
+  return `events-${generationName(generation)}-${String(fileNumber).padStart(6, "0")}.jsonl`;
+}
+
+function commitMarkerName(generation) {
+  return `committed-${generationName(generation)}`;
+}
 
 function parseJsonLines(contents) {
   const events = [];
@@ -28,6 +35,36 @@ function parseJsonLines(contents) {
     }
   }
   return events;
+}
+
+function boundedEvent(event) {
+  const safeEvent = redactDiagnosticValue(event);
+  let line = `${JSON.stringify(safeEvent)}\n`;
+  if (Buffer.byteLength(line) <= MAX_FILE_BYTES) return { event: safeEvent, line };
+
+  const replacement = {
+    id: typeof safeEvent?.id === "string" && safeEvent.id.length <= 64
+      ? safeEvent.id
+      : "oversized-event",
+    timestamp: typeof safeEvent?.timestamp === "string" && safeEvent.timestamp.length <= 64
+      ? safeEvent.timestamp
+      : "1970-01-01T00:00:00.000Z",
+    level: "error",
+    tool: "diagnostics",
+    stage: "persistence",
+    code: "DIAGNOSTIC_EVENT_TOO_LARGE",
+    message: "Diagnostic event exceeded the storage limit and was replaced.",
+    technical: "[TRUNCATED]",
+    durationMs: null,
+    metadata: { redacted: true, reason: "DIAGNOSTIC_EVENT_TOO_LARGE" },
+  };
+  line = `${JSON.stringify(replacement)}\n`;
+  if (Buffer.byteLength(line) > MAX_FILE_BYTES) {
+    throw Object.assign(new Error("Unable to bound diagnostic event."), {
+      code: "DIAGNOSTIC_BOUNDING_FAILED",
+    });
+  }
+  return { event: replacement, line };
 }
 
 function matchesFilters(event, filters) {
@@ -47,38 +84,115 @@ export class DiagnosticStore {
   #currentSize = 0;
   #directory;
   #events = [];
+  #fileSystem;
+  #generation = 0;
   #nextFileNumber = 1;
   #queue = Promise.resolve();
   #ready;
 
-  constructor({ userData } = {}) {
+  constructor({ userData, fileSystem = nodeFileSystem } = {}) {
     if (typeof userData !== "string" || !userData) {
       throw new TypeError("userData is required.");
     }
     this.#directory = join(userData, "diagnostics");
+    this.#fileSystem = fileSystem;
     this.#ready = this.#initialize();
   }
 
-  async #initialize() {
-    await mkdir(this.#directory, { recursive: true });
-    const files = await this.#files();
-    for (const file of files) {
-      this.#events.push(...parseJsonLines(await readFile(join(this.#directory, file), "utf8")));
-    }
-    this.#events = this.#events.slice(-MAX_EVENTS);
+  async #directoryEntries() {
+    return this.#fileSystem.readdir(this.#directory, { withFileTypes: true });
+  }
 
-    if (files.length > 0) {
-      const last = files.at(-1);
-      this.#currentFile = join(this.#directory, last);
-      this.#currentSize = (await stat(this.#currentFile)).size;
-      this.#nextFileNumber = Number(FILE_PATTERN.exec(last)[1]) + 1;
+  async #committedGenerations() {
+    return (await this.#directoryEntries())
+      .filter(entry => entry.isFile() && COMMIT_MARKER_PATTERN.test(entry.name))
+      .map(entry => Number(COMMIT_MARKER_PATTERN.exec(entry.name)[1]))
+      .sort((left, right) => left - right);
+  }
+
+  async #files(generation = this.#generation) {
+    return (await this.#directoryEntries())
+      .filter(entry => {
+        if (!entry.isFile()) return false;
+        const match = EVENT_FILE_PATTERN.exec(entry.name);
+        return match && Number(match[1]) === generation;
+      })
+      .map(entry => entry.name)
+      .sort();
+  }
+
+  async #legacyFiles() {
+    return (await this.#directoryEntries())
+      .filter(entry => entry.isFile() && LEGACY_FILE_PATTERN.test(entry.name))
+      .map(entry => entry.name)
+      .sort();
+  }
+
+  async #readFiles(files) {
+    const events = [];
+    for (const file of files) {
+      events.push(...parseJsonLines(await this.#fileSystem.readFile(join(this.#directory, file), "utf8")));
+    }
+    return events;
+  }
+
+  async #writeCommitMarker(generation) {
+    const marker = commitMarkerName(generation);
+    const temporary = `${marker}.${randomUUID()}.tmp`;
+    const temporaryPath = join(this.#directory, temporary);
+    try {
+      await this.#fileSystem.writeFile(temporaryPath, "", { flag: "wx" });
+      await this.#fileSystem.rename(temporaryPath, join(this.#directory, marker));
+    } catch (error) {
+      await this.#fileSystem.rm(temporaryPath, { force: true }).catch(() => {});
+      throw error;
     }
   }
 
-  async #files() {
-    return (await readdir(this.#directory))
-      .filter(name => FILE_PATTERN.test(name))
-      .sort();
+  async #initialize() {
+    await this.#fileSystem.mkdir(this.#directory, { recursive: true });
+    const committed = await this.#committedGenerations();
+    const legacyFiles = committed.length === 0 ? await this.#legacyFiles() : [];
+
+    if (committed.length === 0 && legacyFiles.length > 0) {
+      this.#events = (await this.#readFiles(legacyFiles)).slice(-MAX_EVENTS);
+      await this.#commitSnapshot(this.#events);
+      return;
+    }
+
+    if (committed.length === 0) {
+      this.#generation = 1;
+      await this.#writeCommitMarker(this.#generation);
+    } else {
+      this.#generation = committed.at(-1);
+    }
+
+    const files = await this.#files();
+    while (files.length > MAX_FILES) {
+      await this.#fileSystem.rm(join(this.#directory, files.shift()), { force: true });
+    }
+    this.#events = (await this.#readFiles(files)).slice(-MAX_EVENTS);
+    if (files.length > 0) {
+      const last = files.at(-1);
+      const match = EVENT_FILE_PATTERN.exec(last);
+      this.#currentFile = join(this.#directory, last);
+      this.#currentSize = (await this.#fileSystem.stat(this.#currentFile)).size;
+      this.#nextFileNumber = Number(match[2]) + 1;
+    }
+    await this.#cleanupInactiveGenerations();
+  }
+
+  async #cleanupInactiveGenerations() {
+    for (const entry of await this.#directoryEntries()) {
+      if (!entry.isFile()) continue;
+      const eventMatch = EVENT_FILE_PATTERN.exec(entry.name);
+      const markerMatch = COMMIT_MARKER_PATTERN.exec(entry.name);
+      const inactiveEvent = eventMatch && Number(eventMatch[1]) !== this.#generation;
+      const inactiveMarker = markerMatch && Number(markerMatch[1]) !== this.#generation;
+      if (inactiveEvent || inactiveMarker || LEGACY_FILE_PATTERN.test(entry.name) || entry.name.endsWith(".tmp")) {
+        await this.#fileSystem.rm(join(this.#directory, entry.name), { force: true }).catch(() => {});
+      }
+    }
   }
 
   #enqueue(operation) {
@@ -88,101 +202,86 @@ export class DiagnosticStore {
   }
 
   async #startFile() {
-    const name = `events-${String(this.#nextFileNumber).padStart(6, "0")}.jsonl`;
+    const name = eventFileName(this.#generation, this.#nextFileNumber);
     this.#nextFileNumber += 1;
     this.#currentFile = join(this.#directory, name);
     this.#currentSize = 0;
-    await writeFile(this.#currentFile, "", { flag: "wx" });
+    await this.#fileSystem.writeFile(this.#currentFile, "", { flag: "wx" });
 
     const files = await this.#files();
     let removedHistory = false;
     while (files.length > MAX_FILES) {
-      await rm(join(this.#directory, files.shift()), { force: true });
+      await this.#fileSystem.rm(join(this.#directory, files.shift()), { force: true });
       removedHistory = true;
     }
-    if (removedHistory) {
-      this.#events = [];
-      for (const file of files) {
-        this.#events.push(...parseJsonLines(await readFile(join(this.#directory, file), "utf8")));
-      }
-    }
+    if (removedHistory) this.#events = await this.#readFiles(files);
   }
 
-  async #writeSnapshot() {
+  async #commitSnapshot(events) {
+    const generation = this.#generation + 1;
     const chunks = [];
-    let current = "";
-    let currentBytes = 0;
-    for (const event of this.#events) {
-      let line = `${JSON.stringify(event)}\n`;
-      let bytes = Buffer.byteLength(line);
-      if (bytes > MAX_FILE_BYTES) {
-        line = `${JSON.stringify({
-          ...event,
-          technical: "[TRUNCATED]",
-          metadata: { redacted: true, reason: "DIAGNOSTIC_EVENT_TOO_LARGE" },
-        })}\n`;
-        bytes = Buffer.byteLength(line);
-      }
-      if (current && currentBytes + bytes > MAX_FILE_BYTES) {
+    let current = { contents: "", bytes: 0, events: [] };
+    for (const sourceEvent of events) {
+      const encoded = boundedEvent(sourceEvent);
+      const bytes = Buffer.byteLength(encoded.line);
+      if (current.contents && current.bytes + bytes > MAX_FILE_BYTES) {
         chunks.push(current);
-        current = "";
-        currentBytes = 0;
+        current = { contents: "", bytes: 0, events: [] };
       }
-      current += line;
-      currentBytes += bytes;
+      current.contents += encoded.line;
+      current.bytes += bytes;
+      current.events.push(encoded.event);
     }
-    if (current || chunks.length === 0) chunks.push(current);
+    if (current.contents || chunks.length === 0) chunks.push(current);
     const retainedChunks = chunks.slice(-MAX_FILES);
+    const createdFiles = [];
 
-    const existing = await this.#files();
-    const temporary = [];
-    for (let index = 0; index < retainedChunks.length; index += 1) {
-      const number = this.#nextFileNumber + index;
-      const finalName = `events-${String(number).padStart(6, "0")}.jsonl`;
-      const temporaryName = `${finalName}.tmp`;
-      await writeFile(join(this.#directory, temporaryName), retainedChunks[index], { flag: "wx" });
-      temporary.push({ temporaryName, finalName });
-    }
-    for (const name of existing) await rm(join(this.#directory, name), { force: true });
-    for (const file of temporary) {
-      await rename(join(this.#directory, file.temporaryName), join(this.#directory, file.finalName));
+    try {
+      for (let index = 0; index < retainedChunks.length; index += 1) {
+        const name = eventFileName(generation, index + 1);
+        await this.#fileSystem.writeFile(
+          join(this.#directory, name),
+          retainedChunks[index].contents,
+          { flag: "wx" },
+        );
+        createdFiles.push(name);
+      }
+      await this.#writeCommitMarker(generation);
+    } catch (error) {
+      for (const name of createdFiles) {
+        await this.#fileSystem.rm(join(this.#directory, name), { force: true }).catch(() => {});
+      }
+      throw error;
     }
 
-    this.#nextFileNumber += retainedChunks.length;
-    const last = temporary.at(-1);
-    this.#currentFile = join(this.#directory, last.finalName);
-    this.#currentSize = Buffer.byteLength(retainedChunks.at(-1));
-    this.#events = retainedChunks.flatMap(parseJsonLines);
+    this.#generation = generation;
+    this.#events = retainedChunks.flatMap(chunk => chunk.events);
+    const last = createdFiles.at(-1);
+    this.#currentFile = join(this.#directory, last);
+    this.#currentSize = retainedChunks.at(-1).bytes;
+    this.#nextFileNumber = retainedChunks.length + 1;
+    await this.#cleanupInactiveGenerations();
   }
 
   append(input) {
     if (this.#closed) return Promise.reject(new Error("Diagnostic store is closed."));
     return this.#enqueue(async () => {
       await this.#ready;
-      const event = createDiagnosticEvent(input);
-      let line = `${JSON.stringify(event)}\n`;
-      if (Buffer.byteLength(line) > MAX_FILE_BYTES) {
-        const bounded = {
-          ...event,
-          technical: "[TRUNCATED]",
-          metadata: { redacted: true, reason: "DIAGNOSTIC_EVENT_TOO_LARGE" },
-        };
-        line = `${JSON.stringify(bounded)}\n`;
-      }
-      const lineBytes = Buffer.byteLength(line);
+      const encoded = boundedEvent(createDiagnosticEvent(input));
 
+      if (this.#events.length >= MAX_EVENTS) {
+        await this.#commitSnapshot([...this.#events, encoded.event].slice(-MAX_EVENTS));
+        return this.#events.at(-1);
+      }
+
+      const lineBytes = Buffer.byteLength(encoded.line);
       if (!this.#currentFile || this.#currentSize + lineBytes > MAX_FILE_BYTES) {
         await this.#startFile();
       }
-      await appendFile(this.#currentFile, line, "utf8");
+      await this.#fileSystem.appendFile(this.#currentFile, encoded.line, "utf8");
       this.#currentSize += lineBytes;
-      this.#events.push(JSON.parse(line));
-
-      if (this.#events.length > MAX_EVENTS) {
-        this.#events = this.#events.slice(-MAX_EVENTS);
-        await this.#writeSnapshot();
-      }
-      return this.#events.at(-1);
+      this.#events.push(encoded.event);
+      return encoded.event;
     });
   }
 
@@ -191,6 +290,7 @@ export class DiagnosticStore {
     await this.#queue;
     const filtered = this.#events.filter(event => matchesFilters(event, filters));
     const limit = Number.isInteger(filters.limit) && filters.limit >= 0 ? filters.limit : filtered.length;
+    if (limit === 0) return [];
     return structuredClone(filtered.slice(-limit));
   }
 
@@ -198,12 +298,14 @@ export class DiagnosticStore {
     if (this.#closed) return Promise.reject(new Error("Diagnostic store is closed."));
     return this.#enqueue(async () => {
       await this.#ready;
-      await rm(this.#directory, { recursive: true, force: true });
-      await mkdir(this.#directory, { recursive: true });
+      await this.#fileSystem.rm(this.#directory, { recursive: true, force: true });
+      await this.#fileSystem.mkdir(this.#directory, { recursive: true });
       this.#events = [];
       this.#currentFile = undefined;
       this.#currentSize = 0;
+      this.#generation += 1;
       this.#nextFileNumber = 1;
+      await this.#writeCommitMarker(this.#generation);
     });
   }
 
