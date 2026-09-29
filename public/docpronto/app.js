@@ -2229,8 +2229,7 @@ async function pdfToAbrasfXml([file]) {
   const text = lines.join("\n");
   const cancellation = detectNfseCancellation(text);
   if (cancellation.cancelled) {
-    const details = [cancellation.date && `em ${cancellation.date}`, cancellation.reason && `motivo: ${cancellation.reason}`].filter(Boolean).join(" · ");
-    throw new Error(`Esta NFS-e está cancelada${details ? ` (${details})` : ""}. O DOCPronto não gera CompNfse ativa para documento cancelado.`);
+    throw createNfseCancellationError(cancellation);
   }
   const invoice = parseSupportedNfse(rawLines, text);
   validateAbrasfInvoice(invoice, document.querySelector("#abrasfStrictValidation")?.checked !== false);
@@ -2250,6 +2249,13 @@ function detectNfseCancellation(text) {
   const cancelled = [watermark, Boolean(dateMatch), status, protocol].filter(Boolean).length >= 2;
   const reason = cancelled ? (source.match(/Motivo(?:\s+d[oa]\s+Cancelamento)?\s*[:\-]?\s*([^\n]{3,240})/i) || [])[1]?.trim() || "" : "";
   return { cancelled, date: dateMatch?.[1] || "", reason };
+}
+
+function createNfseCancellationError() {
+  return createSafeParserError(
+    "NFSE_CANCELLED",
+    "Esta NFS-e está cancelada. O DOCPronto não gera CompNfse ativa para documento cancelado."
+  );
 }
 
 function parseSupportedNfse(rawLines, text) {
@@ -2725,14 +2731,14 @@ function validateAbrasfInvoice(invoice, strict) {
   const retentionTotal = Object.values(invoice.retentions).reduce((sum, value) => sum + Number(value || 0), 0);
   const expectedNet = roundFiscal(invoice.total - retentionTotal);
   if (strict && Math.abs(expectedNet - invoice.net) > 0.02) {
-    throw new Error(`Os valores não fecham: bruto ${formatMoney(invoice.total)}, retenções ${formatMoney(retentionTotal)} e líquido ${formatMoney(invoice.net)}.`);
+    throw createSafeParserError("NFSE_TOTALS_MISMATCH", "Os valores fiscais da NFS-e não conferem. Revise o documento antes de gerar o XML.");
   }
   if (strict && invoice.item.rate <= 0) throw new Error("Não foi possível identificar uma alíquota positiva do serviço.");
   if (strict && Number.isFinite(invoice.base) && Number.isFinite(invoice.deductions) && Math.abs(roundFiscal(invoice.total - invoice.deductions) - invoice.base) > 0.02) {
-    throw new Error(`Valor do serviço (${formatMoney(invoice.total)}), deduções (${formatMoney(invoice.deductions)}) e base de cálculo (${formatMoney(invoice.base)}) não conferem.`);
+    throw createSafeParserError("NFSE_BASE_MISMATCH", "Os valores fiscais da NFS-e não conferem. Revise o documento antes de gerar o XML.");
   }
   if (strict && Number.isFinite(invoice.iss) && Math.abs(roundFiscal(invoice.base * invoice.item.rate / 100) - invoice.iss) > 0.02) {
-    throw new Error(`Base (${formatMoney(invoice.base)}), alíquota (${Number(invoice.item.rate).toFixed(2)}%) e ISSQN (${formatMoney(invoice.iss)}) não conferem.`);
+    throw createSafeParserError("NFSE_ISS_MISMATCH", "Os valores fiscais da NFS-e não conferem. Revise o documento antes de gerar o XML.");
   }
 }
 
@@ -3288,9 +3294,9 @@ function parseOfx(rawText) {
     const rawDate = ofxTag(block, "DTPOSTED") || ofxTag(block, "DTUSER");
     let amount;
     try { amount = parseOfxNumber(rawAmount); }
-    catch { throw new Error(`Valor inválido no lançamento ${index + 1}${fitId ? ` (${fitId})` : ""}: ${rawAmount || "vazio"}.`); }
+    catch { throw createSafeParserError("OFX_TRANSACTION_AMOUNT_INVALID", `O valor do lançamento ${index + 1} é inválido. Corrija o arquivo de origem antes de converter.`); }
     const date = normalizeOfxDate(rawDate);
-    if (!date) throw new Error(`Data inválida no lançamento ${index + 1}${fitId ? ` (${fitId})` : ""}: ${rawDate || "vazia"}.`);
+    if (!date) throw createSafeParserError("OFX_TRANSACTION_DATE_INVALID", `A data do lançamento ${index + 1} é inválida. Corrija o arquivo de origem antes de converter.`);
     return { type: ofxTag(block, "TRNTYPE"), date, amount, fitId, checkNumber: ofxTag(block, "CHECKNUM") || ofxTag(block, "REFNUM"), name: decodeOfxEntities(ofxTag(block, "NAME")), memo: decodeOfxEntities(ofxTag(block, "MEMO")) };
   });
   if (!transactions.length) throw new Error("Nenhuma transação bancária foi encontrada no OFX.");
@@ -3298,11 +3304,11 @@ function parseOfx(rawText) {
   let balance = null;
   if (balanceRaw) {
     try { balance = parseOfxNumber(balanceRaw); }
-    catch { throw new Error(`O saldo informado no OFX é inválido: ${balanceRaw}.`); }
+    catch { throw createSafeParserError("OFX_BALANCE_INVALID", "O saldo informado no OFX é inválido. Corrija o arquivo de origem antes de converter."); }
   }
   const fitIds = new Set();
   for (const item of transactions) {
-    if (item.fitId && fitIds.has(item.fitId)) throw new Error(`O OFX contém FITID duplicado: ${item.fitId}. Corrija a origem antes de converter.`);
+    if (item.fitId && fitIds.has(item.fitId)) throw createSafeParserError("OFX_DUPLICATE_FITID", "O OFX contém identificadores de lançamento duplicados. Corrija o arquivo de origem antes de converter.");
     if (item.fitId) fitIds.add(item.fitId);
   }
   return {
@@ -3361,6 +3367,12 @@ function parseOfxNumber(value) {
   const number = Number(normalized);
   if (!Number.isFinite(number)) throw new Error("Valor OFX inválido.");
   return number;
+}
+
+function createSafeParserError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
 }
 
 function normalizeOfxDate(value) {
