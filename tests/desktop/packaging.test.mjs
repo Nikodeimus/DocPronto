@@ -82,6 +82,28 @@ test("builder habilita Authenticode somente com certificado senha e publisherNam
   );
 });
 
+test("builder exige assinatura de codigo quando a release declara require-signed", () => {
+  const environment = {
+    CSC_LINK: "base64-cert",
+    CSC_KEY_PASSWORD: "secret",
+    DOCPRONTO_PUBLISHER_NAME: "DOCPronto Software Ltda",
+    DOCPRONTO_REQUIRE_SIGNED: "true",
+  };
+  const required = resolveBuilderConfig("stable", projectDir, environment);
+  assert.equal(required.forceCodeSigning, true);
+
+  const optional = resolveBuilderConfig("stable", projectDir, {
+    ...environment,
+    DOCPRONTO_REQUIRE_SIGNED: "false",
+  });
+  assert.equal(optional.forceCodeSigning, false);
+
+  assert.throws(
+    () => resolveBuilderConfig("stable", projectDir, { DOCPRONTO_REQUIRE_SIGNED: "true" }),
+    error => error.code === "RELEASE_SIGNING_REQUIRED",
+  );
+});
+
 test("executavel_empacotado_descobre_o_canal_sem_argumento_ou_ambiente", async () => {
   const main = await readFile(join(projectDir, "desktop", "main.mjs"), "utf8");
   assert.match(main, /packageMetadata\.docprontoChannel/);

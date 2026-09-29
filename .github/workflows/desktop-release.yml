@@ -41,12 +41,6 @@ jobs:
       - name: Generate release metadata and SHA-256
         shell: pwsh
         run: |
-          $files = Get-ChildItem release/lab -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap' }
-          $hashes = $files | ForEach-Object {
-            $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
-            [pscustomobject]@{ file = $_.Name; sha256 = $hash.Hash.ToLowerInvariant() }
-          }
-          $hashes | ConvertTo-Json | Set-Content release/lab/sha256.json -Encoding utf8
           [pscustomobject]@{
             channel = '${{ steps.release.outputs.feed }}'
             version = '${{ steps.release.outputs.version }}'
@@ -57,6 +51,12 @@ jobs:
             signed = [System.Convert]::ToBoolean('${{ steps.release.outputs.signed }}')
             publisherNames = ConvertFrom-Json '${{ steps.release.outputs.publisher_names }}'
           } | ConvertTo-Json | Set-Content release/lab/release-metadata.json -Encoding utf8
+          $files = Get-ChildItem release/lab -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap', '.json' } | Where-Object { $_.Name -ne 'sha256.json' }
+          $hashes = $files | ForEach-Object {
+            $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+            [pscustomobject]@{ file = $_.Name; sha256 = $hash.Hash.ToLowerInvariant() }
+          }
+          $hashes | ConvertTo-Json | Set-Content release/lab/sha256.json -Encoding utf8
       - name: Stage Laboratory release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -82,6 +82,27 @@ jobs:
         with:
           name: docpronto-laboratory-${{ github.sha }}
           path: release/lab
+      - name: Verify downloaded SHA-256 manifest
+        shell: pwsh
+        run: |
+          $directory = 'release/lab'
+          $manifest = @(Get-Content release/lab/sha256.json -Raw | ConvertFrom-Json)
+          if ($manifest.Count -eq 0) { throw 'SHA-256 manifest is empty.' }
+          $manifestNames = @{}
+          foreach ($entry in $manifest) {
+            if ([IO.Path]::GetFileName($entry.file) -ne $entry.file -or $entry.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+              throw 'SHA-256 manifest contains an invalid entry.'
+            }
+            if ($manifestNames.ContainsKey($entry.file)) { throw "Duplicate manifest entry: $($entry.file)." }
+            $manifestNames[$entry.file] = $true
+            $path = Join-Path $directory $entry.file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Manifest file is missing: $($entry.file)." }
+            $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $entry.sha256) { throw "SHA-256 mismatch: $($entry.file)." }
+          }
+          $payload = @(Get-ChildItem $directory -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap', '.json' } | Where-Object { $_.Name -ne 'sha256.json' })
+          $differences = @(Compare-Object @($manifestNames.Keys | Sort-Object) @($payload.Name | Sort-Object))
+          if ($differences.Count -ne 0) { throw 'Downloaded release payload differs from its SHA-256 manifest.' }
       - name: Publish Laboratory prerelease
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -123,15 +144,23 @@ jobs:
           CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
           DOCPRONTO_PUBLISHER_NAME: ${{ secrets.WINDOWS_PUBLISHER_NAME }}
+          DOCPRONTO_REQUIRE_SIGNED: "true"
+      - name: Verify stable Authenticode signatures
+        shell: pwsh
+        run: |
+          $executables = @(Get-ChildItem release/stable -File -Filter *.exe)
+          if ($executables.Count -eq 0) {
+            throw 'Stable release produced no executable to verify.'
+          }
+          foreach ($executable in $executables) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $executable.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($executable.Name): $($signature.Status)."
+            }
+          }
       - name: Generate release metadata and SHA-256
         shell: pwsh
         run: |
-          $files = Get-ChildItem release/stable -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap' }
-          $hashes = $files | ForEach-Object {
-            $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
-            [pscustomobject]@{ file = $_.Name; sha256 = $hash.Hash.ToLowerInvariant() }
-          }
-          $hashes | ConvertTo-Json | Set-Content release/stable/sha256.json -Encoding utf8
           [pscustomobject]@{
             channel = '${{ steps.release.outputs.feed }}'
             version = '${{ steps.release.outputs.version }}'
@@ -142,6 +171,12 @@ jobs:
             signed = [System.Convert]::ToBoolean('${{ steps.release.outputs.signed }}')
             publisherNames = ConvertFrom-Json '${{ steps.release.outputs.publisher_names }}'
           } | ConvertTo-Json | Set-Content release/stable/release-metadata.json -Encoding utf8
+          $files = Get-ChildItem release/stable -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap', '.json' } | Where-Object { $_.Name -ne 'sha256.json' }
+          $hashes = $files | ForEach-Object {
+            $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+            [pscustomobject]@{ file = $_.Name; sha256 = $hash.Hash.ToLowerInvariant() }
+          }
+          $hashes | ConvertTo-Json | Set-Content release/stable/sha256.json -Encoding utf8
       - name: Stage stable release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -167,6 +202,27 @@ jobs:
         with:
           name: docpronto-stable-${{ github.sha }}
           path: release/stable
+      - name: Verify downloaded SHA-256 manifest
+        shell: pwsh
+        run: |
+          $directory = 'release/stable'
+          $manifest = @(Get-Content release/stable/sha256.json -Raw | ConvertFrom-Json)
+          if ($manifest.Count -eq 0) { throw 'SHA-256 manifest is empty.' }
+          $manifestNames = @{}
+          foreach ($entry in $manifest) {
+            if ([IO.Path]::GetFileName($entry.file) -ne $entry.file -or $entry.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+              throw 'SHA-256 manifest contains an invalid entry.'
+            }
+            if ($manifestNames.ContainsKey($entry.file)) { throw "Duplicate manifest entry: $($entry.file)." }
+            $manifestNames[$entry.file] = $true
+            $path = Join-Path $directory $entry.file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Manifest file is missing: $($entry.file)." }
+            $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $entry.sha256) { throw "SHA-256 mismatch: $($entry.file)." }
+          }
+          $payload = @(Get-ChildItem $directory -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap', '.json' } | Where-Object { $_.Name -ne 'sha256.json' })
+          $differences = @(Compare-Object @($manifestNames.Keys | Sort-Object) @($payload.Name | Sort-Object))
+          if ($differences.Count -ne 0) { throw 'Downloaded release payload differs from its SHA-256 manifest.' }
       - name: Publish stable release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:

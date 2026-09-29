@@ -285,3 +285,54 @@ test("actions do workflow de release usam somente SHAs imutaveis", async () => {
     assert.match(reference, /^[^@\s]+@[0-9a-f]{40}$/, reference);
   }
 });
+
+test("release estavel exige assinatura real antes de declarar signed true", async () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const workflow = await readFile(join(root, ".github", "workflows", "desktop-release.yml"), "utf8");
+  const build = workflowJob(workflow, "stable_build");
+
+  assert.match(build, /DOCPRONTO_REQUIRE_SIGNED:\s*["']true["']/);
+  assert.match(build, /Get-AuthenticodeSignature/);
+  assert.match(build, /\.Status\s+-ne\s+["']Valid["']/);
+  assert.match(build, /Get-ChildItem release\/stable -File -Filter \*\.exe/);
+  assert.ok(build.indexOf("Get-AuthenticodeSignature") < build.indexOf("Generate release metadata"));
+  assert.ok(build.indexOf("Get-AuthenticodeSignature") < build.indexOf("Stage stable release artifact"));
+});
+
+test("publicacao recalcula manifesto SHA-256 antes de enviar qualquer canal", async () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const workflow = await readFile(join(root, ".github", "workflows", "desktop-release.yml"), "utf8");
+
+  for (const [jobName, directory] of [
+    ["laboratory_publish", "lab"],
+    ["stable_publish", "stable"],
+  ]) {
+    const job = workflowJob(workflow, jobName);
+    assert.match(job, new RegExp(`Get-Content release/${directory}/sha256\\.json -Raw`));
+    assert.match(job, /ConvertFrom-Json/);
+    assert.match(job, /Get-FileHash -LiteralPath[^\n]+-Algorithm SHA256/);
+    assert.match(job, /if \(\$actualHash -ne \$entry\.sha256\)/);
+    assert.match(job, /Where-Object \{ \$_\.Extension -in '\.exe', '\.yml', '\.blockmap', '\.json' \}/);
+    assert.match(job, /Compare-Object/);
+    assert.match(job, /throw/);
+    assert.ok(job.indexOf("Verify downloaded SHA-256 manifest") < job.indexOf("action-gh-release"));
+  }
+});
+
+test("manifesto cobre metadados de release alem dos binarios e feeds", async () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const workflow = await readFile(join(root, ".github", "workflows", "desktop-release.yml"), "utf8");
+
+  for (const [buildJob, publishJob] of [
+    ["laboratory_build", "laboratory_publish"],
+    ["stable_build", "stable_publish"],
+  ]) {
+    const build = workflowJob(workflow, buildJob);
+    const publish = workflowJob(workflow, publishJob);
+    assert.ok(build.indexOf("release-metadata.json") < build.indexOf("Get-FileHash"));
+    assert.match(build, /\.Extension -in '\.exe', '\.yml', '\.blockmap', '\.json'/);
+    assert.match(build, /\$_.Name -ne 'sha256\.json'/);
+    assert.match(publish, /\.Extension -in '\.exe', '\.yml', '\.blockmap', '\.json'/);
+    assert.match(publish, /\$_.Name -ne 'sha256\.json'/);
+  }
+});

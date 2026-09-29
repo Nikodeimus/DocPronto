@@ -42,11 +42,13 @@ function resolveBuilderConfig(channel, projectDir = __dirname, environment = pro
   const identity = getChannelConfig(channel);
   const packageMetadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const releaseVersion = resolveChannelVersion(identity.channel, packageMetadata.version);
-  const signing = validateSigningEnvironment({ channel: identity.channel, environment });
+  const requireSigned = environment?.DOCPRONTO_REQUIRE_SIGNED?.trim() === "true";
+  const signing = validateSigningEnvironment({ channel: identity.channel, environment, requireSigned });
   const artifactPrefix = identity.isLab ? "DOCPronto-Laboratorio" : "DOCPronto";
   return {
     appId: identity.appId,
     productName: identity.productName,
+    forceCodeSigning: requireSigned,
     asar: { smartUnpack: false },
     npmRebuild: false,
     electronVersion: "44.4.5",
