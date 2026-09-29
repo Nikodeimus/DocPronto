@@ -2,6 +2,7 @@
   "name": "docpronto-online",
   "version": "0.1.0",
   "private": true,
+  "main": "desktop/main.mjs",
   "engines": {
     "node": ">=22.13.0"
   },
