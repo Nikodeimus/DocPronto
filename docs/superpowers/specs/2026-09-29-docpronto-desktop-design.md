@@ -194,11 +194,35 @@ Durante a migracao, a pasta local existente permanece como referencia e recupera
 - Uma release aprovada pode ser publicada e detectada automaticamente.
 - Testes automatizados, smoke test empacotado e revisao de seguranca passam.
 
+## Fase 2: motor de documentos independente do Word
+
+Depois que o aplicativo Desktop e seus dois canais estiverem estaveis, o projeto passara a remover a dependencia obrigatoria do Microsoft Word. O objetivo e oferecer conversao DOCX/PDF controlada pelo DOCPronto, sem construir do zero um interpretador de documentos complexo e menos confiavel.
+
+O primeiro motor independente combinara componentes consolidados, com LibreOffice em modo interno como candidato principal e bibliotecas especializadas para inspecao, normalizacao e validacao de DOCX e PDF. Esses componentes ficarao encapsulados por uma interface do DOCPronto, permitindo trocar ou combinar motores sem alterar a interface do usuario.
+
+Durante a transicao, o Laboratorio podera executar o motor independente e o Microsoft Word sobre a mesma amostra autorizada. A homologacao comparara:
+
+- numero, tamanho e orientacao das paginas;
+- texto, tabelas, imagens, cabecalhos e rodapes;
+- fontes substituidas e quebras de linha ou pagina;
+- campos, links e elementos nao suportados;
+- tempo, memoria e tamanho da saida;
+- diferenca visual renderizada por pagina.
+
+O DOCPronto selecionara o motor independente por padrao somente quando os criterios de fidelidade e integridade forem atendidos. Enquanto houver lacunas relevantes, o Word permanecera como alternativa opcional para computadores que o possuam. A interface sempre informara qual motor foi usado e qualquer limitacao detectada.
+
+Esta fase sera considerada concluida quando:
+
+- Word para PDF e PDF para Word funcionarem em uma maquina sem Microsoft Word;
+- os arquivos de regressao aprovados mantiverem texto, imagens e estrutura dentro dos limites definidos na homologacao;
+- falhas ou recursos nao suportados forem informados antes do download;
+- o motor independente estiver incluido no instalador e no portatil, com licencas de terceiros documentadas;
+- a escolha automatica de motor e a alternativa opcional estiverem cobertas por testes.
+
 ## Fora de escopo
 
 - licenciamento, ativacao, pagamentos e bloqueio comercial;
 - sincronizacao de documentos em nuvem;
 - envio automatico de diagnosticos;
 - suporte a macOS ou Linux;
-- substituicao do Microsoft Word por um motor proprio;
 - exposicao do servico local para outros computadores da rede.
