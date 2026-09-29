@@ -40,6 +40,13 @@ test("configura_identidades_e_artefatos_distintos_por_canal", () => {
   assert.equal(lab.portable.artifactName, "DOCPronto-Laboratorio-Portable-${version}-${arch}.${ext}");
   assert.equal(lab.directories.output, join(projectDir, "release", "lab"));
   assert.equal(lab.extraMetadata.docprontoChannel, "lab");
+  assert.deepEqual(lab.publish, [{
+    provider: "github",
+    owner: "nikodeimus",
+    repo: "DocPronto",
+    channel: "lab",
+    releaseType: "prerelease",
+  }]);
 
   assert.equal(stable.appId, "br.com.docpronto.desktop");
   assert.equal(stable.productName, "DOCPronto");
@@ -48,6 +55,8 @@ test("configura_identidades_e_artefatos_distintos_por_canal", () => {
   assert.equal(stable.portable.artifactName, "DOCPronto-Portable-${version}-${arch}.${ext}");
   assert.equal(stable.directories.output, join(projectDir, "release", "stable"));
   assert.equal(stable.extraMetadata.docprontoChannel, "stable");
+  assert.equal(stable.publish[0].channel, "latest");
+  assert.equal(stable.publish[0].releaseType, "release");
 });
 
 test("executavel_empacotado_descobre_o_canal_sem_argumento_ou_ambiente", async () => {

@@ -10,6 +10,7 @@ import { DiagnosticStore } from "./diagnostics/store.mjs";
 import { exportDiagnosticBundle } from "./diagnostics/export.mjs";
 import { resolveRuntimeChannel } from "./config/channel.mjs";
 import { createDesktopRuntime } from "./runtime.mjs";
+import { createUpdateManager } from "./update/manager.mjs";
 import { startDocProntoService } from "./service/server.mjs";
 import { listWindowsCertificates } from "./service/windows-capabilities.mjs";
 
@@ -36,16 +37,6 @@ async function checkServiceHealth({ origin }) {
   }
 }
 
-const updateManager = {
-  async initialize({ channelConfig }) {
-    if (!app.isPackaged) return;
-    const { autoUpdater } = electronUpdater;
-    autoUpdater.channel = channelConfig.updateChannel;
-    autoUpdater.autoDownload = false;
-    await autoUpdater.checkForUpdatesAndNotify();
-  },
-};
-
 const runtime = createDesktopRuntime({
   app,
   BrowserWindow,
@@ -54,7 +45,10 @@ const runtime = createDesktopRuntime({
   channel,
   startService: startDocProntoService,
   createStore: options => new DiagnosticStore(options),
-  updateManager,
+  createUpdateManager: options => {
+    if (!app.isPackaged) return { start: async () => false, dispose() {} };
+    return createUpdateManager({ ...options, autoUpdater: electronUpdater.autoUpdater });
+  },
   exportDiagnostics: exportDiagnosticBundle,
   chooseDiagnosticDestination: async ({ window }) => {
     const date = new Date().toISOString().slice(0, 10);

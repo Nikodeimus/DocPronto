@@ -54,6 +54,13 @@ function resolveBuilderConfig(channel, projectDir = __dirname) {
       main: "desktop/main.mjs",
       docprontoChannel: identity.channel,
     },
+    publish: [{
+      provider: "github",
+      owner: "nikodeimus",
+      repo: "DocPronto",
+      channel: identity.updateChannel,
+      releaseType: identity.isLab ? "prerelease" : "release",
+    }],
     win: {
       icon: join(root, "build", identity.isLab ? "icon-lab.ico" : "icon.ico"),
       target: [

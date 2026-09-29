@@ -21,6 +21,7 @@
     "desktop:stable": "node scripts/desktop-command.mjs --channel stable",
     "desktop:dev": "node scripts/desktop-command.mjs --channel lab",
     "desktop:test": "node --test tests/desktop/*.test.mjs",
+    "desktop:test:update": "node --test tests/desktop/update-manager.test.mjs",
     "desktop:package:lab": "node scripts/build-desktop.mjs --channel lab",
     "desktop:package:stable": "node scripts/build-desktop.mjs --channel stable"
   },

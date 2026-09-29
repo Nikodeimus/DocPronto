@@ -84,7 +84,7 @@ export function createDesktopRuntime({
   shell,
   startService,
   createStore,
-  updateManager,
+  createUpdateManager,
   channel,
   createWindow = createMainWindow,
   exportDiagnostics,
@@ -100,6 +100,7 @@ export function createDesktopRuntime({
   let mainWindow;
   let service;
   let store;
+  let updateManager;
   let startPromise;
   let stopPromise;
   let lifecycleStopPromise;
@@ -210,7 +211,15 @@ export function createDesktopRuntime({
 
   async function initializeDeferredFeatures() {
     const operations = [
-      ["DESKTOP_UPDATE_INIT_FAILED", () => updateManager?.initialize?.({ channelConfig })],
+      ["DESKTOP_UPDATE_INIT_FAILED", async () => {
+        if (typeof createUpdateManager !== "function") return;
+        updateManager ??= createUpdateManager({
+          channelConfig,
+          appVersion: app.getVersion?.() ?? "unknown",
+          diagnostics: { append: recordDiagnostic },
+        });
+        await updateManager.start();
+      }],
       ["OPTIONAL_CAPABILITY_INIT_FAILED", () => initializeOptionalCapabilities({ channelConfig })],
     ];
     await Promise.all(operations.map(async ([code, operation]) => {
@@ -239,16 +248,19 @@ export function createDesktopRuntime({
       const currentService = service;
       const currentStore = store;
       const currentWindow = mainWindow;
+      const currentUpdateManager = updateManager;
       service = undefined;
       store = undefined;
       mainWindow = undefined;
       const cleanupOperations = [
+        () => currentUpdateManager?.dispose?.(),
         () => {
           if (currentWindow && !currentWindow.isDestroyed?.()) currentWindow.destroy?.();
         },
         () => currentService?.close?.(),
         () => currentStore?.close?.(),
       ];
+      updateManager = undefined;
       await Promise.allSettled(cleanupOperations.map(operation => Promise.resolve().then(operation)));
     })();
     return stopPromise;

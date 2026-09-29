@@ -1,0 +1,93 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "lab-v*"
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  laboratory:
+    if: startsWith(github.ref_name, 'lab-v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run desktop:test
+      - run: npm run desktop:package:lab
+      - name: Generate release metadata and SHA-256
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem release/lab -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap' }
+          $hashes = $files | ForEach-Object {
+            $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+            [pscustomobject]@{ file = $_.Name; sha256 = $hash.Hash.ToLowerInvariant() }
+          }
+          $hashes | ConvertTo-Json | Set-Content release/lab/sha256.json -Encoding utf8
+          [pscustomobject]@{
+            channel = 'lab'
+            tag = '${{ github.ref_name }}'
+            commit = '${{ github.sha }}'
+            prerelease = $true
+          } | ConvertTo-Json | Set-Content release/lab/release-metadata.json -Encoding utf8
+      - name: Publish Laboratory prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: |
+            release/lab/*.exe
+            release/lab/lab.yml
+            release/lab/*.blockmap
+            release/lab/sha256.json
+            release/lab/release-metadata.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  stable:
+    if: ${{ !startsWith(github.ref_name, 'lab-v') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run desktop:test
+      - run: npm run desktop:package:stable
+      - name: Generate release metadata and SHA-256
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem release/stable -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap' }
+          $hashes = $files | ForEach-Object {
+            $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+            [pscustomobject]@{ file = $_.Name; sha256 = $hash.Hash.ToLowerInvariant() }
+          }
+          $hashes | ConvertTo-Json | Set-Content release/stable/sha256.json -Encoding utf8
+          [pscustomobject]@{
+            channel = 'latest'
+            tag = '${{ github.ref_name }}'
+            commit = '${{ github.sha }}'
+            prerelease = $false
+          } | ConvertTo-Json | Set-Content release/stable/release-metadata.json -Encoding utf8
+      - name: Publish stable release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: false
+          files: |
+            release/stable/*.exe
+            release/stable/latest.yml
+            release/stable/*.blockmap
+            release/stable/sha256.json
+            release/stable/release-metadata.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -63,7 +63,7 @@ function createHarness({
     },
     removeHandler: name => ipcHandlers.delete(name),
   };
-  const calls = { service: 0, store: 0, window: 0, updater: 0, optional: 0, export: 0 };
+  const calls = { service: 0, store: 0, window: 0, updater: 0, updaterDispose: 0, optional: 0, export: 0 };
   const fatalErrors = [];
   return {
     app, store, service, window, diagnostics, ipcHandlers, calls, fatalErrors,
@@ -95,7 +95,15 @@ function createHarness({
         if (windowError) throw windowError;
         return window;
       },
-      updateManager: { async initialize() { calls.updater += 1; } },
+      createUpdateManager: ({ diagnostics, channelConfig, appVersion }) => {
+        assert.equal(channelConfig.updateChannel, "lab");
+        assert.equal(appVersion, "0.1.0");
+        assert.equal(typeof diagnostics.append, "function");
+        return {
+          async start() { calls.updater += 1; },
+          dispose() { calls.updaterDispose += 1; },
+        };
+      },
       initializeOptionalCapabilities: async () => {
         calls.optional += 1;
         if (optionalError) throw optionalError;
@@ -116,7 +124,7 @@ test("lock negado encerra sem criar servico, store ou janela", async () => {
   const runtime = createDesktopRuntime(harness.dependencies);
   await runtime.start();
   assert.equal(harness.app.quitCalls, 1);
-  assert.deepEqual(harness.calls, { service: 0, store: 0, window: 0, updater: 0, optional: 0, export: 0 });
+  assert.deepEqual(harness.calls, { service: 0, store: 0, window: 0, updater: 0, updaterDispose: 0, optional: 0, export: 0 });
 });
 
 test("lock aceito configura userData e inicia exatamente um servico", async () => {
@@ -180,6 +188,20 @@ test("capacidade opcional com falha nao impede a janela", async () => {
   assert.equal(harness.calls.window, 1);
   assert.equal(harness.calls.updater, 1);
   assert.ok(harness.diagnostics.some(event => event.code === "OPTIONAL_CAPABILITY_INIT_FAILED"));
+});
+
+test("atualizador inicia somente depois de ready-to-show e e descartado no stop", async () => {
+  const harness = createHarness();
+  const runtime = createDesktopRuntime(harness.dependencies);
+  await runtime.start();
+  assert.equal(harness.calls.updater, 0);
+
+  harness.window.emit("ready-to-show");
+  await runtime.optionalReady;
+  assert.equal(harness.calls.updater, 1);
+
+  await runtime.stop();
+  assert.equal(harness.calls.updaterDispose, 1);
 });
 
 test("falha ao iniciar servico registra codigo estavel e encerra", async () => {
