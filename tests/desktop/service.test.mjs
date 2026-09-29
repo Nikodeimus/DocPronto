@@ -33,11 +33,29 @@ function rawRequest({ port, path = "/", headers = {} }) {
   });
 }
 
+async function getAvailablePort() {
+  const probe = createServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = probe.address();
+  await new Promise((resolve, reject) => probe.close(error => error ? reject(error) : resolve()));
+  return port;
+}
+
 test("binds_only_to_loopback_with_an_ephemeral_port", async t => {
   const assetsRoot = await createAssets(t);
   await assert.rejects(
     startDocProntoService({ assetsRoot, host: "0.0.0.0" }),
     /loopback/i,
+  );
+  await assert.rejects(
+    startDocProntoService({ assetsRoot, port: await getAvailablePort() }).then(async service => {
+      await service.close();
+      return service;
+    }),
+    error => error.code === "INVALID_SERVICE_PORT",
   );
   const service = await startDocProntoService({ assetsRoot });
   t.after(() => service.close());

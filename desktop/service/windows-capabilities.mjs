@@ -44,6 +44,13 @@ function classifyOperationError(error, operation) {
   if (operation === "word" && /ENOENT|powershell|Word\.Application|COM|ActiveX/i.test(detail)) {
     return codedError("WORD_UNAVAILABLE", "Microsoft Word ou PowerShell nao esta disponivel.", error);
   }
+  if (operation === "certificate") {
+    return codedError(
+      "CERTIFICATE_PROVIDER_UNAVAILABLE",
+      "O provedor de certificados do Windows nao esta disponivel.",
+      error,
+    );
+  }
   return error;
 }
 
@@ -251,6 +258,12 @@ async function verifyDetachedWindowsSignature(thumbprint, content, signatureBase
 
 export async function signPdfWithWindowsCertificate(input, dependencies = {}) {
   const thumbprint = normalizeThumbprint(input?.thumbprint);
+  if (input?.placement?.coordinateSystem !== "pdf-points-v2") {
+    throw codedError(
+      "INVALID_SIGNATURE_PLACEMENT",
+      "A tela de posicionamento esta desatualizada. Escolha novamente a posicao da assinatura.",
+    );
+  }
   const pdf = decodeInput(input?.contentBase64);
   if (pdf.subarray(0, 5).toString("latin1") !== "%PDF-") {
     throw codedError("INVALID_INPUT", "A assinatura embutida esta disponivel para PDF.");
@@ -274,10 +287,59 @@ export async function signPdfWithWindowsCertificate(input, dependencies = {}) {
   }
   const output = Buffer.from(prepared.pdf);
   output.write(signatureHex.padEnd(prepared.placeholderHexLength, "0"), prepared.contentsHexStart, "ascii");
+  await validateSignedPdfOutput(output, prepared.byteRange, input.placement);
   return {
     filename: `${baseName(input?.filename)}-assinado.pdf`,
     contentBase64: output.toString("base64"),
   };
+}
+
+async function validateSignedPdfOutput(output, expectedByteRange, placement) {
+  try {
+    const source = output.toString("latin1");
+    if (output.subarray(0, 5).toString("latin1") !== "%PDF-" || !/%%EOF\s*$/.test(source)) {
+      throw new Error("O PDF assinado nao possui inicio ou termino validos.");
+    }
+
+    const rangeMatches = [...source.matchAll(/\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/g)];
+    const range = rangeMatches.at(-1)?.slice(1).map(Number);
+    if (!range || range.length !== 4 || range.some(value => !Number.isSafeInteger(value) || value < 0)) {
+      throw new Error("O PDF assinado nao contem ByteRange valido.");
+    }
+    if (range.some((value, index) => value !== expectedByteRange[index])
+      || range[0] !== 0 || range[1] >= range[2] || range[2] + range[3] !== output.length) {
+      throw new Error("A cobertura criptografica do PDF assinado esta incompleta.");
+    }
+    const excluded = output.subarray(range[1], range[2]).toString("ascii");
+    if (!/^<([0-9A-F]{2})+0*>$/.test(excluded)) {
+      throw new Error("O conteudo criptografico embutido no PDF esta invalido.");
+    }
+
+    const PDFLib = await loadPdfLibrary();
+    const document = await PDFLib.PDFDocument.load(output, {
+      ignoreEncryption: false,
+      throwOnInvalidObject: true,
+      updateMetadata: false,
+    });
+    const pageNumber = Number(placement?.page);
+    if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > document.getPageCount()) {
+      throw new Error("A pagina escolhida para a assinatura nao existe no PDF final.");
+    }
+    const page = document.getPage(pageNumber - 1);
+    const crop = typeof page.getCropBox === "function"
+      ? page.getCropBox()
+      : { x: 0, y: 0, ...page.getSize() };
+    const rect = normalizeSignaturePlacement(placement, crop);
+    const tolerance = 0.5;
+    if (rect.x < crop.x - tolerance || rect.y < crop.y - tolerance
+      || rect.x + rect.width > crop.x + crop.width + tolerance
+      || rect.y + rect.height > crop.y + crop.height + tolerance) {
+      throw new Error("A assinatura ficou fora da area visivel da pagina.");
+    }
+  } catch (error) {
+    if (error?.code === "INVALID_SIGNED_PDF") throw error;
+    throw codedError("INVALID_SIGNED_PDF", "O PDF assinado falhou na validacao local.", error);
+  }
 }
 
 let pdfLibrary;

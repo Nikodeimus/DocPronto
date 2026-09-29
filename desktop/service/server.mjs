@@ -63,6 +63,11 @@ export async function startDocProntoService({
   onDiagnostic,
 } = {}) {
   if (host !== LOOPBACK_HOST) throw new Error("DocPronto Desktop must bind only to the IPv4 loopback host.");
+  if (port !== 0) {
+    throw Object.assign(new Error("DocPronto Desktop requires an ephemeral service port."), {
+      code: "INVALID_SERVICE_PORT",
+    });
+  }
   if (!assetsRoot) throw new TypeError("assetsRoot is required.");
 
   const canonicalAssetsRoot = realpathSync(resolve(assetsRoot));
