@@ -312,6 +312,61 @@ test("redige referencias documentais completas com espacos maiusculas caminhos e
   assert.match(serialized, /\[ARQUIVO REDIGIDO\]|\[LOCAL REDIGIDO\]/);
 });
 
+test("redacao preserva prefixo e causa ao ocultar somente o nome documental", () => {
+  const result = sanitizeDiagnosticValue("Falha ao abrir FATURA 9927 org.pdf por formato inválido.");
+
+  assert.equal(result, "Falha ao abrir [ARQUIVO REDIGIDO] por formato inválido.");
+  for (const fragment of ["FATURA", "9927", "org.pdf"]) {
+    assert.equal(result.includes(fragment), false, `fragmento vazou: ${fragment}`);
+  }
+});
+
+test("redacao preserva a causa depois de caminhos Windows e UNC", () => {
+  const messages = [
+    "Falha em C:\\Users\\Financeiro\\Downloads\\FATURA 9927 org.pdf porque o arquivo está corrompido.",
+    "Falha em \\\\servidor\\financeiro\\CARTÃO PRATICO 01-26.PDF porque o arquivo está corrompido.",
+  ];
+
+  for (const message of messages) {
+    const result = sanitizeDiagnosticValue(message);
+    assert.equal(result, "Falha em [LOCAL REDIGIDO] porque o arquivo está corrompido.");
+    for (const fragment of ["FATURA", "9927", "org.pdf", "servidor", "financeiro", "CARTÃO", "PRATICO", "01-26.PDF"]) {
+      assert.equal(result.includes(fragment), false, `fragmento vazou: ${fragment}`);
+    }
+  }
+});
+
+test("redacao mantem pontuacao e conjuncao em listas de documentos", () => {
+  const result = sanitizeDiagnosticValue(
+    "Falharam FATURA 9927 org.pdf, FATURA 6805 org.PDF e CARTÃO PRATICO 01-26.pdf; revise os arquivos.",
+  );
+
+  assert.equal(
+    result,
+    "Falharam [ARQUIVO REDIGIDO], [ARQUIVO REDIGIDO] e [ARQUIVO REDIGIDO]; revise os arquivos.",
+  );
+  for (const fragment of ["FATURA", "9927", "6805", "org.pdf", "org.PDF", "CARTÃO", "PRATICO", "01-26.pdf"]) {
+    assert.equal(result.includes(fragment), false, `fragmento vazou: ${fragment}`);
+  }
+});
+
+test("redacao nao altera mensagens tecnicas comuns sem referencia documental", () => {
+  const messages = [
+    "A API retornou status 500 e versão 1.2.3.",
+    "O módulo parser falhou na etapa validate.",
+    "Falha HTTP em api.exemplo.com porque a conexão expirou.",
+  ];
+
+  for (const message of messages) assert.equal(sanitizeDiagnosticValue(message), message);
+});
+
+test("redacao de diagnostico permanece idempotente", () => {
+  const message = "Falha ao abrir FATURA 9927 org.pdf e C:\\Users\\Financeiro\\Downloads\\FATURA 6805 org.PDF por formato inválido.";
+  const once = sanitizeDiagnosticValue(message);
+
+  assert.equal(sanitizeDiagnosticValue(once), once);
+});
+
 test("createErrorReporter limita Estavel e entrega detalhes redigidos apenas ao Laboratorio", async () => {
   const stableEvents = [];
   const stableConsole = [];

@@ -2,8 +2,17 @@ const SENSITIVE_KEY = /(password|passphrase|pin|secret|token|private.?key|base64
 const DOCUMENT_EXTENSIONS = Object.freeze([
   ".docx", ".xlsx", ".jpeg", ".pdf", ".doc", ".xls", ".csv", ".ofx", ".xml", ".txt", ".jpg", ".png", ".pfx", ".p12",
 ]);
+const PATH_EXTENSIONS = Object.freeze([
+  ...DOCUMENT_EXTENSIONS, ".exe", ".dll", ".js", ".mjs", ".cjs", ".json", ".wasm", ".html", ".css", ".map",
+]);
 const PATH_END = new Set(["\r", "\n", "\"", "'", "<", ">", "|", ",", ";"]);
 const FILE_START = new Set(["\r", "\n", "\"", "'", "<", ">", "|", ",", ";", ":", "=", "/", "\\"]);
+const FILENAME_MARKERS = new Set([
+  "abrir", "abriu", "arquivo", "arquivos", "assinar", "assinou", "carregar", "carregou", "converter", "converteu",
+  "documento", "documentos", "exportar", "exportou", "falharam", "falhou", "importar", "importou", "ler", "leu",
+  "processar", "processou", "salvar", "salvou",
+]);
+const LIST_CONJUNCTIONS = new Set(["e", "nem", "ou"]);
 const ERROR_MESSAGES = Object.freeze({
   WORD_UNAVAILABLE: {
     summary: "A conversão não foi concluída.",
@@ -34,6 +43,7 @@ function isPersonalPosixPathStart(text, index) {
 
 function redactPaths(value) {
   const text = String(value);
+  const lowerText = text.toLocaleLowerCase("pt-BR");
   let result = "";
   for (let index = 0; index < text.length;) {
     if (!isWindowsPathStart(text, index) && !isPersonalPosixPathStart(text, index)) {
@@ -41,17 +51,18 @@ function redactPaths(value) {
       index += 1;
       continue;
     }
-    let end = index;
-    while (end < text.length && !PATH_END.has(text[end])) end += 1;
+    const extension = findNextExtension(lowerText, index, PATH_EXTENSIONS);
+    let end = extension ? extension.index + extension.extension.length : index;
+    while (!extension && end < text.length && !PATH_END.has(text[end])) end += 1;
     result += "[LOCAL REDIGIDO]";
     index = end;
   }
   return result;
 }
 
-function findNextDocumentExtension(lowerText, fromIndex) {
+function findNextExtension(lowerText, fromIndex, extensions) {
   let match = null;
-  for (const extension of DOCUMENT_EXTENSIONS) {
+  for (const extension of extensions) {
     const index = lowerText.indexOf(extension, fromIndex);
     if (index < 0) continue;
     const end = index + extension.length;
@@ -62,6 +73,54 @@ function findNextDocumentExtension(lowerText, fromIndex) {
     }
   }
   return match;
+}
+
+function findNextDocumentExtension(lowerText, fromIndex) {
+  return findNextExtension(lowerText, fromIndex, DOCUMENT_EXTENSIONS);
+}
+
+function isWordCharacter(character) {
+  return Boolean(character) && /[\p{L}\p{N}_-]/u.test(character);
+}
+
+function scanWords(text, start, end) {
+  const words = [];
+  for (let index = start; index < end;) {
+    if (!isWordCharacter(text[index])) {
+      index += 1;
+      continue;
+    }
+    const wordStart = index;
+    while (index < end && isWordCharacter(text[index])) index += 1;
+    words.push({
+      start: wordStart,
+      end: index,
+      value: text.slice(wordStart, index).toLocaleLowerCase("pt-BR"),
+    });
+  }
+  return words;
+}
+
+function skipWhitespace(text, index, end) {
+  let cursor = index;
+  while (cursor < end && /\s/u.test(text[cursor])) cursor += 1;
+  return cursor;
+}
+
+function findDocumentNameStart(text, segmentStart, extensionIndex) {
+  const words = scanWords(text, segmentStart, extensionIndex);
+  if (!words.length) return extensionIndex;
+
+  for (let index = words.length - 1; index >= 0; index -= 1) {
+    if (FILENAME_MARKERS.has(words[index].value)) {
+      return skipWhitespace(text, words[index].end, extensionIndex);
+    }
+  }
+
+  if (LIST_CONJUNCTIONS.has(words[0].value)) {
+    return skipWhitespace(text, words[0].end, extensionIndex);
+  }
+  return words[0].start;
 }
 
 function redactDocumentNames(value) {
@@ -75,8 +134,9 @@ function redactDocumentNames(value) {
       result += text.slice(cursor);
       break;
     }
-    let start = match.index;
-    while (start > cursor && !FILE_START.has(text[start - 1])) start -= 1;
+    let segmentStart = match.index;
+    while (segmentStart > cursor && !FILE_START.has(text[segmentStart - 1])) segmentStart -= 1;
+    const start = findDocumentNameStart(text, segmentStart, match.index);
     result += text.slice(cursor, start);
     result += "[ARQUIVO REDIGIDO]";
     cursor = match.index + match.extension.length;
