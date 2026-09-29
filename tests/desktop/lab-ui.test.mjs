@@ -360,6 +360,22 @@ test("redacao cobre caminhos completos mesmo com extensao em segmento intermedia
   }
 });
 
+test("palavra de causa dentro de segmento nao encerra caminho Windows UNC ou POSIX", () => {
+  const cases = [
+    ["C:\\Clientes porque importantes\\lote\\FATURA 9927.pdf", ["Clientes", "porque importantes", "lote", "FATURA"]],
+    ["\\\\servidor\\Clientes porque importantes\\lote\\FATURA 9927.pdf", ["servidor", "porque importantes", "lote", "FATURA"]],
+    ["/tmp/Clientes durante auditoria/lote/FATURA 9927.pdf", ["Clientes", "durante auditoria", "lote", "FATURA"]],
+  ];
+
+  for (const [message, fragments] of cases) {
+    const result = sanitizeDiagnosticValue(message);
+    assert.equal(result, "[LOCAL REDIGIDO]");
+    for (const fragment of fragments) {
+      assert.equal(result.includes(fragment), false, `fragmento vazou: ${fragment}`);
+    }
+  }
+});
+
 test("redacao de caminho sem extensao preserva conectores de causa reconhecidos", () => {
   const cases = [
     ["Não abriu C:\\Temp porque a pasta não existe.", "Não abriu [LOCAL REDIGIDO] porque a pasta não existe."],

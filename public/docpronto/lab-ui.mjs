@@ -61,13 +61,27 @@ function isPathListBoundary(text, lowerText, index) {
   return false;
 }
 
+function hasLaterPathSeparator(text, start) {
+  for (let index = start; index < text.length; index += 1) {
+    if (PATH_END.has(text[index])) return false;
+    if (text[index] === "\\" || text[index] === "/") return true;
+  }
+  return false;
+}
+
+function isTrustedPathCauseBoundary(text, lowerText, index) {
+  const boundary = PATH_CAUSE_BOUNDARIES.find(candidate => lowerText.startsWith(candidate, index));
+  if (!boundary) return false;
+  return !hasLaterPathSeparator(text, index + boundary.length);
+}
+
 function findPathEnd(text, start) {
   const lowerText = text.toLocaleLowerCase("pt-BR");
-  // Paths may contain spaces and dotted folders; only explicit cause/list boundaries end them.
-  // An ambiguous suffix stays redacted so diagnostic context cannot expose a path fragment.
+  // A cause word is trusted only when the remaining clause has no path separator.
+  // Otherwise it belongs to an ambiguous path segment and the suffix stays redacted.
   for (let index = start; index < text.length; index += 1) {
     if (PATH_END.has(text[index])) return index;
-    if (PATH_CAUSE_BOUNDARIES.some(boundary => lowerText.startsWith(boundary, index))) return index;
+    if (isTrustedPathCauseBoundary(text, lowerText, index)) return index;
     if (isPathListBoundary(text, lowerText, index)) return index;
   }
   return text.length;
