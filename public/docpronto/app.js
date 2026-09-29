@@ -1719,6 +1719,12 @@ async function signPdfWithWrittenSignature(file, placement = null) {
   const boxHeight = placement?.height || 72;
   const x = placement?.x ?? width - boxWidth - 42;
   const y = placement?.y ?? 54;
+  const horizontalPadding = 14;
+  const textWidth = Math.max(1, boxWidth - horizontalPadding * 2);
+  const safeSignerName = toWinAnsi(signerName);
+  const footerText = toWinAnsi(`Assinado visualmente em ${signedAt}`);
+  const signerSize = fitTextToWidth(safeSignerName, italic, textWidth, 15, 7);
+  const footerSize = fitTextToWidth(footerText, regular, textWidth, 8.5, 5);
   page.drawRectangle({
     x,
     y,
@@ -1729,27 +1735,37 @@ async function signPdfWithWrittenSignature(file, placement = null) {
     color: PDFLib.rgb(1, 0.996, 0.965),
     opacity: 0.92
   });
-  page.drawText(toWinAnsi(signerName).slice(0, 52), {
-    x: x + 14,
+  page.drawText(safeSignerName, {
+    x: x + horizontalPadding,
     y: y + boxHeight - 33,
-    size: 15,
+    size: signerSize,
     font: italic,
     color: PDFLib.rgb(0.08, 0.14, 0.12)
   });
   page.drawLine({
-    start: { x: x + 14, y: y + boxHeight - 40 },
-    end: { x: x + boxWidth - 14, y: y + boxHeight - 40 },
+    start: { x: x + horizontalPadding, y: y + boxHeight - 40 },
+    end: { x: x + boxWidth - horizontalPadding, y: y + boxHeight - 40 },
     thickness: 0.6,
     color: PDFLib.rgb(0.16, 0.2, 0.18)
   });
-  page.drawText(toWinAnsi(`Assinado visualmente em ${signedAt}`), {
-    x: x + 14,
+  page.drawText(footerText, {
+    x: x + horizontalPadding,
     y: y + 15,
-    size: 8.5,
+    size: footerSize,
     font: regular,
     color: PDFLib.rgb(0.32, 0.38, 0.35)
   });
   download(await pdfDocument.save(), `${baseName(file.name)}-assinado.pdf`, "application/pdf");
+}
+
+function fitTextToWidth(text, font, maxWidth, preferredSize, minimumSize = 1) {
+  const measured = font.widthOfTextAtSize(String(text || ""), preferredSize);
+  if (!Number.isFinite(measured) || measured <= 0 || measured <= maxWidth) return preferredSize;
+  const fitted = preferredSize * maxWidth / measured;
+  if (font.widthOfTextAtSize(String(text || ""), minimumSize) <= maxWidth) {
+    return Math.max(minimumSize, fitted);
+  }
+  return Math.max(1, fitted);
 }
 
 function parsePkcs12Certificate(bytes, password) {

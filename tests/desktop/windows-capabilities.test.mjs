@@ -10,6 +10,7 @@ import * as windowsCapabilities from "../../desktop/service/windows-capabilities
 
 const {
   convertOfficeDocument,
+  layoutSignatureAppearance,
   listWindowsCertificates,
   signPdfWithWindowsCertificate,
   signWithWindowsCertificate,
@@ -24,6 +25,22 @@ const VALID_PLACEMENT = {
   width: 220,
   height: 60,
 };
+
+test("quebra identificações longas sem cortar o texto da assinatura", () => {
+  const measureText = text => text.length * 0.58;
+  const layout = layoutSignatureAppearance({
+    signerName: "HEITOR PALIN MARTINS:523 75 - vence 27/11/2026",
+    dateText: "Dados: 29/09/2026, 17:36:02",
+    width: 220,
+    height: 60,
+    measureText,
+  });
+
+  assert.match(layout.lines.join(" "), /27\/11\/2026/);
+  assert.ok(layout.lines.length >= 4, "a identificação longa deve usar mais de uma linha");
+  assert.ok(layout.lines.every(line => measureText(line) * layout.fontSize <= 212));
+  assert.ok(layout.lines.length * layout.lineHeight <= 52);
+});
 
 let testPdfLibrary;
 async function loadTestPdfLibrary() {

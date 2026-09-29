@@ -544,23 +544,20 @@ async function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placemen
   const page = pages[pageNumber - 1];
   const rect = normalizeSignaturePlacement(placement, page.getCropBox());
   const font = await doc.embedFont(StandardFonts.Helvetica);
-  const lines = [
-    "Assinado de forma digital por",
-    cleanPdfText(signerName).slice(0, 54),
-    `Dados: ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}`,
-  ];
   const margin = 4;
-  const fontSize = Math.max(4, Math.min(
-    10,
-    (rect.width - margin * 2) / Math.max(...lines.map(estimateHelveticaWidth)),
-    (rect.height - margin * 2) / 3.75,
-  ));
+  const layout = layoutSignatureAppearance({
+    signerName,
+    dateText: `Dados: ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}`,
+    width: rect.width,
+    height: rect.height,
+    measureText: text => font.widthOfTextAtSize(text, 1),
+  });
   const appearance = doc.context.register(doc.context.flateStream([
     "q", `0 0 ${rect.width} ${rect.height} re W n`,
     `1 1 1 rg 0 0 ${rect.width} ${rect.height} re f`,
     `0.1 0.1 0.1 RG 0.8 w 0 0 ${rect.width} ${rect.height} re S`,
-    `BT /Helv ${fontSize} Tf 0 0 0 rg ${margin} ${rect.height - margin - fontSize} Td`,
-    ...lines.flatMap((line, index) => [...(index ? [`0 -${fontSize * 1.25} Td`] : []), `(${escapePdfString(line)}) Tj`]),
+    `BT /Helv ${layout.fontSize} Tf 0 0 0 rg ${margin} ${rect.height - margin - layout.fontSize} Td`,
+    ...layout.lines.flatMap((line, index) => [...(index ? [`0 -${layout.lineHeight} Td`] : []), `(${escapePdfString(line)}) Tj`]),
     "ET", "Q",
   ].join("\n"), {
     Type: "XObject", Subtype: "Form", BBox: [0, 0, rect.width, rect.height],
@@ -630,11 +627,51 @@ async function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placemen
   };
 }
 
-function estimateHelveticaWidth(text) {
-  return [...String(text || "")].reduce(
-    (width, char) => width + (/[MW@#%&]/.test(char) ? 0.9 : /[ilI1.,:;' ]/.test(char) ? 0.28 : 0.55),
-    0,
-  );
+export function layoutSignatureAppearance({ signerName, dateText, width, height, measureText }) {
+  const margin = 4;
+  const maxWidth = Math.max(1, width - margin * 2);
+  const maxHeight = Math.max(1, height - margin * 2);
+  const sourceLines = [
+    "Assinado de forma digital por",
+    cleanPdfText(signerName),
+    cleanPdfText(dateText),
+  ];
+  const wrapLine = (text, fontSize) => {
+    const output = [];
+    let current = "";
+    const pushWord = word => {
+      const candidate = current ? `${current} ${word}` : word;
+      if (measureText(candidate) * fontSize <= maxWidth) {
+        current = candidate;
+        return;
+      }
+      if (current) output.push(current);
+      current = "";
+      for (const character of word) {
+        const fragment = `${current}${character}`;
+        if (current && measureText(fragment) * fontSize > maxWidth) {
+          output.push(current);
+          current = character;
+        } else {
+          current = fragment;
+        }
+      }
+    };
+    for (const word of String(text || "").split(/\s+/).filter(Boolean)) pushWord(word);
+    if (current) output.push(current);
+    return output.length ? output : [""];
+  };
+
+  for (let fontSize = 10; fontSize >= 4; fontSize -= 0.25) {
+    const lines = sourceLines.flatMap(line => wrapLine(line, fontSize));
+    const lineHeight = fontSize * 1.2;
+    if (lines.length * lineHeight <= maxHeight
+      && lines.every(line => measureText(line) * fontSize <= maxWidth + 0.01)) {
+      return { lines, fontSize, lineHeight };
+    }
+  }
+  const fontSize = 4;
+  return { lines: sourceLines.flatMap(line => wrapLine(line, fontSize)), fontSize, lineHeight: fontSize * 1.2 };
 }
 
 function normalizeSignaturePlacement(placement, crop) {
