@@ -1,7 +1,9 @@
 const SENSITIVE_KEY = /(password|passphrase|pin|secret|token|private.?key|base64|document.?content|clipboard|signature|file.?name|file.?path|\bpath\b)/i;
-const WINDOWS_PATH = /(?:[A-Za-z]:\\|\\\\)[^\r\n"'<>]+/g;
-const UNIX_PATH = /\/(?:Users|home|tmp|var|private|mnt)\/[^\r\n"'<>]+/g;
-const FILE_NAME = /\b[^\s\\/:*?"<>|]+\.(?:pdf|docx?|xlsx?|csv|ofx|xml|txt|jpe?g|png|pfx|p12)\b/gi;
+const DOCUMENT_EXTENSIONS = Object.freeze([
+  ".docx", ".xlsx", ".jpeg", ".pdf", ".doc", ".xls", ".csv", ".ofx", ".xml", ".txt", ".jpg", ".png", ".pfx", ".p12",
+]);
+const PATH_END = new Set(["\r", "\n", "\"", "'", "<", ">", "|", ",", ";"]);
+const FILE_START = new Set(["\r", "\n", "\"", "'", "<", ">", "|", ",", ";", ":", "=", "/", "\\"]);
 const ERROR_MESSAGES = Object.freeze({
   WORD_UNAVAILABLE: {
     summary: "A conversão não foi concluída.",
@@ -21,12 +23,80 @@ const ERROR_MESSAGES = Object.freeze({
   },
 });
 
+function isWindowsPathStart(text, index) {
+  return (/[A-Za-z]/.test(text[index] || "") && text[index + 1] === ":" && /[\\/]/.test(text[index + 2] || ""))
+    || (text[index] === "\\" && text[index + 1] === "\\");
+}
+
+function isPersonalPosixPathStart(text, index) {
+  return ["/Users/", "/home/", "/tmp/", "/var/", "/private/", "/mnt/"].some(prefix => text.startsWith(prefix, index));
+}
+
+function redactPaths(value) {
+  const text = String(value);
+  let result = "";
+  for (let index = 0; index < text.length;) {
+    if (!isWindowsPathStart(text, index) && !isPersonalPosixPathStart(text, index)) {
+      result += text[index];
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < text.length && !PATH_END.has(text[end])) end += 1;
+    result += "[LOCAL REDIGIDO]";
+    index = end;
+  }
+  return result;
+}
+
+function findNextDocumentExtension(lowerText, fromIndex) {
+  let match = null;
+  for (const extension of DOCUMENT_EXTENSIONS) {
+    const index = lowerText.indexOf(extension, fromIndex);
+    if (index < 0) continue;
+    const end = index + extension.length;
+    const following = lowerText[end];
+    if (following && /[a-z0-9]/i.test(following)) continue;
+    if (!match || index < match.index || (index === match.index && extension.length > match.extension.length)) {
+      match = { index, extension };
+    }
+  }
+  return match;
+}
+
+function redactDocumentNames(value) {
+  const text = String(value);
+  const lowerText = text.toLocaleLowerCase("pt-BR");
+  let cursor = 0;
+  let result = "";
+  while (cursor < text.length) {
+    const match = findNextDocumentExtension(lowerText, cursor);
+    if (!match) {
+      result += text.slice(cursor);
+      break;
+    }
+    let start = match.index;
+    while (start > cursor && !FILE_START.has(text[start - 1])) start -= 1;
+    result += text.slice(cursor, start);
+    result += "[ARQUIVO REDIGIDO]";
+    cursor = match.index + match.extension.length;
+  }
+  return result;
+}
+
 function sanitizeText(value) {
-  return String(value)
-    .replace(WINDOWS_PATH, "[LOCAL REDIGIDO]")
-    .replace(UNIX_PATH, "[LOCAL REDIGIDO]")
-    .replace(FILE_NAME, "[ARQUIVO REDIGIDO]")
-    .slice(0, 8_000);
+  return redactDocumentNames(redactPaths(value)).slice(0, 8_000);
+}
+
+function normalizeTechnicalError(error) {
+  if (!error || typeof error !== "object") return { message: sanitizeText(error || "Erro não informado") };
+  return sanitizeDiagnosticValue({
+    name: error.name,
+    code: error.code,
+    message: error.message,
+    stack: error.stack,
+    cause: error.cause,
+  });
 }
 
 function safeStackLocation(stack) {
@@ -69,13 +139,40 @@ export function applyDesktopChannel(appInfo, { documentObj = document } = {}) {
 }
 
 export function createStableErrorMessage(error = {}) {
-  const code = typeof error.code === "string" && error.code ? error.code : "OPERATION_FAILED";
+  const candidate = typeof error.code === "string" ? error.code.toUpperCase() : "";
+  const code = /^[A-Z][A-Z0-9_]{2,80}$/.test(candidate) ? candidate : "OPERATION_FAILED";
   const known = ERROR_MESSAGES[code];
   return {
     summary: known?.summary || "A operação não foi concluída.",
     action: known?.action || "Confira o arquivo e tente novamente. Se o erro continuar, informe o código ao suporte.",
     code,
   };
+}
+
+export function createErrorReporter({ isLab, record, consoleObj = console } = {}) {
+  return Object.freeze({
+    async report(error, context = {}) {
+      const presentation = createStableErrorMessage({ code: error?.code || context.code });
+      const technical = isLab ? normalizeTechnicalError(error) : null;
+      const event = {
+        level: "error",
+        tool: context.tool || "aplicativo",
+        stage: context.stage || "operation",
+        code: presentation.code,
+        message: presentation.summary,
+        technical,
+        metadata: { retryable: context.retryable === true, toolId: context.tool || "" },
+      };
+      await record?.(event);
+      if (isLab) consoleObj?.error?.(sanitizeDiagnosticValue({
+        code: presentation.code,
+        tool: event.tool,
+        stage: event.stage,
+        technical,
+      }));
+      return `${presentation.summary} ${presentation.action} Código: ${presentation.code}`;
+    },
+  });
 }
 
 export function presentDiagnosticEvent(event = {}) {
@@ -114,10 +211,11 @@ export function bindAccessibleDiagnosticDialog(dialog, getTrigger) {
     if (!focusable.length) return;
     const first = focusable[0];
     const last = focusable.at(-1);
-    if (event.shiftKey && document.activeElement === first) {
+    const activeElement = dialog.ownerDocument?.activeElement;
+    if (event.shiftKey && activeElement === first) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
+    } else if (!event.shiftKey && activeElement === last) {
       event.preventDefault();
       first.focus();
     }
@@ -147,8 +245,11 @@ function setText(documentObj, parent, label, value, className = "") {
   parent.append(row);
 }
 
-export function createLaboratoryController({ desktopApi, documentObj = document, windowObj = window, navigatorObj = navigator } = {}) {
+const CONTROLLERS = new WeakMap();
+
+export function createLaboratoryController({ desktopApi, documentObj = document, windowObj = window, navigatorObj = navigator, record } = {}) {
   const dialog = documentObj.getElementById("diagnosticsPanel");
+  if (CONTROLLERS.has(dialog)) return CONTROLLERS.get(dialog);
   const openButton = documentObj.getElementById("diagnosticsButton");
   const closeButton = documentObj.getElementById("diagnosticsClose");
   const list = documentObj.getElementById("diagnosticsList");
@@ -160,12 +261,26 @@ export function createLaboratoryController({ desktopApi, documentObj = document,
   let opener = null;
   let events = [];
   let selected = null;
+  const recordFailure = record || createDiagnosticRecorder(desktopApi);
 
   const announce = (message, isError = false) => {
     if (!status) return;
     status.textContent = message;
     status.classList.toggle("error", isError);
   };
+
+  async function handleActionFailure(code, stage, message, error) {
+    announce(message, true);
+    await recordFailure({
+      level: "error",
+      tool: "diagnostics",
+      stage,
+      code,
+      message,
+      technical: normalizeTechnicalError(error),
+      metadata: { retryable: true, toolId: "diagnostics" },
+    });
+  }
 
   function filteredEvents() {
     const level = levelFilter?.value || "";
@@ -199,8 +314,12 @@ export function createLaboratoryController({ desktopApi, documentObj = document,
     copy.className = "secondary-button compact-button";
     copy.textContent = "Copiar diagnóstico";
     copy.addEventListener("click", async () => {
-      await navigatorObj.clipboard.writeText(JSON.stringify(item, null, 2));
-      announce("Diagnóstico redigido copiado.");
+      try {
+        await navigatorObj.clipboard.writeText(JSON.stringify(item, null, 2));
+        announce("Diagnóstico redigido copiado.");
+      } catch (error) {
+        await handleActionFailure("DIAGNOSTIC_COPY_FAILED", "copy", "Não foi possível copiar o diagnóstico.", error);
+      }
     });
     actions.append(copy);
     if (item.retryable) {
@@ -210,7 +329,7 @@ export function createLaboratoryController({ desktopApi, documentObj = document,
       retry.textContent = "Tentar novamente";
       retry.addEventListener("click", () => {
         dialog.close();
-        windowObj.dispatchEvent(new CustomEvent("docpronto:retry-tool", { detail: { toolId: item.toolId } }));
+        windowObj.dispatchEvent(new windowObj.CustomEvent("docpronto:retry-tool", { detail: { toolId: item.toolId } }));
       });
       actions.append(retry);
     }
@@ -272,35 +391,54 @@ export function createLaboratoryController({ desktopApi, documentObj = document,
   for (const filter of [levelFilter, toolFilter, executionFilter]) filter?.addEventListener("input", renderList);
   documentObj.getElementById("diagnosticsRefresh")?.addEventListener("click", refresh);
   documentObj.getElementById("diagnosticsExport")?.addEventListener("click", async () => {
-    const destination = await desktopApi.diagnostics.export();
-    announce(destination ? "Pacote de diagnóstico exportado." : "Exportação cancelada.");
+    try {
+      const destination = await desktopApi.diagnostics.export();
+      announce(destination ? "Pacote de diagnóstico exportado." : "Exportação cancelada.");
+    } catch (error) {
+      await handleActionFailure("DIAGNOSTIC_EXPORT_FAILED", "export", "Não foi possível exportar o diagnóstico.", error);
+    }
   });
   documentObj.getElementById("diagnosticsClear")?.addEventListener("click", async () => {
-    await desktopApi.diagnostics.clear();
-    events = [];
-    selected = null;
-    renderList();
-    announce("Histórico de diagnóstico apagado.");
+    try {
+      await desktopApi.diagnostics.clear();
+      events = [];
+      selected = null;
+      renderList();
+      announce("Histórico de diagnóstico apagado.");
+    } catch (error) {
+      await handleActionFailure("DIAGNOSTIC_CLEAR_FAILED", "clear", "Não foi possível limpar o histórico.", error);
+    }
   });
   bindAccessibleDiagnosticDialog(dialog, () => opener);
 
-  return { refresh, renderList, renderDetails };
+  const controller = Object.freeze({ refresh, renderList, renderDetails });
+  CONTROLLERS.set(dialog, controller);
+  return controller;
 }
 
-async function initializeDesktopExperience() {
-  const desktopApi = window.docprontoDesktop;
-  if (!desktopApi) return;
+const INITIALIZATIONS = new WeakMap();
+
+async function initializeDesktopExperienceOnce({
+  windowObj = window,
+  documentObj = document,
+  navigatorObj = navigator,
+  consoleObj = console,
+} = {}) {
+  const desktopApi = windowObj.docprontoDesktop;
+  if (!desktopApi) return { mode: "web" };
   let appInfo;
   try {
     appInfo = await desktopApi.getAppInfo();
   } catch {
     return;
   }
-  const isLab = applyDesktopChannel(appInfo);
+  const isLab = applyDesktopChannel(appInfo, { documentObj });
   const record = createDiagnosticRecorder(desktopApi);
-  window.docProntoLaboratory = Object.freeze({
+  const reporter = createErrorReporter({ isLab, record, consoleObj });
+  windowObj.docProntoLaboratory = Object.freeze({
     appInfo,
     record,
+    reportError: (error, context) => reporter.report(error, context),
     recordToolEvent(stage, tool, extra = {}) {
       return record({
         level: extra.level || "info",
@@ -320,8 +458,8 @@ async function initializeDesktopExperience() {
     },
     stableError: createStableErrorMessage,
   });
-  if (isLab) createLaboratoryController({ desktopApi });
-  window.addEventListener("error", event => record({
+  if (isLab) createLaboratoryController({ desktopApi, documentObj, windowObj, navigatorObj, record });
+  windowObj.addEventListener("error", event => record({
     level: "error",
     tool: "renderer",
     stage: "unhandled-error",
@@ -329,7 +467,7 @@ async function initializeDesktopExperience() {
     message: "Ocorreu um erro inesperado na interface.",
     technical: { name: event.error?.name, message: event.error?.message, stack: event.error?.stack },
   }));
-  window.addEventListener("unhandledrejection", event => record({
+  windowObj.addEventListener("unhandledrejection", event => record({
     level: "error",
     tool: "renderer",
     stage: "unhandled-rejection",
@@ -337,6 +475,15 @@ async function initializeDesktopExperience() {
     message: "Uma operação da interface terminou com erro inesperado.",
     technical: { name: event.reason?.name, message: event.reason?.message, stack: event.reason?.stack },
   }));
+  return { mode: isLab ? "lab" : "stable" };
+}
+
+export function initializeDesktopExperience(options = {}) {
+  const windowObj = options.windowObj ?? window;
+  if (INITIALIZATIONS.has(windowObj)) return INITIALIZATIONS.get(windowObj);
+  const initialization = initializeDesktopExperienceOnce({ ...options, windowObj });
+  INITIALIZATIONS.set(windowObj, initialization);
+  return initialization;
 }
 
 if (typeof window !== "undefined" && typeof document !== "undefined") {

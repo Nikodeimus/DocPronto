@@ -323,7 +323,9 @@ function bindDigitalSignOptions() {
   mode?.addEventListener("change", updateMode);
   updateMode();
   document.querySelector("#loadWindowsCertificates")?.addEventListener("click", () => {
-    loadWindowsCertificates().catch(error => showStatus(error.message, true));
+    loadWindowsCertificates().catch(async error => {
+      showStatus(await reportApplicationError(error, { tool: "certificate", stage: "discovery" }), true);
+    });
   });
   document.querySelector("#certificateSearch")?.addEventListener("input", filterCertificateOptions);
   detectLocalCertificateBridge().then(certificates => {
@@ -371,24 +373,22 @@ async function processFiles() {
       durationMs: Math.round(performance.now() - startedAt)
     });
   } catch (error) {
-    if (error?.name === "AbortError") showStatus("Processamento cancelado. Nenhum arquivo incompleto foi baixado.");
-    else {
-      console.error(error);
-      showStatus(humanizeError(error), true);
+    if (error?.name === "AbortError") {
+      showStatus("Processamento cancelado. Nenhum arquivo incompleto foi baixado.");
+      recordToolDiagnostic("finish", activeTool, {
+        ...diagnosticContext,
+        level: "warning",
+        code: "TOOL_RUN_CANCELLED",
+        message: "Processamento cancelado.",
+        durationMs: Math.round(performance.now() - startedAt)
+      });
+    } else {
+      showStatus(await reportApplicationError(error, {
+        tool: activeTool?.id || "unknown-tool",
+        stage: "finish",
+        retryable: true
+      }), true);
     }
-    recordToolDiagnostic("finish", activeTool, {
-      ...diagnosticContext,
-      level: error?.name === "AbortError" ? "warning" : "error",
-      code: error?.code || (error?.name === "AbortError" ? "TOOL_RUN_CANCELLED" : "TOOL_RUN_FAILED"),
-      message: error?.name === "AbortError" ? "Processamento cancelado." : "O processamento não foi concluído.",
-      technical: {
-        name: error?.name,
-        code: error?.code,
-        message: error?.message,
-        stack: error?.stack
-      },
-      durationMs: Math.round(performance.now() - startedAt)
-    });
   } finally {
     isProcessing = false;
     processingAbortController = null;
@@ -509,9 +509,9 @@ async function wordToPdf([file]) {
     const converted = await convertWithLocalOffice(file, "word-to-pdf");
     download(bytesFromBase64(converted.contentBase64), converted.filename || `${baseName(file.name)}.pdf`, "application/pdf");
   } catch (error) {
-    throw new Error(
-      "Não foi possível fazer a conversão com qualidade. Abra o DocPronto pelo arquivo ‘ABRIR DOCPRONTO.cmd’, confirme que o Microsoft Word está instalado e tente novamente. Nenhum PDF incompleto foi gerado."
-    );
+    throw Object.assign(new Error("A conversão local pelo Word não foi concluída.", { cause: error }), {
+      code: error?.code || "WORD_UNAVAILABLE"
+    });
   }
 }
 
@@ -1529,7 +1529,9 @@ async function loadWindowsCertificates() {
     certificates = await fetchWindowsCertificates(3500);
   } catch (error) {
     select.innerHTML = `<option value="">Aplicativo local não conectado</option>`;
-    throw new Error("O site não encontrou o aplicativo local do DOCPronto. Use um certificado A1 (.pfx/.p12) ou abra o DOCPronto pelo iniciador do Windows.");
+    throw Object.assign(new Error("Não foi possível consultar os certificados instalados.", { cause: error }), {
+      code: error?.code || "CERTIFICATE_NOT_FOUND"
+    });
   } finally {
     if (button) button.disabled = false;
   }
@@ -1961,8 +1963,11 @@ async function pdfToOfx(files) {
       }
     } catch (error) {
       if (error?.name === "AbortError" || processingAbortController?.signal.aborted) throw error;
-      console.error(error);
-      updateOfxQueueItem(index, "error", humanizeError(error));
+      updateOfxQueueItem(index, "error", await reportApplicationError(error, {
+        tool: "pdf-ofx",
+        stage: "queue-item",
+        retryable: true
+      }));
     }
     if (progress) progress.value = index + 1;
   }
@@ -3735,14 +3740,16 @@ function clearStatus() {
   elements.status.textContent = "";
   elements.status.className = "status-message";
 }
-function humanizeError(error) {
-  if (window.docProntoLaboratory?.appInfo?.isLab === false) {
-    const stable = window.docProntoLaboratory.stableError(error);
-    return `${stable.summary} ${stable.action} Código: ${stable.code}`;
+async function reportApplicationError(error, context = {}) {
+  if (window.docProntoLaboratory?.reportError) {
+    return window.docProntoLaboratory.reportError(error, context);
   }
-  if (/encrypted/i.test(error.message)) return "PDF protegido por senha. Esta versão ainda não abre arquivos criptografados.";
-  if (/Failed to parse|invalid/i.test(error.message)) return "O arquivo parece corrompido ou não corresponde ao formato informado.";
-  return error.message || "Não foi possível processar o arquivo.";
+  const candidate = typeof error?.code === "string" ? error.code.toUpperCase() : "";
+  const code = /^[A-Z][A-Z0-9_]{2,80}$/.test(candidate) ? candidate : "OPERATION_FAILED";
+  if (/encrypted|password/i.test(String(error?.message || ""))) {
+    return `O arquivo protegido não pôde ser processado. Remova a senha e tente novamente. Código: ${code}`;
+  }
+  return `A operação não foi concluída. Confira o arquivo e tente novamente. Código: ${code}`;
 }
 function baseName(filename) { return filename.replace(/\.[^.]+$/, ""); }
 function sanitizeFilename(filename) { return filename.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").slice(0, 180); }
