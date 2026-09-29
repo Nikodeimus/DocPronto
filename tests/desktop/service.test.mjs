@@ -12,6 +12,7 @@ async function createAssets(t) {
   const assetsRoot = await mkdtemp(join(tmpdir(), "docpronto-service-test-"));
   await writeFile(join(assetsRoot, "index.html"), "<!doctype html><title>DOCPronto</title>");
   await writeFile(join(assetsRoot, "app.js"), "globalThis.docpronto = true;");
+  await writeFile(join(assetsRoot, "lab-ui.mjs"), "export const laboratory = true;");
   await writeFile(join(assetsRoot, "secret.txt"), "not public");
   t.after(() => rm(assetsRoot, { recursive: true, force: true }));
   return assetsRoot;
@@ -79,6 +80,11 @@ test("serves_health_and_static_assets", async t => {
   assert.equal(asset.headers.get("content-type"), "text/javascript; charset=utf-8");
   assert.equal(asset.headers.get("x-content-type-options"), "nosniff");
   assert.equal(await asset.text(), "globalThis.docpronto = true;");
+
+  const laboratoryModule = await fetch(`${service.origin}/lab-ui.mjs`);
+  assert.equal(laboratoryModule.status, 200);
+  assert.equal(laboratoryModule.headers.get("content-type"), "text/javascript; charset=utf-8");
+  assert.equal(await laboratoryModule.text(), "export const laboratory = true;");
 });
 
 test("rejects_wrong_host_and_path_traversal", async t => {

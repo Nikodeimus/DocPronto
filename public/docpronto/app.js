@@ -57,6 +57,10 @@ bindUpload();
 bindAccessibleDialogs();
 filterTools("todos");
 openToolFromHash();
+window.addEventListener("docpronto:retry-tool", event => {
+  const tool = tools.find(item => item.id === event.detail?.toolId);
+  if (tool) openTool(tool, document.querySelector(`[data-tool="${tool.id}"]`));
+});
 
 function renderTools() {
   elements.grid.innerHTML = tools.map(tool => `
@@ -331,6 +335,13 @@ function bindDigitalSignOptions() {
 
 async function processFiles() {
   if (!activeTool || !selectedFiles.length) return;
+  const startedAt = performance.now();
+  const executionId = globalThis.crypto?.randomUUID?.() || `run-${Date.now().toString(36)}`;
+  const diagnosticContext = {
+    executionId,
+    fileCount: selectedFiles.length,
+    retryable: true
+  };
   isProcessing = true;
   processingAbortController = new AbortController();
   document.querySelectorAll("[data-cancel]").forEach(button => { button.disabled = false; });
@@ -338,16 +349,46 @@ async function processFiles() {
   elements.process.disabled = true;
   elements.process.textContent = "Processando...";
   showStatus("Processando localmente. Use Cancelar se quiser interromper com segurança.");
+  recordToolDiagnostic("start", activeTool, {
+    ...diagnosticContext,
+    code: "TOOL_RUN_STARTED",
+    message: "Processamento iniciado."
+  });
   try {
+    recordToolDiagnostic("progress", activeTool, {
+      ...diagnosticContext,
+      code: "TOOL_RUN_IN_PROGRESS",
+      message: "A ferramenta iniciou a etapa principal."
+    });
     const outcome = await activeTool.action(selectedFiles);
     throwIfProcessingCancelled();
     showStatus(outcome?.message || "Pronto. O download foi iniciado.");
+    recordToolDiagnostic("finish", activeTool, {
+      ...diagnosticContext,
+      retryable: false,
+      code: "TOOL_RUN_COMPLETED",
+      message: "Processamento concluído.",
+      durationMs: Math.round(performance.now() - startedAt)
+    });
   } catch (error) {
     if (error?.name === "AbortError") showStatus("Processamento cancelado. Nenhum arquivo incompleto foi baixado.");
     else {
       console.error(error);
       showStatus(humanizeError(error), true);
     }
+    recordToolDiagnostic("finish", activeTool, {
+      ...diagnosticContext,
+      level: error?.name === "AbortError" ? "warning" : "error",
+      code: error?.code || (error?.name === "AbortError" ? "TOOL_RUN_CANCELLED" : "TOOL_RUN_FAILED"),
+      message: error?.name === "AbortError" ? "Processamento cancelado." : "O processamento não foi concluído.",
+      technical: {
+        name: error?.name,
+        code: error?.code,
+        message: error?.message,
+        stack: error?.stack
+      },
+      durationMs: Math.round(performance.now() - startedAt)
+    });
   } finally {
     isProcessing = false;
     processingAbortController = null;
@@ -356,6 +397,10 @@ async function processFiles() {
     elements.process.disabled = false;
     elements.process.textContent = activeTool?.id === "pdf-ofx" ? "Processar fila" : "Processar arquivos";
   }
+}
+
+function recordToolDiagnostic(stage, tool, details) {
+  window.docProntoLaboratory?.recordToolEvent(stage, tool, details);
 }
 
 async function mergePdfs(files) {
@@ -3691,6 +3736,10 @@ function clearStatus() {
   elements.status.className = "status-message";
 }
 function humanizeError(error) {
+  if (window.docProntoLaboratory?.appInfo?.isLab === false) {
+    const stable = window.docProntoLaboratory.stableError(error);
+    return `${stable.summary} ${stable.action} Código: ${stable.code}`;
+  }
   if (/encrypted/i.test(error.message)) return "PDF protegido por senha. Esta versão ainda não abre arquivos criptografados.";
   if (/Failed to parse|invalid/i.test(error.message)) return "O arquivo parece corrompido ou não corresponde ao formato informado.";
   return error.message || "Não foi possível processar o arquivo.";

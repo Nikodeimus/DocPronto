@@ -23,7 +23,12 @@
       <button class="nav-link" data-filter="planilha">Planilhas</button>
       <button class="nav-link" data-filter="financeiro">OFX</button>
     </nav>
-    <span class="privacy-pill"><span class="status-dot"></span> Arquivos processados localmente</span>
+    <div class="desktop-controls">
+      <span id="labBadge" class="lab-badge" hidden>LAB</span>
+      <span id="desktopVersion" class="desktop-version" aria-label="Versão do aplicativo"></span>
+      <button id="diagnosticsButton" class="diagnostics-button" type="button" hidden>Diagnóstico</button>
+      <span class="privacy-pill"><span class="status-dot"></span> Arquivos processados localmente</span>
+    </div>
   </header>
 
   <main>
@@ -193,6 +198,48 @@
     </form>
   </dialog>
 
+  <dialog id="diagnosticsPanel" aria-labelledby="diagnosticsTitle" aria-modal="true" class="diagnostics-dialog">
+    <div class="diagnostics-shell">
+      <header class="diagnostics-header">
+        <div>
+          <p class="eyebrow">LABORATÓRIO</p>
+          <h2 id="diagnosticsTitle">Diagnóstico técnico</h2>
+          <p>Eventos locais redigidos para localizar a etapa e a causa de uma falha.</p>
+        </div>
+        <button id="diagnosticsClose" class="close-button" type="button" aria-label="Fechar diagnóstico">×</button>
+      </header>
+      <div class="diagnostics-toolbar" aria-label="Filtros do diagnóstico">
+        <label>Nível
+          <select id="diagnosticsLevel">
+            <option value="">Todos</option>
+            <option value="error">Erros</option>
+            <option value="warning">Avisos</option>
+            <option value="info">Informações</option>
+            <option value="debug">Depuração</option>
+          </select>
+        </label>
+        <label>Ferramenta <input id="diagnosticsTool" type="search" autocomplete="off" placeholder="Ex.: pdf-ofx"></label>
+        <label>Execução <input id="diagnosticsExecution" type="search" autocomplete="off" placeholder="Identificador"></label>
+        <button id="diagnosticsRefresh" class="secondary-button compact-button" type="button">Atualizar</button>
+      </div>
+      <div class="diagnostics-workspace">
+        <section aria-labelledby="diagnosticsEventsTitle">
+          <h3 id="diagnosticsEventsTitle">Eventos</h3>
+          <div id="diagnosticsList" class="diagnostics-list"></div>
+        </section>
+        <section class="diagnostics-details" aria-labelledby="diagnosticsDetailsTitle">
+          <h3 id="diagnosticsDetailsTitle">Detalhes</h3>
+          <div id="diagnosticsDetails">Selecione um evento para ver os detalhes técnicos redigidos.</div>
+        </section>
+      </div>
+      <div class="diagnostics-footer">
+        <span id="diagnosticsStatus" role="status" aria-live="polite"></span>
+        <button id="diagnosticsClear" class="secondary-button compact-button" type="button">Limpar histórico</button>
+        <button id="diagnosticsExport" class="primary-button compact-button" type="button">Exportar ZIP</button>
+      </div>
+    </div>
+  </dialog>
+
   <footer>
     <span>DocPronto · Projeto independente</span>
     <nav aria-label="Informações legais">
@@ -209,6 +256,7 @@
   <script src="vendor/tesseract.min.js"></script>
   <script src="vendor/docx-preview.min.js"></script>
   <script src="vendor/html2canvas.min.js"></script>
-  <script src="app.js?v=20260925-7"></script>
+  <script src="app.js?v=20260929-1"></script>
+  <script type="module" src="lab-ui.mjs?v=20260929-1"></script>
 </body>
 </html>

@@ -19,7 +19,7 @@ const MIME_TYPES = new Map([
 ]);
 
 function isPublicAsset(name) {
-  return ["index.html", "app.js", "styles.css"].includes(name)
+  return ["index.html", "app.js", "lab-ui.mjs", "styles.css"].includes(name)
     || /^vendor\/(?:[a-zA-Z0-9_-]+(?:\.worker)?(?:\.min)?\.(?:js|mjs)|tesseract-core\/[a-zA-Z0-9_.-]+\.(?:js|wasm))$/.test(name);
 }
 

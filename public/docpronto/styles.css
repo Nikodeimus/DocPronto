@@ -70,6 +70,28 @@ nav { display: flex; gap: 8px; }
   border: 1px solid var(--line);
   border-radius: 999px;
 }
+.desktop-controls { display: flex; justify-self: end; align-items: center; gap: 8px; }
+.lab-badge {
+  padding: 5px 7px;
+  color: #14251f;
+  background: var(--lime);
+  border: 1px solid #587321;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+.desktop-version { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.diagnostics-button {
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--paper);
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 750;
+}
 .status-dot {
   display: inline-block;
   width: 7px;
@@ -229,6 +251,62 @@ dialog {
 dialog::backdrop { background: rgba(8, 19, 15, 0.7); backdrop-filter: blur(6px); }
 .placement-dialog { width: min(1040px, calc(100% - 22px)); }
 .review-dialog { width: min(1180px, calc(100% - 22px)); }
+.diagnostics-dialog { width: min(1120px, calc(100% - 22px)); border-radius: 8px; }
+.diagnostics-shell { padding: 26px; overflow: auto; }
+.diagnostics-header { position: relative; display: flex; justify-content: space-between; gap: 30px; padding-right: 48px; }
+.diagnostics-header h2 { font-size: 32px; }
+.diagnostics-header p:last-child { max-width: 640px; margin: 10px 0 0; color: var(--muted); line-height: 1.45; }
+.diagnostics-toolbar {
+  display: grid;
+  grid-template-columns: 130px minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 22px;
+  padding: 14px 0;
+  border-block: 1px solid var(--line);
+}
+.diagnostics-toolbar label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 750; }
+.diagnostics-toolbar input, .diagnostics-toolbar select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.diagnostics-workspace { display: grid; grid-template-columns: minmax(300px, .9fr) minmax(360px, 1.1fr); min-height: 390px; }
+.diagnostics-workspace > section { min-width: 0; padding: 18px 18px 18px 0; }
+.diagnostics-workspace > section + section { padding-left: 18px; border-left: 1px solid var(--line); }
+.diagnostics-workspace h3 { margin: 0 0 12px; font-size: 15px; }
+.diagnostics-list { display: grid; max-height: 48vh; overflow: auto; border-top: 1px solid var(--line); }
+.diagnostic-row {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 12px 10px;
+  cursor: pointer;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+}
+.diagnostic-row:hover, .diagnostic-row[aria-pressed="true"] { background: var(--white); }
+.diagnostic-row:focus-visible { outline: 3px solid var(--blue); outline-offset: -3px; }
+.diagnostic-row strong { font-size: 12px; }
+.diagnostic-row span { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.diagnostic-row[data-level="error"] strong { color: #a42f26; }
+.diagnostic-row[data-level="warning"] strong { color: #765600; }
+.diagnostics-details { overflow-wrap: anywhere; }
+#diagnosticsDetails { color: var(--muted); font-size: 13px; line-height: 1.45; }
+#diagnosticsDetails h3 { color: var(--ink); font-size: 20px; }
+#diagnosticsDetails p { margin: 9px 0; }
+.diagnostic-location { padding: 9px; color: var(--ink); background: #e8ece8; border-radius: 4px; font-family: ui-monospace, "Cascadia Mono", monospace; }
+.diagnostic-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.diagnostics-empty { color: var(--muted); font-size: 13px; }
+.diagnostics-footer { display: flex; align-items: center; gap: 9px; padding-top: 14px; border-top: 1px solid var(--line); }
+#diagnosticsStatus { flex: 1; color: var(--muted); font-size: 12px; }
+#diagnosticsStatus.error { color: #a42f26; }
 .dialog-shell { position: relative; padding: 34px; overflow: auto; }
 .placement-shell { position: relative; padding: 24px; overflow: auto; }
 .close-button {
@@ -403,10 +481,16 @@ dialog::backdrop { background: rgba(8, 19, 15, 0.7); backdrop-filter: blur(6px);
   nav { display: none; }
   .hero { padding-top: 32px; }
   .tools-grid { grid-template-columns: repeat(2, 1fr); }
+  .desktop-version { display: none; }
+  .diagnostics-workspace { grid-template-columns: 1fr; }
+  .diagnostics-workspace > section + section { padding-left: 0; border-top: 1px solid var(--line); border-left: 0; }
 }
 @media (max-width: 600px) {
   .privacy-pill { font-size: 0; }
   .privacy-pill .status-dot { margin: 0; }
+  .desktop-controls { gap: 5px; }
+  .diagnostics-button { width: 38px; overflow: hidden; padding-inline: 7px; font-size: 0; }
+  .diagnostics-button::before { content: "LOG"; font-size: 10px; }
   .hero { padding-inline: 22px; }
   h1 { font-size: 48px; }
   .hero-actions { align-items: flex-start; flex-direction: column; }
@@ -430,6 +514,10 @@ dialog::backdrop { background: rgba(8, 19, 15, 0.7); backdrop-filter: blur(6px);
   .placement-shell { padding: 18px 12px; }
   .dialog-heading h2 { font-size: 34px; }
   .placement-header h2 { font-size: 26px; }
+  .diagnostics-shell { padding: 20px 14px; }
+  .diagnostics-header h2 { font-size: 26px; }
+  .diagnostics-toolbar { grid-template-columns: 1fr; }
+  .diagnostics-footer { align-items: stretch; flex-direction: column; }
   .signature-preview-wrap { padding: 10px; }
   footer { gap: 15px; flex-direction: column; }
 }
