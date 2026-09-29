@@ -31,7 +31,47 @@ function integrityFailure(error) {
   return INTEGRITY_ERROR_PATTERN.test(`${error?.code ?? ""} ${error?.message ?? ""}`);
 }
 
-export function createUpdateManager({ autoUpdater, channelConfig, diagnostics, appVersion } = {}) {
+function hasCanonicalSha512(value) {
+  if (typeof value !== "string" || value.length !== 88) return false;
+  try {
+    const decoded = Buffer.from(value, "base64");
+    return decoded.length === 64 && decoded.toString("base64") === value;
+  } catch {
+    return false;
+  }
+}
+
+function hasRequiredChecksums(updateInfo) {
+  return Array.isArray(updateInfo?.files)
+    && updateInfo.files.length > 0
+    && updateInfo.files.every(file => hasCanonicalSha512(file?.sha512));
+}
+
+function normalizeIntegrityPolicy(policy = { mode: "checksum-only", publisherNames: [] }) {
+  const mode = policy?.mode ?? "checksum-only";
+  const publisherNames = Array.isArray(policy?.publisherNames)
+    ? policy.publisherNames.filter(name => typeof name === "string" && name.trim()).map(name => name.trim())
+    : [];
+  if (mode !== "checksum-only" && mode !== "checksum+authenticode") {
+    throw Object.assign(new Error("Unknown update integrity mode."), {
+      code: "INVALID_UPDATE_INTEGRITY_POLICY",
+    });
+  }
+  if (mode === "checksum+authenticode" && publisherNames.length === 0) {
+    throw Object.assign(new Error("Authenticode update policy requires publisherName."), {
+      code: "INVALID_UPDATE_INTEGRITY_POLICY",
+    });
+  }
+  return Object.freeze({ mode, publisherNames: Object.freeze(publisherNames) });
+}
+
+export function createUpdateManager({
+  autoUpdater,
+  channelConfig,
+  diagnostics,
+  appVersion,
+  integrityPolicy,
+} = {}) {
   if (!autoUpdater || typeof autoUpdater.checkForUpdates !== "function") {
     throw new TypeError("autoUpdater is required.");
   }
@@ -39,12 +79,14 @@ export function createUpdateManager({ autoUpdater, channelConfig, diagnostics, a
   if (!diagnostics || typeof diagnostics.append !== "function") {
     throw new TypeError("diagnostics.append is required.");
   }
+  const verifiedPolicy = normalizeIntegrityPolicy(integrityPolicy);
 
   const listeners = new Map();
   let acceptedUpdate = null;
   let downloaded = false;
   let disposed = false;
   let startPromise;
+  let downloadPromise;
 
   async function record(event) {
     try {
@@ -83,6 +125,16 @@ export function createUpdateManager({ autoUpdater, channelConfig, diagnostics, a
       rejectWrongChannel(updateInfo);
       return false;
     }
+    if (!hasRequiredChecksums(updateInfo)) {
+      acceptedUpdate = null;
+      void record({
+        level: "error",
+        code: "UPDATE_INTEGRITY_FAILED",
+        message: "A atualizacao foi rejeitada porque o manifesto nao contem SHA-512 valido.",
+        metadata: { candidateVersion: updateInfo?.version ?? "unknown" },
+      });
+      return false;
+    }
     acceptedUpdate = updateInfo;
     return true;
   }
@@ -107,7 +159,11 @@ export function createUpdateManager({ autoUpdater, channelConfig, diagnostics, a
         level: "info",
         code: "UPDATE_READY",
         message: "A atualizacao esta pronta para ser instalada ao fechar o aplicativo.",
-        metadata: { candidateVersion: updateInfo.version },
+        metadata: {
+          candidateVersion: updateInfo.version,
+          integrityMode: verifiedPolicy.mode,
+          authenticodeVerified: verifiedPolicy.mode === "checksum+authenticode",
+        },
       });
     });
     listen("error", error => {
@@ -129,9 +185,22 @@ export function createUpdateManager({ autoUpdater, channelConfig, diagnostics, a
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
     attachListeners();
+    await record({
+      level: "info",
+      code: "UPDATE_INTEGRITY_POLICY",
+      message: verifiedPolicy.mode === "checksum-only"
+        ? "Atualizacoes desta compilacao usam verificacao obrigatoria SHA-512."
+        : "Atualizacoes desta compilacao usam SHA-512 e Authenticode configurado.",
+      metadata: {
+        integrityMode: verifiedPolicy.mode,
+        authenticodeConfigured: verifiedPolicy.mode === "checksum+authenticode",
+        authenticodeVerified: false,
+        publisherCount: verifiedPolicy.publisherNames.length,
+      },
+    });
     try {
       const result = await autoUpdater.checkForUpdates();
-      if (result?.updateInfo) consider(result.updateInfo);
+      if (result?.updateInfo && consider(result.updateInfo)) await download();
       return true;
     } catch (error) {
       await record({
@@ -146,28 +215,36 @@ export function createUpdateManager({ autoUpdater, channelConfig, diagnostics, a
     }
   }
 
+  async function downloadOnce() {
+    if (disposed || !acceptedUpdate) return false;
+    try {
+      await autoUpdater.downloadUpdate();
+      return true;
+    } catch (error) {
+      await record({
+        level: integrityFailure(error) ? "error" : "warning",
+        code: integrityFailure(error) ? "UPDATE_INTEGRITY_FAILED" : "UPDATE_DOWNLOAD_FAILED",
+        message: integrityFailure(error)
+          ? "A atualizacao foi rejeitada porque sua integridade nao pode ser confirmada."
+          : "O download da atualizacao nao foi concluido.",
+        technical: technicalDetails(error),
+      });
+      return false;
+    }
+  }
+
+  function download() {
+    if (disposed || !acceptedUpdate) return Promise.resolve(false);
+    if (!downloadPromise) downloadPromise = downloadOnce();
+    return downloadPromise;
+  }
+
   return Object.freeze({
     start() {
       if (!startPromise) startPromise = startOnce();
       return startPromise;
     },
-    async download() {
-      if (disposed || !acceptedUpdate) return false;
-      try {
-        await autoUpdater.downloadUpdate();
-        return true;
-      } catch (error) {
-        await record({
-          level: integrityFailure(error) ? "error" : "warning",
-          code: integrityFailure(error) ? "UPDATE_INTEGRITY_FAILED" : "UPDATE_DOWNLOAD_FAILED",
-          message: integrityFailure(error)
-            ? "A atualizacao foi rejeitada porque sua integridade nao pode ser confirmada."
-            : "O download da atualizacao nao foi concluido.",
-          technical: technicalDetails(error),
-        });
-        return false;
-      }
-    },
+    download,
     installOnQuit() {
       if (disposed || !downloaded) return false;
       autoUpdater.autoInstallOnAppQuit = true;
@@ -182,4 +259,10 @@ export function createUpdateManager({ autoUpdater, channelConfig, diagnostics, a
   });
 }
 
-export const updateManagerInternals = Object.freeze({ belongsToChannel, integrityFailure });
+export const updateManagerInternals = Object.freeze({
+  belongsToChannel,
+  hasCanonicalSha512,
+  hasRequiredChecksums,
+  integrityFailure,
+  normalizeIntegrityPolicy,
+});

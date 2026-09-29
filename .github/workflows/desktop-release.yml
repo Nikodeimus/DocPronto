@@ -19,10 +19,21 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Validate Laboratory tag and signing policy
+        id: release
+        run: node scripts/prepare-desktop-release.mjs --tag "${{ github.ref_name }}" --channel lab
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          DOCPRONTO_PUBLISHER_NAME: ${{ secrets.WINDOWS_PUBLISHER_NAME }}
       - run: npm ci
       - run: npm test
       - run: npm run desktop:test
-      - run: npm run desktop:package:lab
+      - run: npm run desktop:package:lab:ci
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          DOCPRONTO_PUBLISHER_NAME: ${{ secrets.WINDOWS_PUBLISHER_NAME }}
       - name: Generate release metadata and SHA-256
         shell: pwsh
         run: |
@@ -33,10 +44,14 @@ jobs:
           }
           $hashes | ConvertTo-Json | Set-Content release/lab/sha256.json -Encoding utf8
           [pscustomobject]@{
-            channel = 'lab'
+            channel = '${{ steps.release.outputs.feed }}'
+            version = '${{ steps.release.outputs.version }}'
             tag = '${{ github.ref_name }}'
             commit = '${{ github.sha }}'
             prerelease = $true
+            integrityMode = '${{ steps.release.outputs.integrity_mode }}'
+            signed = [System.Convert]::ToBoolean('${{ steps.release.outputs.signed }}')
+            publisherNames = ConvertFrom-Json '${{ steps.release.outputs.publisher_names }}'
           } | ConvertTo-Json | Set-Content release/lab/release-metadata.json -Encoding utf8
       - name: Publish Laboratory prerelease
         uses: softprops/action-gh-release@v2
@@ -52,7 +67,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   stable:
-    if: ${{ !startsWith(github.ref_name, 'lab-v') }}
+    if: ${{ startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,10 +75,21 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Validate stable tag and require Authenticode
+        id: release
+        run: node scripts/prepare-desktop-release.mjs --tag "${{ github.ref_name }}" --channel stable --require-signed
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          DOCPRONTO_PUBLISHER_NAME: ${{ secrets.WINDOWS_PUBLISHER_NAME }}
       - run: npm ci
       - run: npm test
       - run: npm run desktop:test
-      - run: npm run desktop:package:stable
+      - run: npm run desktop:package:stable:ci
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          DOCPRONTO_PUBLISHER_NAME: ${{ secrets.WINDOWS_PUBLISHER_NAME }}
       - name: Generate release metadata and SHA-256
         shell: pwsh
         run: |
@@ -74,10 +100,14 @@ jobs:
           }
           $hashes | ConvertTo-Json | Set-Content release/stable/sha256.json -Encoding utf8
           [pscustomobject]@{
-            channel = 'latest'
+            channel = '${{ steps.release.outputs.feed }}'
+            version = '${{ steps.release.outputs.version }}'
             tag = '${{ github.ref_name }}'
             commit = '${{ github.sha }}'
             prerelease = $false
+            integrityMode = '${{ steps.release.outputs.integrity_mode }}'
+            signed = [System.Convert]::ToBoolean('${{ steps.release.outputs.signed }}')
+            publisherNames = ConvertFrom-Json '${{ steps.release.outputs.publisher_names }}'
           } | ConvertTo-Json | Set-Content release/stable/release-metadata.json -Encoding utf8
       - name: Publish stable release
         uses: softprops/action-gh-release@v2

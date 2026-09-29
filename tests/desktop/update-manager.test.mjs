@@ -7,6 +7,16 @@ import test from "node:test";
 import { getChannelConfig } from "../../desktop/config/channel.mjs";
 import { createUpdateManager } from "../../desktop/update/manager.mjs";
 
+const VALID_SHA512 = Buffer.alloc(64, 7).toString("base64");
+
+function updateInfo(version, channel, sha512 = VALID_SHA512) {
+  return {
+    version,
+    channel,
+    files: [{ url: `DOCPronto-Setup-${version}-x64.exe`, sha512, size: 100 }],
+  };
+}
+
 class FakeUpdater extends EventEmitter {
   constructor({ checkResult, checkError, downloadError } = {}) {
     super();
@@ -44,6 +54,7 @@ function createHarness(channel, updaterOptions = {}) {
     channelConfig: getChannelConfig(channel),
     diagnostics: { append: async event => { events.push(event); } },
     appVersion: "0.1.0",
+    integrityPolicy: updaterOptions.integrityPolicy,
   });
   return { autoUpdater, events, manager };
 }
@@ -63,7 +74,7 @@ test("modo offline registra warning redigido e nao rejeita start", async () => {
 
 test("canal laboratorio rejeita release latest", async () => {
   const harness = createHarness("lab", {
-    checkResult: { updateInfo: { version: "1.0.0", channel: "latest" } },
+    checkResult: { updateInfo: updateInfo("1.0.0", "latest") },
   });
 
   await harness.manager.start();
@@ -75,7 +86,7 @@ test("canal laboratorio rejeita release latest", async () => {
 
 test("canal estavel rejeita prerelease laboratorio", async () => {
   const harness = createHarness("stable", {
-    checkResult: { updateInfo: { version: "1.0.0-lab.2", channel: "lab" } },
+    checkResult: { updateInfo: updateInfo("1.0.0-lab.2", "lab") },
   });
 
   await harness.manager.start();
@@ -87,7 +98,7 @@ test("canal estavel rejeita prerelease laboratorio", async () => {
 
 test("falha de hash ou assinatura gera diagnostico de integridade", async () => {
   const harness = createHarness("stable", {
-    checkResult: { updateInfo: { version: "1.0.1", channel: "latest" } },
+    checkResult: { updateInfo: updateInfo("1.0.1", "latest") },
     downloadError: Object.assign(new Error("sha512 checksum mismatch"), { code: "ERR_UPDATER_INVALID_SIGNATURE" }),
   });
   await harness.manager.start();
@@ -97,20 +108,89 @@ test("falha de hash ou assinatura gera diagnostico de integridade", async () => 
   assert.ok(harness.events.some(event => event.code === "UPDATE_INTEGRITY_FAILED"));
 });
 
-test("download concluido nao instala imediatamente", async () => {
+test("falha Authenticode em build configurado impede instalacao", async () => {
+  const harness = createHarness("stable", {
+    checkResult: { updateInfo: updateInfo("1.0.1", "latest") },
+    downloadError: Object.assign(new Error("publisher signature mismatch"), {
+      code: "ERR_UPDATER_INVALID_SIGNATURE",
+    }),
+    integrityPolicy: {
+      mode: "checksum+authenticode",
+      publisherNames: ["DOCPronto Software Ltda"],
+    },
+  });
+
+  await harness.manager.start();
+
+  assert.equal(harness.manager.installOnQuit(), false);
+  assert.equal(harness.autoUpdater.quitAndInstallCalls, 0);
+  assert.ok(harness.events.some(event => event.code === "UPDATE_INTEGRITY_FAILED"));
+});
+
+test("start baixa automaticamente uma atualizacao compativel sem instalar durante o uso", async () => {
   const harness = createHarness("lab", {
-    checkResult: { updateInfo: { version: "0.2.0-lab.1", channel: "lab" } },
+    checkResult: { updateInfo: updateInfo("0.2.0-lab.1", "lab") },
   });
   await harness.manager.start();
 
-  assert.equal(await harness.manager.download(), true);
-  harness.autoUpdater.emit("update-downloaded", { version: "0.2.0-lab.1", channel: "lab" });
+  assert.equal(harness.autoUpdater.downloadCalls, 1);
+  harness.autoUpdater.emit("update-downloaded", updateInfo("0.2.0-lab.1", "lab"));
 
   assert.equal(harness.autoUpdater.quitAndInstallCalls, 0);
   assert.equal(harness.autoUpdater.autoDownload, false);
   assert.equal(harness.autoUpdater.autoInstallOnAppQuit, true);
   assert.equal(harness.manager.installOnQuit(), true);
   assert.equal(harness.autoUpdater.quitAndInstallCalls, 0);
+});
+
+test("download chamado antes do check nao impede o download automatico posterior", async () => {
+  const harness = createHarness("lab", {
+    checkResult: { updateInfo: updateInfo("0.2.0-lab.1", "lab") },
+  });
+
+  assert.equal(await harness.manager.download(), false);
+  await harness.manager.start();
+
+  assert.equal(harness.autoUpdater.downloadCalls, 1);
+});
+
+test("manifesto sem SHA-512 valido e rejeitado antes do download", async () => {
+  const harness = createHarness("lab", {
+    checkResult: { updateInfo: updateInfo("0.2.0-lab.1", "lab", "nao-e-sha512") },
+  });
+
+  await harness.manager.start();
+
+  assert.equal(harness.autoUpdater.downloadCalls, 0);
+  assert.equal(harness.manager.installOnQuit(), false);
+  assert.ok(harness.events.some(event => event.code === "UPDATE_INTEGRITY_FAILED"));
+});
+
+test("LAB unsigned declara checksum-only sem simular Authenticode", async () => {
+  const harness = createHarness("lab", {
+    checkResult: { updateInfo: null },
+    integrityPolicy: { mode: "checksum-only", publisherNames: [] },
+  });
+
+  await harness.manager.start();
+
+  const policy = harness.events.find(event => event.code === "UPDATE_INTEGRITY_POLICY");
+  assert.equal(policy.metadata.integrityMode, "checksum-only");
+  assert.equal(policy.metadata.authenticodeVerified, false);
+  assert.doesNotMatch(JSON.stringify(policy), /assinado|signed/i);
+});
+
+test("politica Authenticode exige publisherName configurado", () => {
+  assert.throws(
+    () => createUpdateManager({
+      autoUpdater: new FakeUpdater(),
+      channelConfig: getChannelConfig("stable"),
+      diagnostics: { append: async () => {} },
+      appVersion: "1.0.0",
+      integrityPolicy: { mode: "checksum+authenticode", publisherNames: [] },
+    }),
+    error => error.code === "INVALID_UPDATE_INTEGRITY_POLICY",
+  );
 });
 
 test("dispose remove listeners e start e idempotente", async () => {
@@ -130,7 +210,19 @@ test("workflow separa tags, canais e publica hashes e metadados", async () => {
   assert.match(workflow, /lab-v\*/);
   assert.match(workflow, /["']v\*["']/);
   assert.match(workflow, /startsWith\(github\.ref_name, 'lab-v'\)/);
-  assert.match(workflow, /!startsWith\(github\.ref_name, 'lab-v'\)/);
+  assert.match(workflow, /startsWith\(github\.ref_name, 'v'\)/);
+  assert.match(workflow, /!contains\(github\.ref_name, '-'\)/);
+  assert.equal((workflow.match(/prepare-desktop-release\.mjs/g) ?? []).length, 2);
+  assert.match(workflow, /prepare-desktop-release\.mjs[^\n]+--channel lab/);
+  assert.match(workflow, /prepare-desktop-release\.mjs[^\n]+--channel stable[^\n]+--require-signed/);
+  assert.match(workflow, /WINDOWS_CSC_LINK/);
+  assert.match(workflow, /WINDOWS_CSC_KEY_PASSWORD/);
+  assert.match(workflow, /WINDOWS_PUBLISHER_NAME/);
+  assert.doesNotMatch(workflow, /runs-on: windows-latest\r?\n\s+env:/);
+  assert.match(workflow, /desktop:package:lab:ci/);
+  assert.match(workflow, /desktop:package:stable:ci/);
+  assert.match(workflow, /integrityMode = '\$\{\{ steps\.release\.outputs\.integrity_mode \}\}'/);
+  assert.match(workflow, /signed = \[System\.Convert\]::ToBoolean\('\$\{\{ steps\.release\.outputs\.signed \}\}'\)/);
   assert.match(workflow, /desktop:package:lab/);
   assert.match(workflow, /desktop:package:stable/);
   assert.match(workflow, /Get-FileHash[^\n]+SHA256/);

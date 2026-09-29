@@ -23,7 +23,9 @@
     "desktop:test": "node --test tests/desktop/*.test.mjs",
     "desktop:test:update": "node --test tests/desktop/update-manager.test.mjs",
     "desktop:package:lab": "node scripts/build-desktop.mjs --channel lab",
-    "desktop:package:stable": "node scripts/build-desktop.mjs --channel stable"
+    "desktop:package:lab:ci": "node scripts/build-desktop.mjs --channel lab --skip-tests",
+    "desktop:package:stable": "node scripts/build-desktop.mjs --channel stable",
+    "desktop:package:stable:ci": "node scripts/build-desktop.mjs --channel stable --skip-tests"
   },
   "dependencies": {
     "electron-updater": "6.8.9",

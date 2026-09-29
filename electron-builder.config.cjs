@@ -2,8 +2,10 @@
 
 /* eslint-disable @typescript-eslint/no-require-imports -- electron-builder loads this file as CommonJS. */
 
+const { readFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
 const { getChannelConfig } = require("./desktop/config/channel-data.cjs");
+const { resolveChannelVersion, validateSigningEnvironment } = require("./desktop/update/signing-policy.cjs");
 
 const RUNTIME_FILES = Object.freeze([
   "desktop/**/*",
@@ -32,9 +34,12 @@ const RUNTIME_FILES = Object.freeze([
   "!node_modules/**/{.codeclimate.yml,.editorconfig,.eslintrc,.eslintrc.*,.jekyll-metadata,tsconfig.json,graph.svg,Makefile,component.json}",
 ]);
 
-function resolveBuilderConfig(channel, projectDir = __dirname) {
+function resolveBuilderConfig(channel, projectDir = __dirname, environment = process.env) {
   const root = resolve(projectDir);
   const identity = getChannelConfig(channel);
+  const packageMetadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const releaseVersion = resolveChannelVersion(identity.channel, packageMetadata.version);
+  const signing = validateSigningEnvironment({ channel: identity.channel, environment });
   const artifactPrefix = identity.isLab ? "DOCPronto-Laboratorio" : "DOCPronto";
   return {
     appId: identity.appId,
@@ -51,8 +56,11 @@ function resolveBuilderConfig(channel, projectDir = __dirname) {
     extraMetadata: {
       name: identity.isLab ? "docpronto-laboratorio" : "docpronto",
       productName: identity.productName,
+      version: releaseVersion,
       main: "desktop/main.mjs",
       docprontoChannel: identity.channel,
+      docprontoIntegrityMode: signing.integrityMode,
+      docprontoPublisherNames: [...signing.publisherNames],
     },
     publish: [{
       provider: "github",
@@ -63,6 +71,10 @@ function resolveBuilderConfig(channel, projectDir = __dirname) {
     }],
     win: {
       icon: join(root, "build", identity.isLab ? "icon-lab.ico" : "icon.ico"),
+      ...(signing.signed ? {
+        publisherName: [...signing.publisherNames],
+        verifyUpdateCodeSignature: true,
+      } : {}),
       target: [
         { target: "nsis", arch: ["x64"] },
         { target: "portable", arch: ["x64"] },

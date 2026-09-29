@@ -17,6 +17,10 @@ import { listWindowsCertificates } from "./service/windows-capabilities.mjs";
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const packageMetadata = require("../package.json");
+const integrityPolicy = {
+  mode: packageMetadata.docprontoIntegrityMode ?? "checksum-only",
+  publisherNames: packageMetadata.docprontoPublisherNames ?? [],
+};
 const channel = resolveRuntimeChannel({
   isPackaged: app.isPackaged,
   packageChannel: packageMetadata.docprontoChannel,
@@ -47,7 +51,11 @@ const runtime = createDesktopRuntime({
   createStore: options => new DiagnosticStore(options),
   createUpdateManager: options => {
     if (!app.isPackaged) return { start: async () => false, dispose() {} };
-    return createUpdateManager({ ...options, autoUpdater: electronUpdater.autoUpdater });
+    return createUpdateManager({
+      ...options,
+      autoUpdater: electronUpdater.autoUpdater,
+      integrityPolicy,
+    });
   },
   exportDiagnostics: exportDiagnosticBundle,
   chooseDiagnosticDestination: async ({ window }) => {

@@ -30,8 +30,8 @@ const REQUIRED_EXCLUSIONS = [
 ];
 
 test("configura_identidades_e_artefatos_distintos_por_canal", () => {
-  const lab = resolveBuilderConfig("lab", projectDir);
-  const stable = resolveBuilderConfig("stable", projectDir);
+  const lab = resolveBuilderConfig("lab", projectDir, {});
+  const stable = resolveBuilderConfig("stable", projectDir, {});
 
   assert.equal(lab.appId, "br.com.docpronto.desktop.lab");
   assert.equal(lab.productName, "DOCPronto Laboratorio");
@@ -40,6 +40,10 @@ test("configura_identidades_e_artefatos_distintos_por_canal", () => {
   assert.equal(lab.portable.artifactName, "DOCPronto-Laboratorio-Portable-${version}-${arch}.${ext}");
   assert.equal(lab.directories.output, join(projectDir, "release", "lab"));
   assert.equal(lab.extraMetadata.docprontoChannel, "lab");
+  assert.equal(lab.extraMetadata.version, "0.1.0-lab.0");
+  assert.equal(lab.extraMetadata.docprontoIntegrityMode, "checksum-only");
+  assert.deepEqual(lab.extraMetadata.docprontoPublisherNames, []);
+  assert.equal("publisherName" in lab.win, false);
   assert.deepEqual(lab.publish, [{
     provider: "github",
     owner: "nikodeimus",
@@ -55,8 +59,27 @@ test("configura_identidades_e_artefatos_distintos_por_canal", () => {
   assert.equal(stable.portable.artifactName, "DOCPronto-Portable-${version}-${arch}.${ext}");
   assert.equal(stable.directories.output, join(projectDir, "release", "stable"));
   assert.equal(stable.extraMetadata.docprontoChannel, "stable");
+  assert.equal(stable.extraMetadata.version, "0.1.0");
+  assert.equal(stable.extraMetadata.docprontoIntegrityMode, "checksum-only");
   assert.equal(stable.publish[0].channel, "latest");
   assert.equal(stable.publish[0].releaseType, "release");
+});
+
+test("builder habilita Authenticode somente com certificado senha e publisherName", () => {
+  const signed = resolveBuilderConfig("stable", projectDir, {
+    CSC_LINK: "base64-cert",
+    CSC_KEY_PASSWORD: "secret",
+    DOCPRONTO_PUBLISHER_NAME: "DOCPronto Software Ltda",
+  });
+  assert.deepEqual(signed.win.publisherName, ["DOCPronto Software Ltda"]);
+  assert.equal(signed.win.verifyUpdateCodeSignature, true);
+  assert.equal(signed.extraMetadata.docprontoIntegrityMode, "checksum+authenticode");
+  assert.deepEqual(signed.extraMetadata.docprontoPublisherNames, ["DOCPronto Software Ltda"]);
+
+  assert.throws(
+    () => resolveBuilderConfig("lab", projectDir, { CSC_LINK: "base64-cert" }),
+    error => error.code === "INCOMPLETE_SIGNING_CONFIGURATION",
+  );
 });
 
 test("executavel_empacotado_descobre_o_canal_sem_argumento_ou_ambiente", async () => {
