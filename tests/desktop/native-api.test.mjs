@@ -280,6 +280,23 @@ test("enforces_streamed_body_limits_and_returns_typed_native_errors", async t =>
   });
 });
 
+test("returns_a_stable_413_when_the_native_output_exceeds_the_limit", async t => {
+  const { service } = await createFixture(t, {
+    convertOfficeDocument: async () => {
+      throw Object.assign(new Error("Arquivo convertido excede o limite local."), { code: "OUTPUT_TOO_LARGE" });
+    },
+  });
+  await openSession(service);
+
+  const response = await fetch(`${service.origin}/api/word-to-pdf`, {
+    method: "POST",
+    headers: { ...authorizedHeaders(service), "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: "relatorio.docx", contentBase64: "ZG9jeA==" }),
+  });
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).code, "OUTPUT_TOO_LARGE");
+});
+
 test("does_not_expose_unexpected_native_error_details_to_the_renderer_or_diagnostics", async t => {
   const diagnostics = [];
   const assetsRoot = await mkdtemp(join(tmpdir(), "docpronto-native-redaction-"));
@@ -346,4 +363,12 @@ test("renderer_requests_a_same_origin_POST_session_and_preserves_typed_errors", 
   assert.match(source, /Object\.assign\(new Error\(payload\.error[^)]*\),\s*\{\s*code:\s*payload\.code/s);
   assert.match(source, /\.\.\.\(pdfMode\s*\?\s*\{\s*placement\s*\}\s*:\s*\{\s*\}\)/s);
   assert.doesNotMatch(source, /127\.0\.0\.1:4174|DOCPronto-Conector-Windows/);
+  assert.doesNotMatch(source, /Baixe o conector|execute o atualizador|conector local/i);
+  assert.match(source, /Abra o aplicativo|Atualize o DOCPronto/);
+});
+
+test("landing_page_describes_the_desktop_app_instead_of_a_separate_connector", async () => {
+  const source = await readFile(new URL("../../public/docpronto/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /conector local/i);
+  assert.match(source, /aplicativo local/i);
 });

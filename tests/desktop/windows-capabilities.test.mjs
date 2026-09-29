@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -77,6 +78,13 @@ async function createPdfFixture({ pageCount = 1, unsignedSignatureName } = {}) {
 
 function createPdfSigningRunner({ onVerify } = {}) {
   return async script => {
+    if (script.includes("$cms.CheckSignature")) {
+      onVerify?.();
+      return "";
+    }
+    if (script.includes("$signedCms.ComputeSignature")) {
+      return Buffer.from("detached-test-signature").toString("base64");
+    }
     if (script.includes("X509Store")) {
       return JSON.stringify({
         subject: "CN=Test Signer",
@@ -84,13 +92,6 @@ function createPdfSigningRunner({ onVerify } = {}) {
         notAfter: "2030-01-01 00:00:00",
         label: "Test Signer - vence 01/01/2030",
       });
-    }
-    if (script.includes("$cms.CheckSignature")) {
-      onVerify?.();
-      return "";
-    }
-    if (script.includes("$signedCms.ComputeSignature")) {
-      return Buffer.from("detached-test-signature").toString("base64");
     }
     assert.fail("Unexpected PowerShell operation");
   };
@@ -343,6 +344,130 @@ test("reports_Word_or_PowerShell_unavailability_and_removes_temporaries", async 
   assert.deepEqual(await readdir(tempRoot), []);
 });
 
+test("rejects_oversized_Word_output_before_reading_or_serializing_it", async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-output-limit-test-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  let outputRead = false;
+
+  await assert.rejects(
+    convertOfficeDocument(
+      { filename: "relatorio.docx", contentBase64: Buffer.from("document").toString("base64") },
+      "pdf",
+      {
+        tempRoot,
+        runPowerShell: async () => {},
+        statOutputFile: async () => ({ size: (80 * 1024 * 1024) + 1 }),
+        readOutputFile: async () => {
+          outputRead = true;
+          return Buffer.alloc(0);
+        },
+      },
+    ),
+    hasCode("OUTPUT_TOO_LARGE"),
+  );
+  assert.equal(outputRead, false);
+  assert.deepEqual(await readdir(tempRoot), []);
+});
+
+test("Word_COM_cleanup_quits_only_an_instance_owned_by_the_operation", async () => {
+  await convertOfficeDocument(
+    { filename: "relatorio.docx", contentBase64: Buffer.from("document").toString("base64") },
+    "pdf",
+    {
+      runPowerShell: async script => {
+        assert.match(script, /\$ownsWordProcess\s*=\s*\$false/);
+        assert.match(script, /if \(\$ownsWordProcess\)\s*\{\s*\$word\.Quit\(\)/s);
+      },
+      statOutputFile: async () => ({ size: 8 }),
+      readOutputFile: async () => Buffer.from("%PDF-test"),
+    },
+  );
+});
+
+test("Word_timeout_kills_only_the_tracked_tree_and_preserves_the_timeout_error", async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-word-timeout-test-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => { child.killed = true; };
+  let trackedPath;
+
+  await assert.rejects(
+    convertOfficeDocument(
+      { filename: "relatorio.docx", contentBase64: Buffer.from("document").toString("base64") },
+      "pdf",
+      {
+        tempRoot,
+        timeoutMs: 10,
+        spawnPowerShell: () => child,
+        terminateTrackedWordProcess: async path => {
+          trackedPath = path;
+          throw new Error("cleanup failed");
+        },
+        removeTemporaryDirectory: async (path, options) => {
+          await rm(path, options);
+          throw new Error("post-cleanup bookkeeping failed");
+        },
+      },
+    ),
+    hasCode("LOCAL_OPERATION_TIMEOUT"),
+  );
+  assert.equal(child.killed, true);
+  assert.match(trackedPath, /word-process\.json$/);
+  assert.deepEqual(await readdir(tempRoot), []);
+});
+
+test("tracked_Word_cleanup_refuses_preexisting_or_reused_processes", async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-word-identity-test-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const trackingPath = join(tempRoot, "word-process.json");
+  const killed = [];
+
+  await writeFile(trackingPath, JSON.stringify({
+    pid: 4321,
+    operationStartedTicks: "200",
+    startedAtTicks: "100",
+  }));
+  assert.equal(await windowsCapabilities.terminateTrackedWordProcess(trackingPath, {
+    getProcessIdentity: async () => ({ name: "WINWORD", startedAtTicks: "100" }),
+    killProcessTree: async pid => killed.push(pid),
+  }), false);
+
+  await writeFile(trackingPath, JSON.stringify({
+    pid: 4321,
+    operationStartedTicks: "100",
+    startedAtTicks: "200",
+  }));
+  assert.equal(await windowsCapabilities.terminateTrackedWordProcess(trackingPath, {
+    getProcessIdentity: async () => ({ name: "notepad", startedAtTicks: "200" }),
+    killProcessTree: async pid => killed.push(pid),
+  }), false);
+  assert.equal(await windowsCapabilities.terminateTrackedWordProcess(trackingPath, {
+    getProcessIdentity: async () => ({ name: "WINWORD", startedAtTicks: "201" }),
+    killProcessTree: async pid => killed.push(pid),
+  }), false);
+  assert.deepEqual(killed, []);
+});
+
+test("tracked_Word_cleanup_kills_the_exact_new_WINWORD_tree", async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-word-kill-test-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const trackingPath = join(tempRoot, "word-process.json");
+  await writeFile(trackingPath, JSON.stringify({
+    pid: 9876,
+    operationStartedTicks: "100",
+    startedAtTicks: "200",
+  }));
+  const killed = [];
+
+  assert.equal(await windowsCapabilities.terminateTrackedWordProcess(trackingPath, {
+    getProcessIdentity: async pid => ({ name: "WINWORD", startedAtTicks: "200", pid }),
+    killProcessTree: async pid => killed.push(pid),
+  }), true);
+  assert.deepEqual(killed, [9876]);
+});
+
 test("consulta_a_capacidade_real_do_Word_e_retorna_resultado_tipado", async () => {
   assert.equal(typeof windowsCapabilities.probeMicrosoftWord, "function");
   const result = await windowsCapabilities.probeMicrosoftWord({
@@ -386,6 +511,19 @@ test("reports_a_missing_certificate_and_removes_signing_temporaries", async t =>
     hasCode("CERTIFICATE_NOT_FOUND"),
   );
   assert.deepEqual(await readdir(tempRoot), []);
+});
+
+test("validates_detached_p7s_integrity_single_signer_and_requested_thumbprint", async () => {
+  let verified = false;
+  const signature = await signWithWindowsCertificate({
+    thumbprint: VALID_THUMBPRINT,
+    contentBase64: Buffer.from("document").toString("base64"),
+  }, {
+    runPowerShell: createPdfSigningRunner({ onVerify: () => { verified = true; } }),
+  });
+
+  assert.equal(signature, Buffer.from("detached-test-signature").toString("base64"));
+  assert.equal(verified, true);
 });
 
 test("maps_certificate_provider_failures_to_a_stable_code", async () => {

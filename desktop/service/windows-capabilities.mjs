@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
 const MAX_INPUT_BYTES = 40 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 80 * 1024 * 1024;
 const ASSETS_ROOT = fileURLToPath(new URL("../../public/docpronto/", import.meta.url));
 
 function codedError(code, message, cause) {
@@ -32,6 +33,19 @@ function decodeInput(contentBase64) {
     throw codedError("INPUT_TOO_LARGE", "Arquivo grande demais para processamento local.");
   }
   return Buffer.from(compact, "base64");
+}
+
+async function cleanupTemporaryDirectory(path, dependencies = {}) {
+  try {
+    await (dependencies.removeTemporaryDirectory || rm)(path, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 50,
+    });
+  } catch {
+    // Cleanup must never replace the operation's primary result or error.
+  }
 }
 
 function classifyOperationError(error, operation) {
@@ -66,10 +80,15 @@ function withTimeout(promise, timeoutMs) {
 }
 
 async function invokePowerShell(script, env, defaultTimeoutMs, dependencies, operation) {
-  const runner = dependencies.runPowerShell || defaultRunPowerShell;
   const timeoutMs = dependencies.timeoutMs ?? defaultTimeoutMs;
   try {
-    return await withTimeout(Promise.resolve().then(() => runner(script, env, timeoutMs)), timeoutMs);
+    if (dependencies.runPowerShell) {
+      return await withTimeout(
+        Promise.resolve().then(() => dependencies.runPowerShell(script, env, timeoutMs)),
+        timeoutMs,
+      );
+    }
+    return await defaultRunPowerShell(script, env, timeoutMs, dependencies);
   } catch (error) {
     throw classifyOperationError(error, operation);
   }
@@ -158,24 +177,57 @@ async function signBufferWithWindowsCertificate(thumbprint, content, dependencie
       DOCPRONTO_SIGN_INPUT: inputPath,
     }, 120_000, dependencies, "certificate")).trim();
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    await cleanupTemporaryDirectory(tempDir, dependencies);
   }
 }
 
 export async function signWithWindowsCertificate(input, dependencies = {}) {
   const thumbprint = normalizeThumbprint(input?.thumbprint);
   const content = decodeInput(input?.contentBase64);
-  return signBufferWithWindowsCertificate(thumbprint, content, dependencies);
+  const signatureBase64 = await signBufferWithWindowsCertificate(thumbprint, content, dependencies);
+  await verifyDetachedWindowsSignature(thumbprint, content, signatureBase64, dependencies);
+  return signatureBase64;
 }
+
+const WORD_NATIVE_METHODS_SCRIPT = String.raw`
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DocProntoNativeMethods {
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+'@
+`;
+
+const WORD_PROCESS_TRACKING_SCRIPT = String.raw`
+$wordProcessId = [uint32]0
+[DocProntoNativeMethods]::GetWindowThreadProcessId([IntPtr]$word.Hwnd, [ref]$wordProcessId) | Out-Null
+$wordProcess = Get-Process -Id $wordProcessId -ErrorAction Stop
+$startedAtTicks = $wordProcess.StartTime.ToUniversalTime().Ticks
+$operationStartedTicks = [Int64]$env:DOCPRONTO_WORD_OPERATION_STARTED_TICKS
+if ($startedAtTicks -lt $operationStartedTicks) {
+  throw 'A instancia do Word e anterior a esta operacao.'
+}
+$ownsWordProcess = $true
+[PSCustomObject]@{
+  pid = [int]$wordProcessId
+  startedAtTicks = [string]$startedAtTicks
+  operationStartedTicks = [string]$operationStartedTicks
+} | ConvertTo-Json -Compress | Set-Content -LiteralPath $env:DOCPRONTO_WORD_PROCESS_FILE -Encoding UTF8
+`;
 
 const WORD_TO_PDF_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $inputPath = $env:DOCPRONTO_INPUT
 $outputPath = $env:DOCPRONTO_OUTPUT
+${WORD_NATIVE_METHODS_SCRIPT}
 $word = New-Object -ComObject Word.Application
-$word.Visible = $false
-$word.DisplayAlerts = 0
+$ownsWordProcess = $false
 try {
+  $word.Visible = $false
+  $word.DisplayAlerts = 0
+  ${WORD_PROCESS_TRACKING_SCRIPT}
   $doc = $word.Documents.Open($inputPath, $false, $true, $false)
   try {
     $doc.ExportAsFixedFormat($outputPath, 17)
@@ -183,7 +235,7 @@ try {
     $doc.Close($false)
   }
 } finally {
-  $word.Quit()
+  if ($ownsWordProcess) { $word.Quit() }
   [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
 }
 `;
@@ -192,10 +244,13 @@ const PDF_TO_WORD_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $inputPath = $env:DOCPRONTO_INPUT
 $outputPath = $env:DOCPRONTO_OUTPUT
+${WORD_NATIVE_METHODS_SCRIPT}
 $word = New-Object -ComObject Word.Application
-$word.Visible = $false
-$word.DisplayAlerts = 0
+$ownsWordProcess = $false
 try {
+  $word.Visible = $false
+  $word.DisplayAlerts = 0
+  ${WORD_PROCESS_TRACKING_SCRIPT}
   $doc = $word.Documents.Open($inputPath, $false, $true, $false)
   try {
     $doc.SaveAs2($outputPath, 16)
@@ -203,7 +258,7 @@ try {
     $doc.Close($false)
   }
 } finally {
-  $word.Quit()
+  if ($ownsWordProcess) { $word.Quit() }
   [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
 }
 `;
@@ -228,21 +283,29 @@ export async function convertOfficeDocument(input, target, dependencies = {}) {
   const tempDir = await mkdtemp(join(dependencies.tempRoot || tmpdir(), "docpronto-"));
   const inputPath = join(tempDir, `entrada${sourceExt}`);
   const outputPath = join(tempDir, `saida${targetExt}`);
+  const wordProcessPath = join(tempDir, "word-process.json");
   try {
     await writeFile(inputPath, content);
     const script = target === "pdf" ? WORD_TO_PDF_SCRIPT : PDF_TO_WORD_SCRIPT;
     const operationTimeout = target === "pdf" ? 120_000 : 45_000;
+    const operationStartedTicks = (BigInt(Date.now()) * 10_000n) + 621_355_968_000_000_000n;
     await invokePowerShell(script, {
       DOCPRONTO_INPUT: inputPath,
       DOCPRONTO_OUTPUT: outputPath,
+      DOCPRONTO_WORD_PROCESS_FILE: wordProcessPath,
+      DOCPRONTO_WORD_OPERATION_STARTED_TICKS: operationStartedTicks.toString(),
     }, operationTimeout, dependencies, "word");
-    const converted = await readFile(outputPath);
+    const outputInfo = await (dependencies.statOutputFile || stat)(outputPath);
+    if (outputInfo.size > MAX_OUTPUT_BYTES) {
+      throw codedError("OUTPUT_TOO_LARGE", "Arquivo convertido excede o limite local de 80 MB.");
+    }
+    const converted = await (dependencies.readOutputFile || readFile)(outputPath);
     return {
       filename: `${baseName(input.filename)}${targetExt}`,
       contentBase64: converted.toString("base64"),
     };
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    await cleanupTemporaryDirectory(tempDir, dependencies);
   }
 }
 
@@ -601,9 +664,70 @@ function escapePdfString(value) {
   return cleanPdfText(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
 
-function defaultRunPowerShell(script, env = {}, timeoutMs = 30_000) {
+const PROCESS_IDENTITY_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$process = Get-Process -Id ([int]$env:DOCPRONTO_TRACKED_PID) -ErrorAction Stop
+[PSCustomObject]@{
+  name = [string]$process.ProcessName
+  startedAtTicks = [string]$process.StartTime.ToUniversalTime().Ticks
+} | ConvertTo-Json -Compress
+`;
+
+async function defaultGetProcessIdentity(pid) {
+  const output = await defaultRunPowerShell(
+    PROCESS_IDENTITY_SCRIPT,
+    { DOCPRONTO_TRACKED_PID: String(pid) },
+    5_000,
+    {},
+  );
+  return JSON.parse(String(output));
+}
+
+function defaultKillProcessTree(pid) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+    let stderr = "";
+    child.stderr.on("data", chunk => { stderr += chunk.toString("utf8"); });
+    child.on("error", reject);
+    child.on("close", code => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || "Nao foi possivel encerrar a arvore do Word."));
+    });
+  });
+}
+
+export async function terminateTrackedWordProcess(trackingPath, dependencies = {}) {
+  let tracked;
+  try {
+    tracked = JSON.parse(await readFile(trackingPath, "utf8"));
+  } catch {
+    return false;
+  }
+  const pid = Number(tracked?.pid);
+  const startedAtTicks = String(tracked?.startedAtTicks || "");
+  const operationStartedTicks = String(tracked?.operationStartedTicks || "");
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !/^\d+$/.test(startedAtTicks)
+    || !/^\d+$/.test(operationStartedTicks) || BigInt(startedAtTicks) < BigInt(operationStartedTicks)) {
+    return false;
+  }
+  let identity;
+  try {
+    identity = await (dependencies.getProcessIdentity || defaultGetProcessIdentity)(pid);
+  } catch {
+    return false;
+  }
+  if (String(identity?.name || "").toUpperCase() !== "WINWORD"
+    || String(identity?.startedAtTicks || "") !== startedAtTicks) {
+    return false;
+  }
+  await (dependencies.killProcessTree || defaultKillProcessTree)(pid);
+  return true;
+}
+
+function defaultRunPowerShell(script, env = {}, timeoutMs = 30_000, dependencies = {}) {
   return new Promise((resolveOutput, reject) => {
-    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+    const spawnPowerShell = dependencies.spawnPowerShell || spawn;
+    const child = spawnPowerShell("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
       windowsHide: true,
       env: { ...process.env, ...env },
     });
@@ -616,9 +740,23 @@ function defaultRunPowerShell(script, env = {}, timeoutMs = 30_000) {
       clearTimeout(timer);
       callback(value);
     };
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(reject)(codedError("LOCAL_OPERATION_TIMEOUT", "Operacao local demorou demais e foi cancelada."));
+    const timer = setTimeout(async () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        if (env.DOCPRONTO_WORD_PROCESS_FILE) {
+          await (dependencies.terminateTrackedWordProcess || terminateTrackedWordProcess)(
+            env.DOCPRONTO_WORD_PROCESS_FILE,
+            dependencies,
+          );
+        }
+      } catch {
+        // Keep the primary timeout error even if process cleanup fails.
+      } finally {
+        child.kill("SIGKILL");
+      }
+      reject(codedError("LOCAL_OPERATION_TIMEOUT", "Operacao local demorou demais e foi cancelada."));
     }, timeoutMs);
     child.stdout.on("data", chunk => { stdout += chunk.toString("utf8"); });
     child.stderr.on("data", chunk => { stderr += chunk.toString("utf8"); });

@@ -44,6 +44,7 @@ const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "INVALID_SIGNATURE_PLACEMENT",
   "INVALID_SIGNED_PDF",
   "LOCAL_OPERATION_TIMEOUT",
+  "OUTPUT_TOO_LARGE",
   "REQUEST_TOO_LARGE",
   "UNSUPPORTED_MEDIA_TYPE",
   "WORD_UNAVAILABLE",
@@ -224,7 +225,7 @@ function methodNotAllowed(response, allowed) {
 
 function nativeErrorStatus(error) {
   if (Number.isInteger(error?.status)) return error.status;
-  if (error?.code === "INPUT_TOO_LARGE") return 413;
+  if (["INPUT_TOO_LARGE", "OUTPUT_TOO_LARGE"].includes(error?.code)) return 413;
   if (["WORD_UNAVAILABLE", "CERTIFICATE_PROVIDER_UNAVAILABLE"].includes(error?.code)) return 503;
   if (error?.code === "LOCAL_OPERATION_TIMEOUT") return 504;
   if (error?.code === "CERTIFICATE_NOT_FOUND") return 404;

@@ -1407,10 +1407,10 @@ async function ensureLocalSignerCompatible(apiBase) {
     const response = await localConnectorFetch("/api/health", { cache: "no-store" });
     health = await response.json();
   } catch {
-    throw new Error("O conector local do DOCPronto não está aberto. Baixe o conector atualizado, execute o atualizador e tente novamente.");
+    throw new Error("O aplicativo DOCPronto não está disponível para esta operação. Abra o aplicativo e tente novamente.");
   }
   if (Number(health?.pdfSigningEngine || 0) < 4) {
-    throw new Error("O conector local está desatualizado e pode corromper PDFs. Baixe o conector atualizado nesta tela, execute o atualizador e tente novamente.");
+    throw new Error("Esta versão do aplicativo precisa ser atualizada para assinar PDFs com segurança. Atualize o DOCPronto e tente novamente.");
   }
 }
 
@@ -1659,7 +1659,7 @@ async function requestLocalConnectorSession(apiBase) {
   });
   const payload = await sessionResponse.json().catch(() => ({}));
   if (!sessionResponse.ok || !payload.token) {
-    throw localConnectorError(payload, "Não foi possível iniciar uma sessão segura com o conector local.");
+    throw localConnectorError(payload, "Não foi possível iniciar uma sessão segura com o aplicativo DOCPronto.");
   }
   return payload.token;
 }
