@@ -1469,18 +1469,46 @@ async function chooseSignaturePlacement(file, label = "Assinatura digital") {
   makeSignatureBoxInteractive(box, preview);
   await renderPage();
 
+  let confirmedPlacement = null;
+  let placementError = null;
   const closeValue = await new Promise(resolve => {
+    const form = dialog.querySelector("form");
+    const onSubmit = event => {
+      if (event.submitter?.value !== "confirm") return;
+      try {
+        confirmedPlacement = signaturePlacementFromGeometry({
+          pageNumber,
+          boxRect: box.getBoundingClientRect(),
+          canvasRect: canvas.getBoundingClientRect(),
+          viewport,
+        });
+      } catch (error) {
+        placementError = error;
+      }
+    };
     const onClose = () => {
       dialog.removeEventListener("close", onClose);
+      form?.removeEventListener("submit", onSubmit);
       resolve(dialog.returnValue);
     };
+    form?.addEventListener("submit", onSubmit);
     dialog.addEventListener("close", onClose);
     dialog.showModal();
   });
   if (closeValue !== "confirm") throw new Error("Posicionamento da assinatura cancelado.");
+  if (placementError) throw placementError;
+  if (!confirmedPlacement) throw new Error("Não foi possível registrar a posição da assinatura. Escolha a posição novamente.");
+  return confirmedPlacement;
+}
 
-  const boxRect = box.getBoundingClientRect();
-  const canvasRect = canvas.getBoundingClientRect();
+function signaturePlacementFromGeometry(geometry) {
+  const { pageNumber, boxRect, canvasRect, viewport } = geometry;
+  if (!viewport || !Number.isFinite(canvasRect?.width) || !Number.isFinite(canvasRect?.height)
+    || canvasRect.width <= 0 || canvasRect.height <= 0
+    || !Number.isFinite(boxRect?.width) || !Number.isFinite(boxRect?.height)
+    || boxRect.width <= 0 || boxRect.height <= 0) {
+    throw new Error("A prévia da assinatura não está visível. Escolha a posição novamente.");
+  }
   const left = clamp(boxRect.left - canvasRect.left, 0, canvasRect.width - boxRect.width);
   const top = clamp(boxRect.top - canvasRect.top, 0, canvasRect.height - boxRect.height);
   const viewportLeft = left * viewport.width / canvasRect.width;
@@ -1489,7 +1517,7 @@ async function chooseSignaturePlacement(file, label = "Assinatura digital") {
   const viewportBottom = (top + boxRect.height) * viewport.height / canvasRect.height;
   const firstPoint = viewport.convertToPdfPoint(viewportLeft, viewportTop);
   const secondPoint = viewport.convertToPdfPoint(viewportRight, viewportBottom);
-  return {
+  const placement = {
     page: pageNumber,
     x: Math.min(firstPoint[0], secondPoint[0]),
     y: Math.min(firstPoint[1], secondPoint[1]),
@@ -1497,6 +1525,12 @@ async function chooseSignaturePlacement(file, label = "Assinatura digital") {
     height: Math.abs(secondPoint[1] - firstPoint[1]),
     coordinateSystem: "pdf-points-v2"
   };
+  if (!Number.isInteger(placement.page) || placement.page < 1
+    || ![placement.x, placement.y, placement.width, placement.height].every(Number.isFinite)
+    || placement.width <= 0 || placement.height <= 0) {
+    throw new Error("A posição escolhida para a assinatura é inválida. Escolha a posição novamente.");
+  }
+  return placement;
 }
 
 function placeDefaultSignatureBox(box, canvas) {
