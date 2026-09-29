@@ -13,8 +13,8 @@ export async function verifyPackagedReleases({ root = projectDir } = {}) {
   ];
   const results = [];
   for (const identity of channels) {
-    const resources = join(root, "release", identity.channel, "win-unpacked", "resources");
-    const result = await inspectPackagedOutput(resources, {
+    const packageDirectory = join(root, "release", identity.channel, "win-unpacked");
+    const result = await inspectPackagedOutput(packageDirectory, {
       expectedChannel: identity.channel,
       expectedProductName: identity.productName,
     });
@@ -22,6 +22,8 @@ export async function verifyPackagedReleases({ root = projectDir } = {}) {
     assert.deepEqual(result.forbiddenFiles, [], `${identity.channel}: forbidden archive files`);
     assert.deepEqual(result.outsideAllowlist, [], `${identity.channel}: files outside allowlist`);
     assert.deepEqual(result.sensitiveContentFiles, [], `${identity.channel}: personal paths in packaged text`);
+    assert.deepEqual(result.forbiddenExternalFiles, [], `${identity.channel}: forbidden files outside app.asar`);
+    assert.deepEqual(result.sensitiveExternalContentFiles, [], `${identity.channel}: personal paths outside app.asar`);
     assert.deepEqual(result.identityErrors, [], `${identity.channel}: package identity mismatch`);
     results.push({ channel: identity.channel, files: result.archiveFiles.length });
   }

@@ -5,12 +5,14 @@ import { join } from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 
-import {
+import * as windowsCapabilities from "../../desktop/service/windows-capabilities.mjs";
+
+const {
   convertOfficeDocument,
   listWindowsCertificates,
   signPdfWithWindowsCertificate,
   signWithWindowsCertificate,
-} from "../../desktop/service/windows-capabilities.mjs";
+} = windowsCapabilities;
 
 const VALID_THUMBPRINT = "0123456789ABCDEF0123456789ABCDEF01234567";
 const VALID_PLACEMENT = {
@@ -341,6 +343,32 @@ test("reports_Word_or_PowerShell_unavailability_and_removes_temporaries", async 
   assert.deepEqual(await readdir(tempRoot), []);
 });
 
+test("consulta_a_capacidade_real_do_Word_e_retorna_resultado_tipado", async () => {
+  assert.equal(typeof windowsCapabilities.probeMicrosoftWord, "function");
+  const result = await windowsCapabilities.probeMicrosoftWord({
+    runPowerShell: async script => {
+      assert.match(script, /Word\.Application/);
+      return JSON.stringify({ version: "16.0" });
+    },
+  });
+
+  assert.deepEqual(result, { capability: "word", status: "available", version: "16.0" });
+});
+
+test("consulta_do_Word_preserva_ausencia_legitima", async () => {
+  assert.equal(typeof windowsCapabilities.probeMicrosoftWord, "function");
+  await assert.rejects(
+    windowsCapabilities.probeMicrosoftWord({
+      runPowerShell: async () => {
+        const error = new Error("Word.Application COM class is unavailable");
+        error.code = "ENOENT";
+        throw error;
+      },
+    }),
+    hasCode("WORD_UNAVAILABLE"),
+  );
+});
+
 test("reports_a_missing_certificate_and_removes_signing_temporaries", async t => {
   const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-sign-test-"));
   t.after(() => rm(tempRoot, { recursive: true, force: true }));
@@ -375,6 +403,16 @@ test("maps_certificate_provider_failures_to_a_stable_code", async () => {
       { runPowerShell: providerFailure },
     ),
     hasCode("CERTIFICATE_PROVIDER_UNAVAILABLE"),
+  );
+});
+
+test("preserva_falha_desconhecida_do_certificado_sem_fabricar_indisponibilidade", async () => {
+  const unknownFailure = Object.assign(new Error("unexpected certificate parser failure"), {
+    code: "CERTIFICATE_PARSE_BROKEN",
+  });
+  await assert.rejects(
+    listWindowsCertificates({ runPowerShell: async () => { throw unknownFailure; } }),
+    error => error === unknownFailure && error.code === "CERTIFICATE_PARSE_BROKEN",
   );
 });
 

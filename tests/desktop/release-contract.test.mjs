@@ -29,6 +29,7 @@ test("smoke_empacotado_tem_um_protocolo_observavel_e_limites_fixos", async () =>
   assert.equal(smoke.HEALTH_TIMEOUT_MS, 15_000);
   assert.equal(smoke.PREPARATION_LAUNCHES, 2);
   assert.equal(typeof smoke.runPackagedSmoke, "function");
+  assert.equal(typeof smoke.runPackagedSmokes, "function");
   assert.throws(
     () => smoke.assertLaunchDuration(3_001),
     error => error.code === "SMOKE_UI_SLOW",
@@ -36,13 +37,21 @@ test("smoke_empacotado_tem_um_protocolo_observavel_e_limites_fixos", async () =>
   assert.doesNotThrow(() => smoke.assertLaunchDuration(3_000));
   assert.deepEqual(smoke.REQUIRED_EVENTS, [
     "service-ready",
-    "renderer-ready",
+    "window-painted",
     "certificate-capability",
+    "word-capability",
     "second-instance",
     "stopping",
   ]);
   const smokeSource = await readFile(join(projectDir, "scripts", "smoke-desktop.mjs"), "utf8");
   assert.doesNotMatch(smokeSource, /--disable-gpu/);
+  assert.doesNotMatch(smokeSource, /spawn\(executable[\s\S]{0,220}windowsHide:\s*true/);
+  assert.match(smokeSource, /DOCPronto Laboratorio\.exe/);
+  assert.match(smokeSource, /DOCPronto\.exe/);
+  assert.equal(smoke.acceptsCertificateCapability({ capability: "certificate", status: "unavailable", code: "CERTIFICATE_PROVIDER_UNAVAILABLE" }), true);
+  assert.equal(smoke.acceptsCertificateCapability({ capability: "certificate", status: "unavailable", code: "RANDOM_PROVIDER_FAILURE" }), false);
+  assert.equal(smoke.acceptsWordCapability({ capability: "word", status: "unavailable", code: "WORD_UNAVAILABLE" }), true);
+  assert.equal(smoke.acceptsWordCapability({ capability: "word", status: "unavailable", code: "RANDOM_WORD_FAILURE" }), false);
 });
 
 test("smoke_nao_fabrica_indisponibilidade_de_Word_ou_certificado", async () => {
@@ -55,16 +64,23 @@ test("smoke_nao_fabrica_indisponibilidade_de_Word_ou_certificado", async () => {
   assert.match(main, /certificate-capability/);
 });
 
-test("renderer_sinaliza_prontidao_somente_apos_montar_a_interface_principal", async () => {
+test("renderer_sinaliza_frame_pintado_somente_apos_janela_visivel", async () => {
   const app = await readFile(join(projectDir, "public", "docpronto", "app.js"), "utf8");
   const html = await readFile(join(projectDir, "public", "docpronto", "index.html"), "utf8");
+  const main = await readFile(join(projectDir, "desktop", "runtime.mjs"), "utf8");
   const smoke = await readFile(join(projectDir, "scripts", "smoke-desktop.mjs"), "utf8");
-  assert.match(app, /requestAnimationFrame[\s\S]*signalReady/);
-  assert.match(app, /signalReady[\s\S]*import\("\.\/lab-ui\.mjs/);
+  const desktopMain = await readFile(join(projectDir, "desktop", "main.mjs"), "utf8");
+  assert.match(app, /requestAnimationFrame[\s\S]*requestAnimationFrame[\s\S]*signalPainted/);
+  assert.match(app, /signalPainted[\s\S]*import\("\.\/lab-ui\.mjs/);
+  assert.match(main, /isVisible\(\)/);
   assert.match(app, /await loadToolLibraries\(\)[\s\S]*activeTool\.action/);
   assert.doesNotMatch(html, /<script\s+src="vendor\//);
   assert.doesNotMatch(html, /<script[^>]+src="lab-ui\.mjs/);
   assert.match(smoke, /waitForEvent\(reportPath, event => event\.type === "stopping"/);
+  assert.doesNotMatch(desktopMain, /^import electronUpdater/m);
+  assert.match(desktopMain, /await import\("electron-updater"\)/);
+  assert.doesNotMatch(desktopMain, /^import \{ exportDiagnosticBundle \}/m);
+  assert.match(desktopMain, /await import\("\.\/diagnostics\/export\.mjs"\)/);
 });
 
 test("configuracao_estavel_nao_carrega_identidade_LAB", () => {

@@ -70,10 +70,24 @@ window.addEventListener("docpronto:retry-tool", event => {
   const tool = tools.find(item => item.id === event.detail?.toolId);
   if (tool) openTool(tool, document.querySelector(`[data-tool="${tool.id}"]`));
 });
-window.requestAnimationFrame(() => {
-  void window.docprontoDesktop?.signalReady?.();
-  if (window.docprontoDesktop) void import("./lab-ui.mjs");
-});
+function signalDesktopPaintedFrame() {
+  if (!window.docprontoDesktop) return;
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(async () => {
+      try {
+        const accepted = await window.docprontoDesktop.signalPainted();
+        if (accepted) {
+          void import("./lab-ui.mjs");
+        } else {
+          window.setTimeout(signalDesktopPaintedFrame, 16);
+        }
+      } catch {
+        // The desktop shell owns startup diagnostics; the web build remains usable.
+      }
+    });
+  });
+}
+signalDesktopPaintedFrame();
 
 function renderTools() {
   elements.grid.innerHTML = tools.map(tool => `

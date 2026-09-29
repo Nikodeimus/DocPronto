@@ -34,7 +34,9 @@ npm run desktop:test
 npm run desktop:verify
 ```
 
-`desktop:verify` e o gate local unico: executa a suite web e Desktop, gera e inspeciona fisicamente LAB e Estavel e abre o executavel LAB real para o smoke de interface, health, instancia unica e encerramento. O smoke exige Windows e falha se outro DOCPronto Laboratorio ja estiver aberto. Como um EXE novo e sem Authenticode pode ser inspecionado pelo Windows nas primeiras aberturas, o gate registra duas aberturas de preparacao e depois mede uma unica nova abertura. O limite de 3 segundos começa imediatamente antes desse `spawn` medido e termina quando o renderer confirma, por IPC protegido, que o DOM e o JavaScript principal estão utilizáveis; essa medicao oficial nao e repetida quando falha.
+`desktop:verify` e o gate local unico: executa a suite web e Desktop, gera e inspeciona fisicamente LAB e Estavel e abre os dois executaveis reais para o smoke de interface, health, capacidades opcionais, instancia unica e encerramento. O smoke exige Windows e falha se o canal que sera testado ja estiver aberto. Para cada canal, ele faz duas aberturas de preparacao e depois mede uma unica nova abertura. O limite de 3 segundos começa imediatamente antes desse `spawn` medido e termina somente quando a janela esta mostrada e o renderer confirma, por IPC protegido depois de dois frames, que o DOM e o JavaScript principal foram efetivamente pintados; essa medicao oficial nao e repetida quando falha.
+
+As duas preparacoes reduzem a variacao de cache, antivirus e inspecao do executavel. Portanto, o limite de 3 segundos e um contrato de abertura aquecida do build homologado, nao uma promessa sobre a primeira abertura em qualquer computador. A primeira execucao de um EXE novo e sem Authenticode pode ser mais lenta ou aguardar uma decisao do SmartScreen. O relatorio preserva os tempos das preparacoes para deixar essa diferenca visivel.
 
 ## Builds Locais
 

@@ -40,6 +40,7 @@ export function createMainWindow({ BrowserWindow, origin, preloadPath, channelCo
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      backgroundThrottling: false,
       preload: preloadPath,
     },
   });

@@ -12,8 +12,9 @@ export const HEALTH_TIMEOUT_MS = 15_000;
 export const PREPARATION_LAUNCHES = 2;
 export const REQUIRED_EVENTS = Object.freeze([
   "service-ready",
-  "renderer-ready",
+  "window-painted",
   "certificate-capability",
+  "word-capability",
   "second-instance",
   "stopping",
 ]);
@@ -27,8 +28,23 @@ function smokeError(code, message) {
 
 export function assertLaunchDuration(launchElapsedMs) {
   if (!Number.isFinite(launchElapsedMs) || launchElapsedMs > UI_TIMEOUT_MS) {
-    throw smokeError("SMOKE_UI_SLOW", `Renderer became ready after ${launchElapsedMs} ms from spawn.`);
+    throw smokeError("SMOKE_UI_SLOW", `A visible window painted after ${launchElapsedMs} ms from spawn.`);
   }
+}
+
+export function acceptsCertificateCapability(event) {
+  if (event?.capability !== "certificate") return false;
+  if (event.status === "available") return Number.isInteger(event.count) && event.count >= 0;
+  if (event.status === "unavailable") return event.code === "CERTIFICATE_PROVIDER_UNAVAILABLE";
+  return event.status === "error" && event.code === "LOCAL_OPERATION_TIMEOUT";
+}
+
+export function acceptsWordCapability(event) {
+  if (event?.capability !== "word") return false;
+  if (event.status === "available") return typeof event.version === "string" && event.version.length > 0;
+  const unavailableCode = ["WORD", "UNAVAILABLE"].join("_");
+  if (event.status === "unavailable") return event.code === unavailableCode;
+  return event.status === "error" && event.code === "LOCAL_OPERATION_TIMEOUT";
 }
 
 async function eventsFrom(reportPath) {
@@ -144,16 +160,15 @@ async function warmPackagedExecutable(executable) {
     },
     shell: false,
     stdio: "ignore",
-    windowsHide: true,
   });
   try {
     const service = await waitForEvent(reportPath, event => event.type === "service-ready", 30_000, "SMOKE_WARMUP_TIMEOUT");
-    const renderer = await waitForEvent(reportPath, event => event.type === "renderer-ready", 30_000, "SMOKE_WARMUP_TIMEOUT");
+    const painted = await waitForEvent(reportPath, event => event.type === "window-painted", 30_000, "SMOKE_WARMUP_TIMEOUT");
     await writeFile(controlPath, "quit", "utf8");
     await waitForEvent(reportPath, event => event.type === "stopping", 5_000, "SMOKE_WARMUP_STOP_TIMEOUT");
     await waitForExit(child, 15_000);
     await waitForPortRelease(new URL(service.origin).port);
-    return Date.parse(renderer.timestamp) - startedAt;
+    return Date.parse(painted.timestamp) - startedAt;
   } finally {
     if (child.exitCode === null) await terminateTree(child.pid);
     await rm(temporaryDirectory, { recursive: true, force: true });
@@ -162,6 +177,7 @@ async function warmPackagedExecutable(executable) {
 
 export async function runPackagedSmoke({
   executable = join(projectDir, "release", "lab", "win-unpacked", "DOCPronto Laboratorio.exe"),
+  expectedChannel = "lab",
 } = {}) {
   if (process.platform !== "win32") {
     throw smokeError("SMOKE_WINDOWS_REQUIRED", "The packaged desktop smoke test requires Windows.");
@@ -192,7 +208,7 @@ export async function runPackagedSmoke({
   try {
     const startedAt = Date.now();
     first = spawn(executable, [], {
-      cwd: dirname(executable), env: environment, shell: false, stdio: "ignore", windowsHide: true,
+      cwd: dirname(executable), env: environment, shell: false, stdio: "ignore",
     });
     first.once("error", () => {});
 
@@ -205,28 +221,30 @@ export async function runPackagedSmoke({
     });
     if (!healthResponse.ok) throw smokeError("SMOKE_HEALTH_FAILED", `Health returned HTTP ${healthResponse.status}.`);
     const health = await healthResponse.json();
-    if (health.channel !== "lab" || health.version !== service.version) {
-      throw smokeError("SMOKE_IDENTITY_MISMATCH", "Health metadata does not match the LAB executable.");
+    if (health.channel !== expectedChannel || health.version !== service.version) {
+      throw smokeError("SMOKE_IDENTITY_MISMATCH", `Health metadata does not match the ${expectedChannel} executable.`);
     }
 
-    const renderer = await waitForEvent(reportPath, event => event.type === "renderer-ready", HEALTH_TIMEOUT_MS, "SMOKE_UI_TIMEOUT");
-    const launchElapsedMs = Date.parse(renderer.timestamp) - startedAt;
+    const painted = await waitForEvent(reportPath, event => event.type === "window-painted", HEALTH_TIMEOUT_MS, "SMOKE_UI_TIMEOUT");
+    const launchElapsedMs = Date.parse(painted.timestamp) - startedAt;
     try {
       assertLaunchDuration(launchElapsedMs);
     } catch (error) {
-      error.message += ` Renderer process uptime: ${renderer.uptimeMs} ms.`;
+      error.message += ` Process uptime: ${painted.uptimeMs} ms.`;
       throw error;
     }
 
     const certificate = await waitForEvent(reportPath, event => event.type === "certificate-capability", 35_000, "SMOKE_CERTIFICATE_RESULT_MISSING");
-    const expectedCertificateResult = certificate.status === "available"
-      || (certificate.status === "error" && ["CERTIFICATE_PROVIDER_UNAVAILABLE", "LOCAL_OPERATION_TIMEOUT"].includes(certificate.code));
-    if (first.exitCode !== null || certificate.capability !== "certificate" || !expectedCertificateResult) {
+    if (first.exitCode !== null || !acceptsCertificateCapability(certificate)) {
       throw smokeError("SMOKE_OPTIONAL_CAPABILITY_CRASH", "The real certificate provider affected the main window.");
+    }
+    const word = await waitForEvent(reportPath, event => event.type === "word-capability", 25_000, "SMOKE_WORD_RESULT_MISSING");
+    if (first.exitCode !== null || !acceptsWordCapability(word)) {
+      throw smokeError("SMOKE_OPTIONAL_CAPABILITY_CRASH", "The real Word capability returned an unexpected result.");
     }
 
     second = spawn(executable, [], {
-      cwd: dirname(executable), env: environment, shell: false, stdio: "ignore", windowsHide: true,
+      cwd: dirname(executable), env: environment, shell: false, stdio: "ignore",
     });
     const secondInstance = await waitForEvent(reportPath, event => (
       event.type === "second-instance" && event.pid === first.pid
@@ -239,7 +257,7 @@ export async function runPackagedSmoke({
     await writeFile(controlPath, "quit", "utf8");
     await waitForEvent(reportPath, event => event.type === "stopping", 5_000, "SMOKE_STOP_EVENT_MISSING");
     const firstExit = await waitForExit(first, 10_000);
-    if (firstExit.code !== 0) throw smokeError("SMOKE_EXIT_FAILED", `LAB exited with code ${firstExit.code}.`);
+    if (firstExit.code !== 0) throw smokeError("SMOKE_EXIT_FAILED", `${expectedChannel} exited with code ${firstExit.code}.`);
     await waitForPortRelease(new URL(service.origin).port);
     await new Promise(resolveWait => setTimeout(resolveWait, 500));
 
@@ -264,7 +282,25 @@ export async function runPackagedSmoke({
   }
 }
 
+export async function runPackagedSmokes({ root = projectDir } = {}) {
+  const targets = [
+    {
+      expectedChannel: "lab",
+      executable: join(root, "release", "lab", "win-unpacked", "DOCPronto Laboratorio.exe"),
+    },
+    {
+      expectedChannel: "stable",
+      executable: join(root, "release", "stable", "win-unpacked", "DOCPronto.exe"),
+    },
+  ];
+  const results = [];
+  for (const target of targets) results.push(await runPackagedSmoke(target));
+  return results;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = await runPackagedSmoke();
-  console.log(`Desktop smoke passed: ${result.channel} ${result.version}, renderer ${result.launchElapsedMs} ms from measured spawn (preparations ${result.warmupElapsedMs.join(", ")} ms), port ${result.port}.`);
+  const results = await runPackagedSmokes();
+  for (const result of results) {
+    console.log(`Desktop smoke passed: ${result.channel} ${result.version}, painted window ${result.launchElapsedMs} ms from measured spawn (preparations ${result.warmupElapsedMs.join(", ")} ms), port ${result.port}.`);
+  }
 }

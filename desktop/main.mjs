@@ -6,15 +6,13 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import electronUpdater from "electron-updater";
 
 import { DiagnosticStore } from "./diagnostics/store.mjs";
-import { exportDiagnosticBundle } from "./diagnostics/export.mjs";
 import { resolveRuntimeChannel } from "./config/channel.mjs";
 import { createDesktopRuntime } from "./runtime.mjs";
 import { createUpdateManager } from "./update/manager.mjs";
 import { startDocProntoService } from "./service/server.mjs";
-import { listWindowsCertificates } from "./service/windows-capabilities.mjs";
+import { listWindowsCertificates, probeMicrosoftWord } from "./service/windows-capabilities.mjs";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -95,16 +93,20 @@ const runtime = createDesktopRuntime({
     appInfo: { version: app.getVersion(), channel },
   }),
   createStore: options => new DiagnosticStore(options),
-  createUpdateManager: options => {
+  createUpdateManager: async options => {
     if (smokeMode) return { start: async () => false, dispose() {} };
     if (!app.isPackaged) return { start: async () => false, dispose() {} };
+    const electronUpdater = (await import("electron-updater")).default;
     return createUpdateManager({
       ...options,
       autoUpdater: electronUpdater.autoUpdater,
       integrityPolicy,
     });
   },
-  exportDiagnostics: exportDiagnosticBundle,
+  exportDiagnostics: async options => {
+    const { exportDiagnosticBundle } = await import("./diagnostics/export.mjs");
+    return exportDiagnosticBundle(options);
+  },
   chooseDiagnosticDestination: async ({ window }) => {
     const date = new Date().toISOString().slice(0, 10);
     const result = await dialog.showSaveDialog(window, {
@@ -124,20 +126,46 @@ const runtime = createDesktopRuntime({
   initializeOptionalCapabilities: async () => {
     if (process.platform !== "win32") return;
     if (smokeMode && process.env.DOCPRONTO_SMOKE_WARMUP === "1") return;
-    try {
-      const certificates = await listWindowsCertificates();
-      reportSmoke({
-        type: "certificate-capability",
-        capability: "certificate",
-        status: "available",
-        count: certificates.length,
-      });
-    } catch (error) {
-      const expectedCodes = new Set(["CERTIFICATE_PROVIDER_UNAVAILABLE", "LOCAL_OPERATION_TIMEOUT"]);
-      const code = expectedCodes.has(error?.code) ? error.code : "CERTIFICATE_PROVIDER_UNAVAILABLE";
-      reportSmoke({ type: "certificate-capability", capability: "certificate", status: "error", code });
-      throw Object.assign(error, { code });
-    }
+    const checks = [
+      async () => {
+        try {
+          const certificates = await listWindowsCertificates();
+          reportSmoke({
+            type: "certificate-capability",
+            capability: "certificate",
+            status: "available",
+            count: certificates.length,
+          });
+        } catch (error) {
+          const status = error?.code === "CERTIFICATE_PROVIDER_UNAVAILABLE" ? "unavailable" : "error";
+          reportSmoke({
+            type: "certificate-capability",
+            capability: "certificate",
+            status,
+            code: error?.code ?? "CERTIFICATE_CAPABILITY_FAILED",
+          });
+          if (status === "error" && error?.code !== "LOCAL_OPERATION_TIMEOUT") throw error;
+        }
+      },
+      async () => {
+        try {
+          const word = await probeMicrosoftWord();
+          reportSmoke({ type: "word-capability", ...word });
+        } catch (error) {
+          const status = error?.code === "WORD_UNAVAILABLE" ? "unavailable" : "error";
+          reportSmoke({
+            type: "word-capability",
+            capability: "word",
+            status,
+            code: error?.code ?? "WORD_CAPABILITY_FAILED",
+          });
+          if (status === "error" && error?.code !== "LOCAL_OPERATION_TIMEOUT") throw error;
+        }
+      },
+    ];
+    const results = await Promise.allSettled(checks.map(check => check()));
+    const unexpected = results.find(result => result.status === "rejected");
+    if (unexpected) throw unexpected.reason;
   },
   healthCheck: checkServiceHealth,
   assetsRoot: join(currentDirectory, "..", "public", "docpronto"),

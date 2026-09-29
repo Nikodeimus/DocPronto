@@ -44,7 +44,7 @@ function classifyOperationError(error, operation) {
   if (operation === "word" && /ENOENT|powershell|Word\.Application|COM|ActiveX/i.test(detail)) {
     return codedError("WORD_UNAVAILABLE", "Microsoft Word ou PowerShell nao esta disponivel.", error);
   }
-  if (operation === "certificate") {
+  if (operation === "certificate" && /ENOENT|powershell|smart card|cryptographic provider|cert:\\|certificate provider/i.test(detail)) {
     return codedError(
       "CERTIFICATE_PROVIDER_UNAVAILABLE",
       "O provedor de certificados do Windows nao esta disponivel.",
@@ -103,6 +103,27 @@ export async function listWindowsCertificates(dependencies = {}) {
   if (!String(output).trim()) return [];
   const parsed = JSON.parse(output);
   return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+const PROBE_WORD_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$word = New-Object -ComObject Word.Application
+try {
+  [PSCustomObject]@{ version = [string]$word.Version } | ConvertTo-Json -Compress
+} finally {
+  $word.Quit()
+  [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+}
+`;
+
+export async function probeMicrosoftWord(dependencies = {}) {
+  const output = await invokePowerShell(PROBE_WORD_SCRIPT, {}, 20_000, dependencies, "word");
+  const result = JSON.parse(String(output));
+  return {
+    capability: "word",
+    status: "available",
+    version: String(result.version || "unknown"),
+  };
 }
 
 const SIGN_SCRIPT = String.raw`

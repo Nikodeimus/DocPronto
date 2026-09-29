@@ -42,13 +42,15 @@ function createHarness({
     async close() { this.closeCalls += 1; },
   };
   const window = new EventEmitter();
+  window.visible = false;
   window.restoreCalls = 0;
   window.focusCalls = 0;
   window.showCalls = 0;
   window.isMinimized = () => true;
   window.restore = () => { window.restoreCalls += 1; };
   window.focus = () => { window.focusCalls += 1; };
-  window.show = () => { window.showCalls += 1; };
+  window.show = () => { window.showCalls += 1; window.visible = true; };
+  window.isVisible = () => window.visible;
   window.destroyCalls = 0;
   window.destroy = () => {
     window.destroyCalls += 1;
@@ -131,6 +133,8 @@ test("janela carrega enquanto a verificacao interna de saude esta pendente", asy
 
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(harness.calls.window, 1);
+  assert.equal(harness.window.showCalls, 1);
+  assert.equal(harness.window.isVisible(), true);
 
   releaseHealthCheck();
   await starting;
@@ -165,7 +169,7 @@ test("segunda instancia restaura, mostra e foca a janela existente", async () =>
   assert.ok(harness.lifecycleEvents.some(event => event.type === "second-instance"));
 });
 
-test("runtime aceita prontidao somente do renderer confiavel", async () => {
+test("runtime aceita frame pintado somente do renderer confiavel com janela visivel", async () => {
   const optionalError = Object.assign(new Error("Word ausente"), { code: "WORD_UNAVAILABLE" });
   const harness = createHarness({ optionalError });
   const runtime = createDesktopRuntime(harness.dependencies);
@@ -174,9 +178,16 @@ test("runtime aceita prontidao somente do renderer confiavel", async () => {
   assert.ok(harness.lifecycleEvents.some(event => (
     event.type === "service-ready" && event.origin === harness.service.origin
   )));
-  assert.equal(harness.lifecycleEvents.some(event => event.type === "renderer-ready"), false);
-  await harness.ipcHandlers.get("docpronto:renderer-ready")(harness.trustedEvent());
-  assert.ok(harness.lifecycleEvents.some(event => event.type === "renderer-ready"));
+  harness.window.visible = false;
+  assert.equal(await harness.ipcHandlers.get("docpronto:window-painted")(harness.trustedEvent()), false);
+  assert.equal(harness.lifecycleEvents.some(event => event.type === "window-painted"), false);
+  assert.equal(harness.calls.optional, 0);
+
+  harness.window.visible = true;
+  assert.equal(await harness.ipcHandlers.get("docpronto:window-painted")(harness.trustedEvent()), true);
+  assert.ok(harness.lifecycleEvents.some(event => (
+    event.type === "window-painted" && event.windowVisible === true && event.framePainted === true
+  )));
 
   harness.window.emit("ready-to-show");
   await runtime.optionalReady;
@@ -226,7 +237,7 @@ test("capacidade opcional com falha nao impede a janela", async () => {
   const runtime = createDesktopRuntime(harness.dependencies);
   await runtime.start();
   harness.window.emit("ready-to-show");
-  await harness.ipcHandlers.get("docpronto:renderer-ready")(harness.trustedEvent());
+  await harness.ipcHandlers.get("docpronto:window-painted")(harness.trustedEvent());
   await runtime.optionalReady;
   assert.equal(harness.calls.window, 1);
   assert.equal(harness.calls.updater, 1);
@@ -242,7 +253,7 @@ test("recursos opcionais iniciam somente depois do renderer utilizavel e sao des
   harness.window.emit("ready-to-show");
   assert.equal(harness.calls.updater, 0);
 
-  await harness.ipcHandlers.get("docpronto:renderer-ready")(harness.trustedEvent());
+  await harness.ipcHandlers.get("docpronto:window-painted")(harness.trustedEvent());
   await runtime.optionalReady;
   assert.equal(harness.calls.updater, 1);
 
@@ -347,7 +358,7 @@ test("IPC expoe somente contratos enumerados e usa o store", async () => {
     "docpronto:diagnostics:list",
     "docpronto:diagnostics:record",
     "docpronto:get-app-info",
-    "docpronto:renderer-ready",
+    "docpronto:window-painted",
   ]);
   await harness.ipcHandlers.get("docpronto:diagnostics:record")(harness.trustedEvent(), { code: "TEST_EVENT" });
   assert.ok(harness.diagnostics.some(event => event.code === "TEST_EVENT"));

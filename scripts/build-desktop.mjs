@@ -56,7 +56,7 @@ export async function buildDesktop(arguments_ = process.argv.slice(2)) {
   await run(process.execPath, ["--test", "tests/desktop/packaged-output.test.mjs"], {
     env: {
       ...process.env,
-      DOCPRONTO_PACKAGED_RESOURCES: join(config.directories.output, "win-unpacked", "resources"),
+      DOCPRONTO_PACKAGED_OUTPUT: join(config.directories.output, "win-unpacked"),
       DOCPRONTO_PACKAGED_CHANNEL: options.channel,
       DOCPRONTO_PACKAGED_PRODUCT: config.productName,
     },

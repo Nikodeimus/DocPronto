@@ -5,7 +5,7 @@ import { createMainWindow } from "./window.mjs";
 
 const IPC_CHANNELS = Object.freeze([
   "docpronto:get-app-info",
-  "docpronto:renderer-ready",
+  "docpronto:window-painted",
   "docpronto:diagnostics:list",
   "docpronto:diagnostics:clear",
   "docpronto:diagnostics:export",
@@ -110,7 +110,7 @@ export function createDesktopRuntime({
   let ipcRegistered = false;
   let lifecycleRegistered = false;
   let gracefulExitStarted = false;
-  let rendererReady = false;
+  let windowPainted = false;
 
   function emitLifecycleEvent(event) {
     try {
@@ -178,10 +178,11 @@ export function createDesktopRuntime({
       productName: channelConfig.productName,
       isLab: channelConfig.isLab,
     }));
-    handle("docpronto:renderer-ready", noArguments, async () => {
-      if (!rendererReady) {
-        rendererReady = true;
-        emitLifecycleEvent({ type: "renderer-ready" });
+    handle("docpronto:window-painted", noArguments, async () => {
+      if (!mainWindow?.isVisible()) return false;
+      if (!windowPainted) {
+        windowPainted = true;
+        emitLifecycleEvent({ type: "window-painted", windowVisible: true, framePainted: true });
         optionalReady = initializeDeferredFeatures();
       }
       return true;
@@ -232,7 +233,7 @@ export function createDesktopRuntime({
     const operations = [
       ["DESKTOP_UPDATE_INIT_FAILED", async () => {
         if (typeof createUpdateManager !== "function") return;
-        updateManager ??= createUpdateManager({
+        updateManager ??= await createUpdateManager({
           channelConfig,
           appVersion: app.getVersion?.() ?? "unknown",
           diagnostics: { append: recordDiagnostic },
@@ -347,9 +348,7 @@ export function createDesktopRuntime({
         shell,
       });
       mainWindow.once?.("closed", () => { mainWindow = undefined; });
-      mainWindow.once?.("ready-to-show", () => {
-        mainWindow?.show?.();
-      });
+      mainWindow.show?.();
 
       startupStage = "service";
       await serviceHealth;
@@ -357,7 +356,6 @@ export function createDesktopRuntime({
 
       startupStage = "window-load";
       await (mainWindow.docprontoLoadPromise ?? Promise.resolve());
-      mainWindow?.show?.();
       return true;
     } catch (cause) {
       const code = cause?.code === "DESKTOP_WINDOW_LOAD_FAILED"

@@ -19,6 +19,7 @@ const ALLOWED_ARCHIVE_ROOTS = Object.freeze([
 const ALLOWED_ARCHIVE_DIRECTORIES = new Set(["/desktop", "/public", "/public/docpronto", "/node_modules"]);
 const TEXT_FILE = /\.(?:cjs|css|html|js|json|mjs|txt|xml|yml|yaml)$/i;
 const PERSONAL_CONTENT = /(?:[a-z]:[\\/]users[\\/]|\/users\/[^/]+\/|\/home\/[^/]+\/|[\\/]downloads[\\/])/i;
+const ELECTRON_LICENSE_FILES = new Set(["LICENSE.electron.txt", "LICENSES.chromium.html"]);
 
 async function listFiles(directory, prefix = "") {
   let entries;
@@ -64,6 +65,11 @@ export function classifyArchiveEntries(entries) {
   };
 }
 
+export function classifyExternalEntries(entries) {
+  const normalized = entries.map(file => file.replaceAll("\\", "/"));
+  return { forbiddenExternalFiles: normalized.filter(isForbiddenArchiveFile) };
+}
+
 function scanSensitiveContent(archive, archiveFiles) {
   const findings = [];
   for (const file of archiveFiles) {
@@ -79,19 +85,37 @@ function scanSensitiveContent(archive, archiveFiles) {
   return findings;
 }
 
-export async function inspectPackagedOutput(resourcesDirectory, {
+async function scanSensitiveExternalContent(packageDirectory, externalFiles) {
+  const findings = [];
+  for (const file of externalFiles) {
+    if (!TEXT_FILE.test(file) || file === "resources/app.asar" || ELECTRON_LICENSE_FILES.has(file)) continue;
+    let content;
+    try {
+      content = await readFile(join(packageDirectory, ...file.split("/")), "utf8");
+    } catch {
+      continue;
+    }
+    if (PERSONAL_CONTENT.test(content)) findings.push(file);
+  }
+  return findings;
+}
+
+export async function inspectPackagedOutput(packageDirectory, {
   expectedChannel,
   expectedProductName,
 } = {}) {
-  if (typeof resourcesDirectory !== "string" || !resourcesDirectory) {
-    throw new TypeError("resourcesDirectory is required.");
+  if (typeof packageDirectory !== "string" || !packageDirectory) {
+    throw new TypeError("packageDirectory is required.");
   }
+  const resourcesDirectory = join(packageDirectory, "resources");
   const archive = join(resourcesDirectory, "app.asar");
   const archiveStats = await stat(archive);
   if (!archiveStats.isFile()) throw new Error("Packaged app.asar was not produced.");
   const archiveFiles = listPackage(archive).map(file => file.replaceAll("\\", "/"));
+  const externalFiles = await listFiles(packageDirectory);
   const unpackedFiles = await listFiles(join(resourcesDirectory, "app.asar.unpacked"));
   const classification = classifyArchiveEntries(archiveFiles);
+  const externalClassification = classifyExternalEntries(externalFiles);
   const packageMetadata = JSON.parse(extractFile(archive, "package.json").toString("utf8"));
   let appUpdate = "";
   try {
@@ -114,9 +138,12 @@ export async function inspectPackagedOutput(resourcesDirectory, {
   }
   return {
     archiveFiles,
+    externalFiles,
     unpackedFiles,
     ...classification,
+    ...externalClassification,
     sensitiveContentFiles: scanSensitiveContent(archive, archiveFiles),
+    sensitiveExternalContentFiles: await scanSensitiveExternalContent(packageDirectory, externalFiles),
     packageMetadata,
     appUpdate,
     identityErrors,
