@@ -57,6 +57,8 @@ export async function buildDesktop(arguments_ = process.argv.slice(2)) {
     env: {
       ...process.env,
       DOCPRONTO_PACKAGED_RESOURCES: join(config.directories.output, "win-unpacked", "resources"),
+      DOCPRONTO_PACKAGED_CHANNEL: options.channel,
+      DOCPRONTO_PACKAGED_PRODUCT: config.productName,
     },
   });
   return artifacts;

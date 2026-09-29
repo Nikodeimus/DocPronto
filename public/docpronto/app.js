@@ -5,6 +5,15 @@ const MAX_ARCHIVE_SIZE = 12 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 5000;
 const MAX_ARCHIVE_EXPANDED_SIZE = 180 * 1024 * 1024;
 const MAX_OFX_QUEUE_FILES = 30;
+const TOOL_LIBRARY_SOURCES = Object.freeze([
+  "vendor/pdf-lib.min.js",
+  "vendor/jszip.min.js",
+  "vendor/forge.min.js",
+  "vendor/tesseract.min.js",
+  "vendor/docx-preview.min.js",
+  "vendor/html2canvas.min.js"
+]);
+let toolLibrariesPromise;
 
 const tools = [
   { id: "merge-pdf", number: "01", category: "pdf", title: "Juntar PDF", description: "Combine vários PDFs na ordem selecionada.", accept: ".pdf", multiple: true, action: mergePdfs },
@@ -60,6 +69,10 @@ openToolFromHash();
 window.addEventListener("docpronto:retry-tool", event => {
   const tool = tools.find(item => item.id === event.detail?.toolId);
   if (tool) openTool(tool, document.querySelector(`[data-tool="${tool.id}"]`));
+});
+window.requestAnimationFrame(() => {
+  void window.docprontoDesktop?.signalReady?.();
+  if (window.docprontoDesktop) void import("./lab-ui.mjs");
 });
 
 function renderTools() {
@@ -357,6 +370,9 @@ async function processFiles() {
     message: "Processamento iniciado."
   });
   try {
+    showStatus("Preparando os recursos locais...");
+    await loadToolLibraries();
+    throwIfProcessingCancelled();
     recordToolDiagnostic("progress", activeTool, {
       ...diagnosticContext,
       code: "TOOL_RUN_IN_PROGRESS",
@@ -397,6 +413,25 @@ async function processFiles() {
     elements.process.disabled = false;
     elements.process.textContent = activeTool?.id === "pdf-ofx" ? "Processar fila" : "Processar arquivos";
   }
+}
+
+function loadToolLibraries() {
+  if (toolLibrariesPromise) return toolLibrariesPromise;
+  toolLibrariesPromise = Promise.all(TOOL_LIBRARY_SOURCES.map(source => new Promise((resolveLoad, reject) => {
+    const script = document.createElement("script");
+    script.src = source;
+    script.async = true;
+    script.addEventListener("load", resolveLoad, { once: true });
+    script.addEventListener("error", () => reject(Object.assign(
+      new Error(`Não foi possível carregar ${source}.`),
+      { code: "LOCAL_LIBRARY_LOAD_FAILED" }
+    )), { once: true });
+    document.head.append(script);
+  }))).catch(error => {
+    toolLibrariesPromise = undefined;
+    throw error;
+  });
+  return toolLibrariesPromise;
 }
 
 function recordToolDiagnostic(stage, tool, details) {

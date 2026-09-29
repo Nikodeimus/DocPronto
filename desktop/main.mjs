@@ -70,7 +70,6 @@ if (smokeControlPath) {
       reportSmoke({ type: "control-failed", code: error.code ?? "SMOKE_CONTROL_FAILED" });
     }
   }, 50);
-  smokeControlTimer.unref();
 }
 
 async function checkServiceHealth({ origin }) {
@@ -123,12 +122,22 @@ const runtime = createDesktopRuntime({
     );
   },
   initializeOptionalCapabilities: async () => {
-    if (smokeMode && process.env.DOCPRONTO_SMOKE_MISSING_OPTIONALS === "1") {
-      reportSmoke({ type: "optional-capability-failed", capability: "word", code: "WORD_UNAVAILABLE" });
-      reportSmoke({ type: "optional-capability-failed", capability: "certificate", code: "CERTIFICATE_NOT_FOUND" });
-      return;
+    if (process.platform !== "win32") return;
+    if (smokeMode && process.env.DOCPRONTO_SMOKE_WARMUP === "1") return;
+    try {
+      const certificates = await listWindowsCertificates();
+      reportSmoke({
+        type: "certificate-capability",
+        capability: "certificate",
+        status: "available",
+        count: certificates.length,
+      });
+    } catch (error) {
+      const expectedCodes = new Set(["CERTIFICATE_PROVIDER_UNAVAILABLE", "LOCAL_OPERATION_TIMEOUT"]);
+      const code = expectedCodes.has(error?.code) ? error.code : "CERTIFICATE_PROVIDER_UNAVAILABLE";
+      reportSmoke({ type: "certificate-capability", capability: "certificate", status: "error", code });
+      throw Object.assign(error, { code });
     }
-    if (process.platform === "win32") await listWindowsCertificates();
   },
   healthCheck: checkServiceHealth,
   assetsRoot: join(currentDirectory, "..", "public", "docpronto"),

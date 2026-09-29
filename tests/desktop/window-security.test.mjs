@@ -139,19 +139,21 @@ test("preload CommonJS executa em sandbox restrito e expoe somente a API enumera
   vm.runInNewContext(source, sandbox, { filename: "desktop/preload.cjs" });
 
   assert.equal(exposedName, "docprontoDesktop");
-  assert.deepEqual(Object.keys(exposedApi).sort(), ["diagnostics", "getAppInfo"]);
+  assert.deepEqual(Object.keys(exposedApi).sort(), ["diagnostics", "getAppInfo", "signalReady"]);
   assert.deepEqual(Object.keys(exposedApi.diagnostics).sort(), ["clear", "export", "list", "record"]);
   assert.equal(Object.isFrozen(exposedApi), true);
   assert.equal(Object.isFrozen(exposedApi.diagnostics), true);
   assert.equal("exec" in exposedApi, false);
   assert.equal("readFile" in exposedApi, false);
   await exposedApi.getAppInfo();
+  await exposedApi.signalReady();
   await exposedApi.diagnostics.list({ level: "error" });
   await exposedApi.diagnostics.clear();
   await exposedApi.diagnostics.export();
   await exposedApi.diagnostics.record({ code: "TEST" });
   assert.deepEqual(invocations, [
     ["docpronto:get-app-info"],
+    ["docpronto:renderer-ready"],
     ["docpronto:diagnostics:list", { level: "error" }],
     ["docpronto:diagnostics:clear"],
     ["docpronto:diagnostics:export"],

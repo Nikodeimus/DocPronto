@@ -5,6 +5,7 @@ import { createMainWindow } from "./window.mjs";
 
 const IPC_CHANNELS = Object.freeze([
   "docpronto:get-app-info",
+  "docpronto:renderer-ready",
   "docpronto:diagnostics:list",
   "docpronto:diagnostics:clear",
   "docpronto:diagnostics:export",
@@ -109,6 +110,7 @@ export function createDesktopRuntime({
   let ipcRegistered = false;
   let lifecycleRegistered = false;
   let gracefulExitStarted = false;
+  let rendererReady = false;
 
   function emitLifecycleEvent(event) {
     try {
@@ -176,6 +178,14 @@ export function createDesktopRuntime({
       productName: channelConfig.productName,
       isLab: channelConfig.isLab,
     }));
+    handle("docpronto:renderer-ready", noArguments, async () => {
+      if (!rendererReady) {
+        rendererReady = true;
+        emitLifecycleEvent({ type: "renderer-ready" });
+        optionalReady = initializeDeferredFeatures();
+      }
+      return true;
+    });
     handle("docpronto:diagnostics:list", args => {
       if (args.length > 1) throw ipcArgumentError("Diagnostic list accepts at most one argument.");
       return [validateFilters(args[0])];
@@ -323,8 +333,7 @@ export function createDesktopRuntime({
         sessionToken,
         onDiagnostic: event => { void recordDiagnostic(event); },
       });
-      await healthCheck({ origin: service.origin, sessionToken });
-      emitLifecycleEvent({ type: "service-ready", origin: service.origin });
+      const serviceHealth = healthCheck({ origin: service.origin, sessionToken });
 
       startupStage = "ipc";
       registerIpc();
@@ -340,13 +349,15 @@ export function createDesktopRuntime({
       mainWindow.once?.("closed", () => { mainWindow = undefined; });
       mainWindow.once?.("ready-to-show", () => {
         mainWindow?.show?.();
-        optionalReady = initializeDeferredFeatures();
       });
+
+      startupStage = "service";
+      await serviceHealth;
+      emitLifecycleEvent({ type: "service-ready", origin: service.origin });
 
       startupStage = "window-load";
       await (mainWindow.docprontoLoadPromise ?? Promise.resolve());
       mainWindow?.show?.();
-      emitLifecycleEvent({ type: "ui-ready" });
       return true;
     } catch (cause) {
       const code = cause?.code === "DESKTOP_WINDOW_LOAD_FAILED"

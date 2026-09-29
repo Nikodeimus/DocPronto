@@ -13,6 +13,7 @@ function createHarness({
   loadError,
   ipcError,
   destroyError,
+  healthCheck = async () => {},
 } = {}) {
   const app = new EventEmitter();
   const paths = new Map([["appData", "C:\\Users\\Test\\AppData\\Roaming"]]);
@@ -115,11 +116,25 @@ function createHarness({
       },
       chooseDiagnosticDestination: async () => "C:\\Users\\Test\\Desktop\\docpronto-diagnostico.zip",
       reportFatalError: error => { fatalErrors.push(error); },
+      healthCheck,
       onLifecycleEvent: event => { lifecycleEvents.push(event); },
       preloadPath: "C:\\app\\desktop\\preload.cjs",
     },
   };
 }
+
+test("janela carrega enquanto a verificacao interna de saude esta pendente", async () => {
+  let releaseHealthCheck;
+  const healthCheck = new Promise(resolve => { releaseHealthCheck = resolve; });
+  const harness = createHarness({ healthCheck: () => healthCheck });
+  const starting = createDesktopRuntime(harness.dependencies).start();
+
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(harness.calls.window, 1);
+
+  releaseHealthCheck();
+  await starting;
+});
 
 test("lock negado encerra sem criar servico, store ou janela", async () => {
   const harness = createHarness({ lock: false });
@@ -150,7 +165,7 @@ test("segunda instancia restaura, mostra e foca a janela existente", async () =>
   assert.ok(harness.lifecycleEvents.some(event => event.type === "second-instance"));
 });
 
-test("runtime publica marcos minimos para o smoke empacotado", async () => {
+test("runtime aceita prontidao somente do renderer confiavel", async () => {
   const optionalError = Object.assign(new Error("Word ausente"), { code: "WORD_UNAVAILABLE" });
   const harness = createHarness({ optionalError });
   const runtime = createDesktopRuntime(harness.dependencies);
@@ -159,7 +174,9 @@ test("runtime publica marcos minimos para o smoke empacotado", async () => {
   assert.ok(harness.lifecycleEvents.some(event => (
     event.type === "service-ready" && event.origin === harness.service.origin
   )));
-  assert.ok(harness.lifecycleEvents.some(event => event.type === "ui-ready"));
+  assert.equal(harness.lifecycleEvents.some(event => event.type === "renderer-ready"), false);
+  await harness.ipcHandlers.get("docpronto:renderer-ready")(harness.trustedEvent());
+  assert.ok(harness.lifecycleEvents.some(event => event.type === "renderer-ready"));
 
   harness.window.emit("ready-to-show");
   await runtime.optionalReady;
@@ -209,19 +226,23 @@ test("capacidade opcional com falha nao impede a janela", async () => {
   const runtime = createDesktopRuntime(harness.dependencies);
   await runtime.start();
   harness.window.emit("ready-to-show");
+  await harness.ipcHandlers.get("docpronto:renderer-ready")(harness.trustedEvent());
   await runtime.optionalReady;
   assert.equal(harness.calls.window, 1);
   assert.equal(harness.calls.updater, 1);
   assert.ok(harness.diagnostics.some(event => event.code === "OPTIONAL_CAPABILITY_INIT_FAILED"));
 });
 
-test("atualizador inicia somente depois de ready-to-show e e descartado no stop", async () => {
+test("recursos opcionais iniciam somente depois do renderer utilizavel e sao descartados no stop", async () => {
   const harness = createHarness();
   const runtime = createDesktopRuntime(harness.dependencies);
   await runtime.start();
   assert.equal(harness.calls.updater, 0);
 
   harness.window.emit("ready-to-show");
+  assert.equal(harness.calls.updater, 0);
+
+  await harness.ipcHandlers.get("docpronto:renderer-ready")(harness.trustedEvent());
   await runtime.optionalReady;
   assert.equal(harness.calls.updater, 1);
 
@@ -326,6 +347,7 @@ test("IPC expoe somente contratos enumerados e usa o store", async () => {
     "docpronto:diagnostics:list",
     "docpronto:diagnostics:record",
     "docpronto:get-app-info",
+    "docpronto:renderer-ready",
   ]);
   await harness.ipcHandlers.get("docpronto:diagnostics:record")(harness.trustedEvent(), { code: "TEST_EVENT" });
   assert.ok(harness.diagnostics.some(event => event.code === "TEST_EVENT"));

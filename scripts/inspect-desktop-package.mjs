@@ -1,14 +1,24 @@
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, join } from "node:path";
 
 const require = createRequire(import.meta.url);
-const { listPackage } = require("@electron/asar");
+const { extractFile, listPackage } = require("@electron/asar");
 
 const FORBIDDEN_SEGMENTS = new Set([
   "test", "tests", "__tests__", "spec", "specs", "doc", "docs",
   "example", "examples", "benchmark", "benchmarks",
+  "fixture", "fixtures", "downloads",
 ]);
+
+const ALLOWED_ARCHIVE_ROOTS = Object.freeze([
+  "/desktop/",
+  "/public/docpronto/",
+  "/node_modules/",
+]);
+const ALLOWED_ARCHIVE_DIRECTORIES = new Set(["/desktop", "/public", "/public/docpronto", "/node_modules"]);
+const TEXT_FILE = /\.(?:cjs|css|html|js|json|mjs|txt|xml|yml|yaml)$/i;
+const PERSONAL_CONTENT = /(?:[a-z]:[\\/]users[\\/]|\/users\/[^/]+\/|\/home\/[^/]+\/|[\\/]downloads[\\/])/i;
 
 async function listFiles(directory, prefix = "") {
   let entries;
@@ -33,6 +43,8 @@ function isForbiddenArchiveFile(file) {
   const segments = lower.split("/").filter(Boolean);
   const name = basename(lower);
   if (segments.some(segment => FORBIDDEN_SEGMENTS.has(segment))) return true;
+  if (/^\.env(?:\.|$)/.test(name) || /\.(?:log|bak|backup)$/.test(name)) return true;
+  if (segments.includes("users") || segments.includes("appdata") || segments.includes("financeiro")) return true;
   if (/\.(?:map|d\.ts)$/.test(name)) return true;
   if (/(?:^|[._-])(?:test|spec)\.(?:js|cjs|mjs|ts|tsx)$/.test(name)) return true;
   if (/^(?:readme|changelog|changes|contributing|governance)(?:\.|$)/.test(name)) return true;
@@ -40,7 +52,37 @@ function isForbiddenArchiveFile(file) {
   return false;
 }
 
-export async function inspectPackagedOutput(resourcesDirectory) {
+export function classifyArchiveEntries(entries) {
+  const normalized = entries.map(file => file.replaceAll("\\", "/"));
+  return {
+    forbiddenFiles: normalized.filter(isForbiddenArchiveFile),
+    outsideAllowlist: normalized.filter(file => (
+      file !== "/package.json"
+      && !ALLOWED_ARCHIVE_DIRECTORIES.has(file)
+      && !ALLOWED_ARCHIVE_ROOTS.some(prefix => file.startsWith(prefix))
+    )),
+  };
+}
+
+function scanSensitiveContent(archive, archiveFiles) {
+  const findings = [];
+  for (const file of archiveFiles) {
+    if (!TEXT_FILE.test(file)) continue;
+    let content;
+    try {
+      content = extractFile(archive, file.replace(/^\/+/, "")).toString("utf8");
+    } catch {
+      continue;
+    }
+    if (PERSONAL_CONTENT.test(content)) findings.push(file);
+  }
+  return findings;
+}
+
+export async function inspectPackagedOutput(resourcesDirectory, {
+  expectedChannel,
+  expectedProductName,
+} = {}) {
   if (typeof resourcesDirectory !== "string" || !resourcesDirectory) {
     throw new TypeError("resourcesDirectory is required.");
   }
@@ -49,9 +91,34 @@ export async function inspectPackagedOutput(resourcesDirectory) {
   if (!archiveStats.isFile()) throw new Error("Packaged app.asar was not produced.");
   const archiveFiles = listPackage(archive).map(file => file.replaceAll("\\", "/"));
   const unpackedFiles = await listFiles(join(resourcesDirectory, "app.asar.unpacked"));
+  const classification = classifyArchiveEntries(archiveFiles);
+  const packageMetadata = JSON.parse(extractFile(archive, "package.json").toString("utf8"));
+  let appUpdate = "";
+  try {
+    appUpdate = await readFile(join(resourcesDirectory, "app-update.yml"), "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const identityErrors = [];
+  if (expectedChannel && packageMetadata.docprontoChannel !== expectedChannel) {
+    identityErrors.push(`Expected channel ${expectedChannel}, received ${packageMetadata.docprontoChannel}.`);
+  }
+  if (expectedProductName && packageMetadata.productName !== expectedProductName) {
+    identityErrors.push(`Expected product ${expectedProductName}, received ${packageMetadata.productName}.`);
+  }
+  if (expectedChannel === "stable") {
+    if (/laborat[oó]rio|docpronto-laboratorio|channel:\s*lab\b/i.test(JSON.stringify(packageMetadata))) {
+      identityErrors.push("Stable package metadata contains LAB identity.");
+    }
+    if (/channel:\s*lab\b/i.test(appUpdate)) identityErrors.push("Stable update metadata points to LAB.");
+  }
   return {
     archiveFiles,
     unpackedFiles,
-    forbiddenFiles: archiveFiles.filter(isForbiddenArchiveFile),
+    ...classification,
+    sensitiveContentFiles: scanSensitiveContent(archive, archiveFiles),
+    packageMetadata,
+    appUpdate,
+    identityErrors,
   };
 }

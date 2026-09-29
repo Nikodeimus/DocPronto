@@ -17,6 +17,8 @@ test("desktop_verify_e_o_unico_gate_de_release_local", async () => {
   assert.match(gate, /tests\/\*\.test\.mjs/);
   assert.match(gate, /tests\/desktop\/\*\.test\.mjs/);
   assert.match(gate, /build-desktop\.mjs --channel lab --dir --skip-tests/);
+  assert.match(gate, /build-desktop\.mjs --channel stable --dir --skip-tests/);
+  assert.match(gate, /verify-packaged-releases\.mjs/);
   assert.match(gate, /smoke-desktop\.mjs/);
 });
 
@@ -25,14 +27,44 @@ test("smoke_empacotado_tem_um_protocolo_observavel_e_limites_fixos", async () =>
 
   assert.equal(smoke.UI_TIMEOUT_MS, 3_000);
   assert.equal(smoke.HEALTH_TIMEOUT_MS, 15_000);
+  assert.equal(smoke.PREPARATION_LAUNCHES, 2);
   assert.equal(typeof smoke.runPackagedSmoke, "function");
+  assert.throws(
+    () => smoke.assertLaunchDuration(3_001),
+    error => error.code === "SMOKE_UI_SLOW",
+  );
+  assert.doesNotThrow(() => smoke.assertLaunchDuration(3_000));
   assert.deepEqual(smoke.REQUIRED_EVENTS, [
     "service-ready",
-    "ui-ready",
-    "optional-capability-failed",
+    "renderer-ready",
+    "certificate-capability",
     "second-instance",
     "stopping",
   ]);
+  const smokeSource = await readFile(join(projectDir, "scripts", "smoke-desktop.mjs"), "utf8");
+  assert.doesNotMatch(smokeSource, /--disable-gpu/);
+});
+
+test("smoke_nao_fabrica_indisponibilidade_de_Word_ou_certificado", async () => {
+  const smoke = await readFile(join(projectDir, "scripts", "smoke-desktop.mjs"), "utf8");
+  const main = await readFile(join(projectDir, "desktop", "main.mjs"), "utf8");
+  assert.doesNotMatch(smoke, /SMOKE_MISSING_OPTIONALS|WORD_UNAVAILABLE/);
+  assert.doesNotMatch(main, /SMOKE_MISSING_OPTIONALS/);
+  assert.doesNotMatch(main, /smokeControlTimer\.unref/);
+  assert.match(main, /listWindowsCertificates\(\)/);
+  assert.match(main, /certificate-capability/);
+});
+
+test("renderer_sinaliza_prontidao_somente_apos_montar_a_interface_principal", async () => {
+  const app = await readFile(join(projectDir, "public", "docpronto", "app.js"), "utf8");
+  const html = await readFile(join(projectDir, "public", "docpronto", "index.html"), "utf8");
+  const smoke = await readFile(join(projectDir, "scripts", "smoke-desktop.mjs"), "utf8");
+  assert.match(app, /requestAnimationFrame[\s\S]*signalReady/);
+  assert.match(app, /signalReady[\s\S]*import\("\.\/lab-ui\.mjs/);
+  assert.match(app, /await loadToolLibraries\(\)[\s\S]*activeTool\.action/);
+  assert.doesNotMatch(html, /<script\s+src="vendor\//);
+  assert.doesNotMatch(html, /<script[^>]+src="lab-ui\.mjs/);
+  assert.match(smoke, /waitForEvent\(reportPath, event => event\.type === "stopping"/);
 });
 
 test("configuracao_estavel_nao_carrega_identidade_LAB", () => {
@@ -75,5 +107,7 @@ test("README_desktop_declara_limites_e_operacao_dos_dois_canais", async () => {
     "certificado",
     "GitHub Releases",
     "desktop:verify",
+    "motor visual próprio",
+    "reconstrução/OCR local",
   ]) assert.match(readme, new RegExp(term, "i"), term);
 });

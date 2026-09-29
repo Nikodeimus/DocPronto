@@ -18,7 +18,8 @@ O relatorio e redigido e nao deve conter documentos, texto extraido, senha, PIN,
 ## Requisitos E Limites
 
 - Windows x64 compativel com Electron 44.
-- O motor atual de Word para PDF e PDF para Word requer o Microsoft Word instalado. Sem Word, somente essa ferramenta falha com `WORD_UNAVAILABLE`; o restante do aplicativo continua disponivel.
+- Word para PDF usa por padrão um motor visual próprio no dispositivo, reconstruindo o DOCX e renderizando cada página. O Microsoft Word é uma alternativa opcional para integrações locais específicas. Fontes ausentes, campos complexos, macros e recursos não suportados podem alterar o layout.
+- PDF para Word usa reconstrução/OCR local para produzir texto editável. PDFs escaneados podem demorar, e colunas, tabelas, fontes, cabeçalhos e posicionamento podem exigir ajustes no DOCX resultante.
 - A assinatura digital usa certificado disponivel no repositorio do Windows ou arquivo A1. Certificado ausente, expirado, sem chave privada ou sem driver pode impedir somente a assinatura.
 - Assinatura visual nao equivale a assinatura digital certificada.
 - Conversoes e OFX precisam ser conferidos antes de uso documental, bancario ou contabil.
@@ -33,7 +34,7 @@ npm run desktop:test
 npm run desktop:verify
 ```
 
-`desktop:verify` e o gate local unico: executa a suite web e Desktop, gera o LAB desempacotado e abre o executavel real para o smoke de interface, health, instancia unica e encerramento. O smoke exige Windows e falha se outro DOCPronto Laboratorio ja estiver aberto. O limite de 3 segundos mede o tempo de execucao do processo ate a interface carregada; o relatorio tambem mostra o tempo total desde o `spawn`, que em um EXE novo e sem Authenticode pode incluir a varredura externa do Windows.
+`desktop:verify` e o gate local unico: executa a suite web e Desktop, gera e inspeciona fisicamente LAB e Estavel e abre o executavel LAB real para o smoke de interface, health, instancia unica e encerramento. O smoke exige Windows e falha se outro DOCPronto Laboratorio ja estiver aberto. Como um EXE novo e sem Authenticode pode ser inspecionado pelo Windows nas primeiras aberturas, o gate registra duas aberturas de preparacao e depois mede uma unica nova abertura. O limite de 3 segundos começa imediatamente antes desse `spawn` medido e termina quando o renderer confirma, por IPC protegido, que o DOM e o JavaScript principal estão utilizáveis; essa medicao oficial nao e repetida quando falha.
 
 ## Builds Locais
 

@@ -6,6 +6,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 const api = Object.freeze({
   getAppInfo: () => ipcRenderer.invoke("docpronto:get-app-info"),
+  signalReady: () => ipcRenderer.invoke("docpronto:renderer-ready"),
   diagnostics: Object.freeze({
     list: filters => ipcRenderer.invoke("docpronto:diagnostics:list", filters),
     clear: () => ipcRenderer.invoke("docpronto:diagnostics:clear"),
