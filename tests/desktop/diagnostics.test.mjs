@@ -311,6 +311,54 @@ test("keeps_the_previous_snapshot_readable_when_generation_commit_fails", async 
   assert.equal(events.at(-1).code, "SAFE_1999");
 });
 
+test("removes_a_partial_generation_file_and_retries_without_restart", async t => {
+  const userData = await createUserData(t);
+  const seeded = Array.from({ length: 2_000 }, (_, index) => createDiagnosticEvent(input({
+    code: `RETRY_SAFE_${index}`,
+  })));
+  await seedGeneration(userData, seeded);
+  let failFirstGenerationWrite = true;
+  const injectedFileSystem = {
+    ...fileSystem,
+    async writeFile(path, contents, options) {
+      if (failFirstGenerationWrite && path.endsWith("events-000002-000001.jsonl")) {
+        failFirstGenerationWrite = false;
+        await fileSystem.writeFile(path, String(contents).slice(0, 64), options);
+        throw new Error("injected partial generation write");
+      }
+      return fileSystem.writeFile(path, contents, options);
+    },
+  };
+  const store = new DiagnosticStore({ userData, fileSystem: injectedFileSystem });
+
+  await assert.rejects(
+    store.append(input({ code: "FAILED_SNAPSHOT_EVENT" })),
+    /injected partial generation write/,
+  );
+  const previous = await store.list();
+  assert.equal(previous.length, 2_000);
+  assert.equal(previous[0].code, "RETRY_SAFE_0");
+  assert.equal(previous.at(-1).code, "RETRY_SAFE_1999");
+  const committedContents = await readFile(
+    join(userData, "diagnostics", "events-000001-000001.jsonl"),
+    "utf8",
+  );
+  const committedEvents = committedContents.trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(committedEvents.length, 2_000);
+  assert.equal(committedEvents.at(-1).code, "RETRY_SAFE_1999");
+
+  await store.append(input({ code: "RETRIED_SNAPSHOT_EVENT" }));
+  const retried = await store.list();
+  assert.equal(retried.length, 2_000);
+  assert.equal(retried[0].code, "RETRY_SAFE_1");
+  assert.equal(retried.at(-1).code, "RETRIED_SNAPSHOT_EVENT");
+  await store.close();
+
+  const reopened = new DiagnosticStore({ userData });
+  t.after(() => reopened.close());
+  assert.deepEqual(await reopened.list(), retried);
+});
+
 test("exports_a_readable_re_redacted_zip_without_document_bytes", async t => {
   const userData = await createUserData(t);
   const destination = join(userData, "diagnostics.zip");

@@ -239,12 +239,12 @@ export class DiagnosticStore {
     try {
       for (let index = 0; index < retainedChunks.length; index += 1) {
         const name = eventFileName(generation, index + 1);
+        createdFiles.push(name);
         await this.#fileSystem.writeFile(
           join(this.#directory, name),
           retainedChunks[index].contents,
           { flag: "wx" },
         );
-        createdFiles.push(name);
       }
       await this.#writeCommitMarker(generation);
     } catch (error) {
