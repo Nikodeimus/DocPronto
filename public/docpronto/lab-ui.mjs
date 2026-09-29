@@ -2,16 +2,22 @@ const SENSITIVE_KEY = /(password|passphrase|pin|secret|token|private.?key|base64
 const DOCUMENT_EXTENSIONS = Object.freeze([
   ".docx", ".xlsx", ".jpeg", ".pdf", ".doc", ".xls", ".csv", ".ofx", ".xml", ".txt", ".jpg", ".png", ".pfx", ".p12",
 ]);
-const PATH_EXTENSIONS = Object.freeze([
-  ...DOCUMENT_EXTENSIONS, ".exe", ".dll", ".js", ".mjs", ".cjs", ".json", ".wasm", ".html", ".css", ".map",
-]);
 const PATH_END = new Set(["\r", "\n", "\"", "'", "<", ">", "|", ",", ";"]);
 const FILE_START = new Set(["\r", "\n", "\"", "'", "<", ">", "|", ",", ";", ":", "=", "/", "\\"]);
-const FILENAME_MARKERS = new Set([
+const PATH_CAUSE_BOUNDARIES = Object.freeze([
+  " porque ", " pois ", " devido a ", " devido ao ", " devido à ", " já que ", " ja que ", " quando ", " durante ",
+  " indisponível ", " indisponivel ",
+]);
+const FILENAME_CONTEXT_START = new Set(["erro", "falha", "falharam", "falhou", "não", "nao"]);
+const FILENAME_CONTEXT_GLUE = new Set([
+  "a", "ao", "da", "de", "do", "em", "foi", "na", "nas", "no", "nos", "o", "para", "possível", "possivel",
+]);
+const FILENAME_OPERATIONS = new Set([
   "abrir", "abriu", "arquivo", "arquivos", "assinar", "assinou", "carregar", "carregou", "converter", "converteu",
-  "documento", "documentos", "exportar", "exportou", "falharam", "falhou", "importar", "importou", "ler", "leu",
+  "documento", "documentos", "exportar", "exportou", "importar", "importou", "ler", "leu",
   "processar", "processou", "salvar", "salvou",
 ]);
+const DIRECT_FILENAME_CONTEXT = new Set(["falharam"]);
 const LIST_CONJUNCTIONS = new Set(["e", "nem", "ou"]);
 const ERROR_MESSAGES = Object.freeze({
   WORD_UNAVAILABLE: {
@@ -41,28 +47,50 @@ function isPersonalPosixPathStart(text, index) {
   return ["/Users/", "/home/", "/tmp/", "/var/", "/private/", "/mnt/"].some(prefix => text.startsWith(prefix, index));
 }
 
+function isPathStart(text, index) {
+  return isWindowsPathStart(text, index) || isPersonalPosixPathStart(text, index);
+}
+
+function isPathListBoundary(text, lowerText, index) {
+  for (const conjunction of LIST_CONJUNCTIONS) {
+    const boundary = ` ${conjunction} `;
+    if (!lowerText.startsWith(boundary, index)) continue;
+    const next = index + boundary.length;
+    if (isPathStart(text, next)) return true;
+  }
+  return false;
+}
+
+function findPathEnd(text, start) {
+  const lowerText = text.toLocaleLowerCase("pt-BR");
+  // Paths may contain spaces and dotted folders; only explicit cause/list boundaries end them.
+  // An ambiguous suffix stays redacted so diagnostic context cannot expose a path fragment.
+  for (let index = start; index < text.length; index += 1) {
+    if (PATH_END.has(text[index])) return index;
+    if (PATH_CAUSE_BOUNDARIES.some(boundary => lowerText.startsWith(boundary, index))) return index;
+    if (isPathListBoundary(text, lowerText, index)) return index;
+  }
+  return text.length;
+}
+
 function redactPaths(value) {
   const text = String(value);
-  const lowerText = text.toLocaleLowerCase("pt-BR");
   let result = "";
   for (let index = 0; index < text.length;) {
-    if (!isWindowsPathStart(text, index) && !isPersonalPosixPathStart(text, index)) {
+    if (!isPathStart(text, index)) {
       result += text[index];
       index += 1;
       continue;
     }
-    const extension = findNextExtension(lowerText, index, PATH_EXTENSIONS);
-    let end = extension ? extension.index + extension.extension.length : index;
-    while (!extension && end < text.length && !PATH_END.has(text[end])) end += 1;
     result += "[LOCAL REDIGIDO]";
-    index = end;
+    index = findPathEnd(text, index);
   }
   return result;
 }
 
-function findNextExtension(lowerText, fromIndex, extensions) {
+function findNextDocumentExtension(lowerText, fromIndex) {
   let match = null;
-  for (const extension of extensions) {
+  for (const extension of DOCUMENT_EXTENSIONS) {
     const index = lowerText.indexOf(extension, fromIndex);
     if (index < 0) continue;
     const end = index + extension.length;
@@ -73,10 +101,6 @@ function findNextExtension(lowerText, fromIndex, extensions) {
     }
   }
   return match;
-}
-
-function findNextDocumentExtension(lowerText, fromIndex) {
-  return findNextExtension(lowerText, fromIndex, DOCUMENT_EXTENSIONS);
 }
 
 function isWordCharacter(character) {
@@ -111,14 +135,21 @@ function findDocumentNameStart(text, segmentStart, extensionIndex) {
   const words = scanWords(text, segmentStart, extensionIndex);
   if (!words.length) return extensionIndex;
 
-  for (let index = words.length - 1; index >= 0; index -= 1) {
-    if (FILENAME_MARKERS.has(words[index].value)) {
-      return skipWhitespace(text, words[index].end, extensionIndex);
-    }
-  }
-
   if (LIST_CONJUNCTIONS.has(words[0].value)) {
     return skipWhitespace(text, words[0].end, extensionIndex);
+  }
+  if (!FILENAME_CONTEXT_START.has(words[0].value)) return words[0].start;
+  if (DIRECT_FILENAME_CONTEXT.has(words[0].value)) {
+    return skipWhitespace(text, words[0].end, extensionIndex);
+  }
+
+  // Grammar: a context root may contain only glue words before its first operation.
+  // Anything else is ambiguous and is redacted from the first token to avoid leaks.
+  for (let index = 1; index < words.length; index += 1) {
+    if (FILENAME_OPERATIONS.has(words[index].value)) {
+      return skipWhitespace(text, words[index].end, extensionIndex);
+    }
+    if (!FILENAME_CONTEXT_GLUE.has(words[index].value)) return words[0].start;
   }
   return words[0].start;
 }

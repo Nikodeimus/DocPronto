@@ -321,6 +321,15 @@ test("redacao preserva prefixo e causa ao ocultar somente o nome documental", ()
   }
 });
 
+test("redacao nao confunde verbo interno com limite do nome documental", () => {
+  const result = sanitizeDiagnosticValue("Falha ao abrir RELATORIO PARA ABRIR 2026.pdf por formato inválido.");
+
+  assert.equal(result, "Falha ao abrir [ARQUIVO REDIGIDO] por formato inválido.");
+  for (const fragment of ["RELATORIO", "PARA", "ABRIR", "2026.pdf"]) {
+    assert.equal(result.includes(fragment), false, `fragmento vazou: ${fragment}`);
+  }
+});
+
 test("redacao preserva a causa depois de caminhos Windows e UNC", () => {
   const messages = [
     "Falha em C:\\Users\\Financeiro\\Downloads\\FATURA 9927 org.pdf porque o arquivo está corrompido.",
@@ -334,6 +343,30 @@ test("redacao preserva a causa depois de caminhos Windows e UNC", () => {
       assert.equal(result.includes(fragment), false, `fragmento vazou: ${fragment}`);
     }
   }
+});
+
+test("redacao cobre caminhos completos mesmo com extensao em segmento intermediario", () => {
+  const messages = [
+    "Falha em C:\\dados\\arquivo.pdf\\lote\\FATURA 9927 org.pdf porque o arquivo está corrompido.",
+    "Falha em \\\\servidor\\dados\\arquivo.pdf\\lote\\FATURA 9927 org.pdf porque o arquivo está corrompido.",
+  ];
+
+  for (const message of messages) {
+    const result = sanitizeDiagnosticValue(message);
+    assert.equal(result, "Falha em [LOCAL REDIGIDO] porque o arquivo está corrompido.");
+    for (const fragment of ["dados", "arquivo.pdf", "lote", "FATURA", "9927", "org.pdf", "servidor"]) {
+      assert.equal(result.includes(fragment), false, `fragmento vazou: ${fragment}`);
+    }
+  }
+});
+
+test("redacao de caminho sem extensao preserva conectores de causa reconhecidos", () => {
+  const cases = [
+    ["Não abriu C:\\Temp porque a pasta não existe.", "Não abriu [LOCAL REDIGIDO] porque a pasta não existe."],
+    ["/tmp/cache indisponível porque faltou permissão", "[LOCAL REDIGIDO] indisponível porque faltou permissão"],
+  ];
+
+  for (const [message, expected] of cases) assert.equal(sanitizeDiagnosticValue(message), expected);
 });
 
 test("redacao mantem pontuacao e conjuncao em listas de documentos", () => {
