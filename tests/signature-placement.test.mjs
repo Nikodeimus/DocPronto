@@ -19,7 +19,7 @@ function functionSource(name) {
 }
 
 const context = vm.createContext({ Math, Number, Error });
-vm.runInContext(`${functionSource("clamp")}\n${functionSource("signaturePlacementFromGeometry")}\n${functionSource("fitTextToWidth")}; this.api = { signaturePlacementFromGeometry, fitTextToWidth };`, context);
+vm.runInContext(`${functionSource("clamp")}\n${functionSource("signaturePlacementFromGeometry")}\n${functionSource("fitTextToWidth")}\n${functionSource("createVisualSignatureAppearance")}; this.api = { signaturePlacementFromGeometry, fitTextToWidth, createVisualSignatureAppearance };`, context);
 
 test("converte a caixa visível para coordenadas PDF finitas", () => {
   const placement = context.api.signaturePlacementFromGeometry({
@@ -56,11 +56,16 @@ test("bloqueia o cálculo quando a prévia já perdeu suas dimensões", () => {
   }), /prévia da assinatura não está visível/i);
 });
 
-test("reduz o texto visual para permanecer dentro da moldura", () => {
+test("gera a assinatura visual somente com o nome e dentro da área escolhida", () => {
   const font = { widthOfTextAtSize: (text, size) => text.length * size * 0.58 };
-  const text = "Assinado visualmente em 29/09/2026, 17:38";
-  const size = context.api.fitTextToWidth(text, font, 192, 8.5, 5);
+  const appearance = context.api.createVisualSignatureAppearance(
+    "Heitor Palin Martins",
+    font,
+    220,
+    60,
+  );
 
-  assert.ok(size < 8.5);
-  assert.ok(font.widthOfTextAtSize(text, size) <= 192);
+  assert.deepEqual(Object.keys(appearance).sort(), ["size", "text", "x", "y"]);
+  assert.equal(appearance.text, "Heitor Palin Martins");
+  assert.ok(font.widthOfTextAtSize(appearance.text, appearance.size) <= 192);
 });

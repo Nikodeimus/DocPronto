@@ -93,7 +93,7 @@ async function createPdfFixture({ pageCount = 1, unsignedSignatureName } = {}) {
   return Buffer.from(await document.save({ useObjectStreams: false }));
 }
 
-function createPdfSigningRunner({ onVerify } = {}) {
+function createPdfSigningRunner({ onVerify, certificateLabel = "Test Signer - vence 01/01/2030" } = {}) {
   return async script => {
     if (script.includes("$cms.CheckSignature")) {
       onVerify?.();
@@ -107,7 +107,7 @@ function createPdfSigningRunner({ onVerify } = {}) {
         subject: "CN=Test Signer",
         thumbprint: VALID_THUMBPRINT,
         notAfter: "2030-01-01 00:00:00",
-        label: "Test Signer - vence 01/01/2030",
+        label: certificateLabel,
       });
     }
     assert.fail("Unexpected PowerShell operation");
@@ -269,6 +269,31 @@ test("returns_a_reopenable_signed_PDF_with_complete_cryptographic_coverage", asy
   const appearanceContent = Buffer.from(PDFLib.decodePDFRawStream(normalAppearance).decode()).toString("latin1");
   assert.match(appearanceContent, /\b(?:Tj|S|f)\b/);
   assert.deepEqual(await readdir(tempRoot), []);
+});
+
+test("usa a identidade completa do certificado no PDF e não o rótulo mascarado da tela", async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "docpronto-pdf-identity-test-"));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const sourcePdf = await createPdfFixture();
+  const certificateLabel = "HEITOR PALIN MARTINS:52345678975 - vence 27/11/2026";
+
+  const result = await signPdfWithWindowsCertificate({
+    filename: "contrato.pdf",
+    thumbprint: VALID_THUMBPRINT,
+    contentBase64: sourcePdf.toString("base64"),
+    signerName: "HEITOR PALIN MARTINS:523•••••75 - vence 27/11/2026",
+    placement: { ...VALID_PLACEMENT },
+  }, {
+    tempRoot,
+    runPowerShell: createPdfSigningRunner({ certificateLabel }),
+  });
+
+  const PDFLib = await loadTestPdfLibrary();
+  const reopened = await PDFLib.PDFDocument.load(Buffer.from(result.contentBase64, "base64"));
+  const { PDFDict, PDFName } = PDFLib;
+  const { widget } = inspectSignatureWidget(PDFLib, reopened, 0);
+  const signature = widget.lookup(PDFName.of("V"), PDFDict);
+  assert.equal(signature.get(PDFName.of("Name")).decodeText(), certificateLabel);
 });
 
 test("rejects_missing_displaced_or_invisible_serialized_signature_widgets", async () => {

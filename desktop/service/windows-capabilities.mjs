@@ -366,7 +366,7 @@ export async function signPdfWithWindowsCertificate(input, dependencies = {}) {
   }
   const certificate = await getWindowsCertificate(thumbprint, dependencies);
   const signatureOptions = {
-    signerName: input?.signerName || certificate.label || certificate.subject || "Assinatura digital",
+    signerName: certificate.label || certificate.subject || input?.signerName || "Assinatura digital",
     reason: "Assinado digitalmente pelo DocPronto",
     placement: input?.placement,
   };

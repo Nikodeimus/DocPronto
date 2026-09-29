@@ -1708,52 +1708,19 @@ async function signPdfWithWrittenSignature(file, placement = null) {
   const pdfDocument = await PDFLib.PDFDocument.load(await file.arrayBuffer());
   const pages = pdfDocument.getPages();
   const page = pages[clamp((placement?.page || pages.length) - 1, 0, pages.length - 1)];
-  const regular = await pdfDocument.embedFont(PDFLib.StandardFonts.Helvetica);
   const italic = await pdfDocument.embedFont(PDFLib.StandardFonts.TimesRomanItalic);
   const { width } = page.getSize();
-  const signedAt = new Intl.DateTimeFormat("pt-BR", {
-    dateStyle: "short",
-    timeStyle: "short"
-  }).format(new Date());
   const boxWidth = placement?.width || Math.min(300, width - 80);
   const boxHeight = placement?.height || 72;
   const x = placement?.x ?? width - boxWidth - 42;
   const y = placement?.y ?? 54;
-  const horizontalPadding = 14;
-  const textWidth = Math.max(1, boxWidth - horizontalPadding * 2);
-  const safeSignerName = toWinAnsi(signerName);
-  const footerText = toWinAnsi(`Assinado visualmente em ${signedAt}`);
-  const signerSize = fitTextToWidth(safeSignerName, italic, textWidth, 15, 7);
-  const footerSize = fitTextToWidth(footerText, regular, textWidth, 8.5, 5);
-  page.drawRectangle({
-    x,
-    y,
-    width: boxWidth,
-    height: boxHeight,
-    borderColor: PDFLib.rgb(0.16, 0.2, 0.18),
-    borderWidth: 0.8,
-    color: PDFLib.rgb(1, 0.996, 0.965),
-    opacity: 0.92
-  });
-  page.drawText(safeSignerName, {
-    x: x + horizontalPadding,
-    y: y + boxHeight - 33,
-    size: signerSize,
+  const appearance = createVisualSignatureAppearance(toWinAnsi(signerName), italic, boxWidth, boxHeight);
+  page.drawText(appearance.text, {
+    x: x + appearance.x,
+    y: y + appearance.y,
+    size: appearance.size,
     font: italic,
     color: PDFLib.rgb(0.08, 0.14, 0.12)
-  });
-  page.drawLine({
-    start: { x: x + horizontalPadding, y: y + boxHeight - 40 },
-    end: { x: x + boxWidth - horizontalPadding, y: y + boxHeight - 40 },
-    thickness: 0.6,
-    color: PDFLib.rgb(0.16, 0.2, 0.18)
-  });
-  page.drawText(footerText, {
-    x: x + horizontalPadding,
-    y: y + 15,
-    size: footerSize,
-    font: regular,
-    color: PDFLib.rgb(0.32, 0.38, 0.35)
   });
   download(await pdfDocument.save(), `${baseName(file.name)}-assinado.pdf`, "application/pdf");
 }
@@ -1766,6 +1733,18 @@ function fitTextToWidth(text, font, maxWidth, preferredSize, minimumSize = 1) {
     return Math.max(minimumSize, fitted);
   }
   return Math.max(1, fitted);
+}
+
+function createVisualSignatureAppearance(text, font, width, height) {
+  const horizontalPadding = Math.min(14, Math.max(4, width * 0.08));
+  const availableWidth = Math.max(1, width - horizontalPadding * 2);
+  const size = fitTextToWidth(text, font, availableWidth, 15, 7);
+  return {
+    text,
+    size,
+    x: horizontalPadding,
+    y: Math.max(2, (height - size) / 2),
+  };
 }
 
 function parsePkcs12Certificate(bytes, password) {
