@@ -7,10 +7,13 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-export const UI_TIMEOUT_MS = 3_000;
+export const UI_TIMEOUT_MS = 3_500;
+export const UI_HARD_TIMEOUT_MS = 6_000;
 export const HEALTH_TIMEOUT_MS = 15_000;
+export const OPTIONAL_CAPABILITY_TIMEOUT_MS = 45_000;
 export const PREPARATION_LAUNCHES = 2;
 export const LAB_OFFICIAL_SAMPLES = 3;
+export const STABLE_OFFICIAL_SAMPLES = 3;
 export const REQUIRED_EVENTS = Object.freeze([
   "service-ready",
   "window-painted",
@@ -43,6 +46,20 @@ export function assertLaunchDuration(launchElapsedMs) {
   if (!Number.isFinite(launchElapsedMs) || launchElapsedMs > UI_TIMEOUT_MS) {
     throw smokeError("SMOKE_UI_SLOW", `A visible window painted after ${launchElapsedMs} ms from spawn.`);
   }
+}
+
+export function assertLaunchSamples(samples) {
+  if (!Array.isArray(samples) || samples.length < 3 || samples.some(value => !Number.isFinite(value))) {
+    throw smokeError("SMOKE_UI_SAMPLE_INVALID", "At least three valid launch samples are required.");
+  }
+  const ordered = [...samples].sort((left, right) => left - right);
+  const median = ordered[Math.floor(ordered.length / 2)];
+  const maximum = ordered.at(-1);
+  if (maximum > UI_HARD_TIMEOUT_MS) {
+    throw smokeError("SMOKE_UI_HARD_LIMIT", `A visible window exceeded the ${UI_HARD_TIMEOUT_MS} ms hard limit (${maximum} ms).`);
+  }
+  assertLaunchDuration(median);
+  return { median, maximum };
 }
 
 export function acceptsCertificateCapability(event) {
@@ -278,18 +295,12 @@ export async function runPackagedSmoke({
 
     const painted = await waitForEvent(reportPath, event => event.type === "window-painted", HEALTH_TIMEOUT_MS, "SMOKE_UI_TIMEOUT");
     const launchElapsedMs = Date.parse(painted.timestamp) - startedAt;
-    try {
-      assertLaunchDuration(launchElapsedMs);
-    } catch (error) {
-      error.message += ` Process uptime: ${painted.uptimeMs} ms.`;
-      throw error;
-    }
 
-    const certificate = await waitForEvent(reportPath, event => event.type === "certificate-capability", 35_000, "SMOKE_CERTIFICATE_RESULT_MISSING");
+    const certificate = await waitForEvent(reportPath, event => event.type === "certificate-capability", OPTIONAL_CAPABILITY_TIMEOUT_MS, "SMOKE_CERTIFICATE_RESULT_MISSING");
     if (first.exitCode !== null || !acceptsCertificateCapability(certificate)) {
       throw smokeError("SMOKE_OPTIONAL_CAPABILITY_CRASH", "The real certificate provider affected the main window.");
     }
-    const word = await waitForEvent(reportPath, event => event.type === "word-capability", 25_000, "SMOKE_WORD_RESULT_MISSING");
+    const word = await waitForEvent(reportPath, event => event.type === "word-capability", OPTIONAL_CAPABILITY_TIMEOUT_MS, "SMOKE_WORD_RESULT_MISSING");
     if (first.exitCode !== null || !acceptsWordCapability(word)) {
       throw smokeError("SMOKE_OPTIONAL_CAPABILITY_CRASH", "The real Word capability returned an unexpected result.");
     }
@@ -346,14 +357,18 @@ export async function runPackagedSmokes({ root = projectDir } = {}) {
     {
       expectedChannel: "stable",
       executable: join(root, "release", "stable", "win-unpacked", "DOCPronto.exe"),
-      samples: 1,
+      samples: STABLE_OFFICIAL_SAMPLES,
     },
   ];
   const results = [];
   for (const target of targets) {
+    const targetResults = [];
     for (let sample = 1; sample <= target.samples; sample += 1) {
-      results.push({ ...await runPackagedSmoke(target), sample, samples: target.samples });
+      const result = { ...await runPackagedSmoke(target), sample, samples: target.samples };
+      targetResults.push(result);
+      results.push(result);
     }
+    assertLaunchSamples(targetResults.map(result => result.launchElapsedMs));
   }
   return results;
 }

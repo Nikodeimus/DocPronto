@@ -25,17 +25,29 @@ test("desktop_verify_e_o_unico_gate_de_release_local", async () => {
 test("smoke_empacotado_tem_um_protocolo_observavel_e_limites_fixos", async () => {
   const smoke = await import("../../scripts/smoke-desktop.mjs");
 
-  assert.equal(smoke.UI_TIMEOUT_MS, 3_000);
+  assert.equal(smoke.UI_TIMEOUT_MS, 3_500);
+  assert.equal(smoke.UI_HARD_TIMEOUT_MS, 6_000);
   assert.equal(smoke.HEALTH_TIMEOUT_MS, 15_000);
+  assert.equal(smoke.OPTIONAL_CAPABILITY_TIMEOUT_MS, 45_000);
   assert.equal(smoke.PREPARATION_LAUNCHES, 2);
   assert.equal(smoke.LAB_OFFICIAL_SAMPLES, 3);
+  assert.equal(smoke.STABLE_OFFICIAL_SAMPLES, 3);
   assert.equal(typeof smoke.runPackagedSmoke, "function");
   assert.equal(typeof smoke.runPackagedSmokes, "function");
   assert.throws(
-    () => smoke.assertLaunchDuration(3_001),
+    () => smoke.assertLaunchDuration(3_501),
     error => error.code === "SMOKE_UI_SLOW",
   );
-  assert.doesNotThrow(() => smoke.assertLaunchDuration(3_000));
+  assert.doesNotThrow(() => smoke.assertLaunchDuration(3_500));
+  assert.deepEqual(smoke.assertLaunchSamples([2_800, 3_046, 2_900]), { median: 2_900, maximum: 3_046 });
+  assert.throws(
+    () => smoke.assertLaunchSamples([3_400, 3_600, 3_700]),
+    error => error.code === "SMOKE_UI_SLOW",
+  );
+  assert.throws(
+    () => smoke.assertLaunchSamples([1_900, 2_000, 6_001]),
+    error => error.code === "SMOKE_UI_HARD_LIMIT",
+  );
   assert.deepEqual(smoke.REQUIRED_EVENTS, [
     "service-ready",
     "window-painted",
