@@ -12,7 +12,6 @@ import { resolveRuntimeChannel } from "./config/channel.mjs";
 import { createDesktopRuntime } from "./runtime.mjs";
 import { createUpdateManager } from "./update/manager.mjs";
 import { startDocProntoService } from "./service/server.mjs";
-import { listWindowsCertificates, probeMicrosoftWord } from "./service/windows-capabilities.mjs";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -126,6 +125,7 @@ const runtime = createDesktopRuntime({
   initializeOptionalCapabilities: async () => {
     if (process.platform !== "win32") return;
     if (smokeMode && process.env.DOCPRONTO_SMOKE_WARMUP === "1") return;
+    const { listWindowsCertificates, probeMicrosoftWord } = await import("./service/windows-capabilities.mjs");
     const checks = [
       async () => {
         try {

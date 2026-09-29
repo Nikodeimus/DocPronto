@@ -20,6 +20,16 @@ const ALLOWED_ARCHIVE_DIRECTORIES = new Set(["/desktop", "/public", "/public/doc
 const TEXT_FILE = /\.(?:cjs|css|html|js|json|mjs|txt|xml|yml|yaml)$/i;
 const PERSONAL_CONTENT = /(?:[a-z]:[\\/]users[\\/]|\/users\/[^/]+\/|\/home\/[^/]+\/|[\\/]downloads[\\/])/i;
 const ELECTRON_LICENSE_FILES = new Set(["LICENSE.electron.txt", "LICENSES.chromium.html"]);
+const ALLOWED_EXTERNAL_ROOT_FILES = new Set([
+  "chrome_100_percent.pak", "chrome_200_percent.pak", "d3dcompiler_47.dll",
+  "dxcompiler.dll", "dxil.dll", "ffmpeg.dll", "icudtl.dat", "LICENSE.electron.txt",
+  "LICENSES.chromium.html", "resources.pak", "snapshot_blob.bin", "v8_context_snapshot.bin",
+  "vk_swiftshader_icd.json", "vk_swiftshader.dll", "vulkan-1.dll",
+  "DOCPronto.exe", "DOCPronto Laboratorio.exe",
+]);
+const ALLOWED_RESOURCE_FILES = new Set([
+  "resources/app.asar", "resources/app-update.yml", "resources/elevate.exe",
+]);
 
 async function listFiles(directory, prefix = "") {
   let entries;
@@ -67,7 +77,12 @@ export function classifyArchiveEntries(entries) {
 
 export function classifyExternalEntries(entries) {
   const normalized = entries.map(file => file.replaceAll("\\", "/"));
-  return { forbiddenExternalFiles: normalized.filter(isForbiddenArchiveFile) };
+  const isAllowed = file => (
+    ALLOWED_EXTERNAL_ROOT_FILES.has(file)
+    || ALLOWED_RESOURCE_FILES.has(file)
+    || /^locales\/[a-z]{2,3}(?:-[A-Z]{2}|-\d{3})?\.pak$/.test(file)
+  );
+  return { forbiddenExternalFiles: normalized.filter(file => !isAllowed(file)) };
 }
 
 function scanSensitiveContent(archive, archiveFiles) {

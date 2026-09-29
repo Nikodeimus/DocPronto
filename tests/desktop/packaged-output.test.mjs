@@ -49,6 +49,11 @@ test("classificador_rejeita_artefatos_proibidos_fora_do_ASAR", () => {
     "tests/smoke.spec.mjs",
     "Downloads/cliente.pdf",
     "locales/pt-BR.pak.map",
+    "client.pdf",
+    "customer.db",
+    "archive.zip",
+    "notes.txt",
+    "resources/unexpected.bin",
   ]);
 
   assert.deepEqual(result.forbiddenExternalFiles, [
@@ -57,7 +62,29 @@ test("classificador_rejeita_artefatos_proibidos_fora_do_ASAR", () => {
     "tests/smoke.spec.mjs",
     "Downloads/cliente.pdf",
     "locales/pt-BR.pak.map",
+    "client.pdf",
+    "customer.db",
+    "archive.zip",
+    "notes.txt",
+    "resources/unexpected.bin",
   ]);
+});
+
+test("allowlist_externa_aceita_somente_a_estrutura_do_Electron_e_DOCPronto", () => {
+  const result = packageInspector.classifyExternalEntries([
+    "DOCPronto.exe",
+    "DOCPronto Laboratorio.exe",
+    "chrome_100_percent.pak",
+    "d3dcompiler_47.dll",
+    "icudtl.dat",
+    "LICENSE.electron.txt",
+    "snapshot_blob.bin",
+    "locales/pt-BR.pak",
+    "resources/app.asar",
+    "resources/app-update.yml",
+    "resources/elevate.exe",
+  ]);
+  assert.deepEqual(result.forbiddenExternalFiles, []);
 });
 
 test("pacote_real_mantem_runtime_no_ASAR_e_remove_arquivos_de_desenvolvimento", {

@@ -28,6 +28,7 @@ test("smoke_empacotado_tem_um_protocolo_observavel_e_limites_fixos", async () =>
   assert.equal(smoke.UI_TIMEOUT_MS, 3_000);
   assert.equal(smoke.HEALTH_TIMEOUT_MS, 15_000);
   assert.equal(smoke.PREPARATION_LAUNCHES, 2);
+  assert.equal(smoke.LAB_OFFICIAL_SAMPLES, 3);
   assert.equal(typeof smoke.runPackagedSmoke, "function");
   assert.equal(typeof smoke.runPackagedSmokes, "function");
   assert.throws(
@@ -52,6 +53,12 @@ test("smoke_empacotado_tem_um_protocolo_observavel_e_limites_fixos", async () =>
   assert.equal(smoke.acceptsCertificateCapability({ capability: "certificate", status: "unavailable", code: "RANDOM_PROVIDER_FAILURE" }), false);
   assert.equal(smoke.acceptsWordCapability({ capability: "word", status: "unavailable", code: "WORD_UNAVAILABLE" }), true);
   assert.equal(smoke.acceptsWordCapability({ capability: "word", status: "unavailable", code: "RANDOM_WORD_FAILURE" }), false);
+  const primary = Object.assign(new Error("paint failed"), { code: "SMOKE_UI_SLOW" });
+  const cleanup = Object.assign(new Error("port remained open"), { code: "SMOKE_PORT_LEAK" });
+  assert.equal(smoke.preservePrimarySmokeError(primary, [cleanup]), primary);
+  assert.equal(primary.code, "SMOKE_UI_SLOW");
+  assert.equal(primary.cleanupFailure.code, "SMOKE_CLEANUP_FAILED");
+  assert.match(primary.message, /SMOKE_PORT_LEAK/);
 });
 
 test("smoke_nao_fabrica_indisponibilidade_de_Word_ou_certificado", async () => {
@@ -65,15 +72,24 @@ test("smoke_nao_fabrica_indisponibilidade_de_Word_ou_certificado", async () => {
 });
 
 test("renderer_sinaliza_frame_pintado_somente_apos_janela_visivel", async () => {
+  const startup = await readFile(join(projectDir, "public", "docpronto", "startup.js"), "utf8");
   const app = await readFile(join(projectDir, "public", "docpronto", "app.js"), "utf8");
   const html = await readFile(join(projectDir, "public", "docpronto", "index.html"), "utf8");
   const main = await readFile(join(projectDir, "desktop", "runtime.mjs"), "utf8");
   const smoke = await readFile(join(projectDir, "scripts", "smoke-desktop.mjs"), "utf8");
   const desktopMain = await readFile(join(projectDir, "desktop", "main.mjs"), "utf8");
-  assert.match(app, /requestAnimationFrame[\s\S]*requestAnimationFrame[\s\S]*signalPainted/);
-  assert.match(app, /signalPainted[\s\S]*import\("\.\/lab-ui\.mjs/);
+  const service = await readFile(join(projectDir, "desktop", "service", "server.mjs"), "utf8");
+  assert.ok(Buffer.byteLength(startup) < 20_000, "startup renderer must stay small");
+  assert.match(startup, /renderStartupTools\(\)[\s\S]*bindStartupInteractions\(\)[\s\S]*requestAnimationFrame/);
+  assert.match(startup, /requestAnimationFrame[\s\S]*requestAnimationFrame[\s\S]*signalPainted/);
+  assert.match(startup, /await window\.docprontoDesktop\.signalPainted\(\)[\s\S]*loadApplication\(\)/);
+  assert.match(startup, /loadApplication[\s\S]*import\("\.\/app\.js/);
+  assert.match(startup, /await loadApplication\(\)[\s\S]*\?\.click\(\)/);
+  assert.match(startup, /loadApplication[\s\S]*import\("\.\/lab-ui\.mjs/);
   assert.match(main, /isVisible\(\)/);
   assert.match(app, /await loadToolLibraries\(\)[\s\S]*activeTool\.action/);
+  assert.match(html, /<script\s+src="startup\.js/);
+  assert.doesNotMatch(html, /<script\s+src="app\.js/);
   assert.doesNotMatch(html, /<script\s+src="vendor\//);
   assert.doesNotMatch(html, /<script[^>]+src="lab-ui\.mjs/);
   assert.match(smoke, /waitForEvent\(reportPath, event => event\.type === "stopping"/);
@@ -81,6 +97,10 @@ test("renderer_sinaliza_frame_pintado_somente_apos_janela_visivel", async () => 
   assert.match(desktopMain, /await import\("electron-updater"\)/);
   assert.doesNotMatch(desktopMain, /^import \{ exportDiagnosticBundle \}/m);
   assert.match(desktopMain, /await import\("\.\/diagnostics\/export\.mjs"\)/);
+  assert.doesNotMatch(desktopMain, /^import \{ listWindowsCertificates, probeMicrosoftWord \}/m);
+  assert.match(desktopMain, /await import\("\.\/service\/windows-capabilities\.mjs"\)/);
+  assert.doesNotMatch(service, /^import \{[\s\S]*?\} from "\.\/windows-capabilities\.mjs";/m);
+  assert.match(service, /windowsCapabilitiesPromise \?\?= import\("\.\/windows-capabilities\.mjs"\)/);
 });
 
 test("configuracao_estavel_nao_carrega_identidade_LAB", () => {

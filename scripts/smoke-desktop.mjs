@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 export const UI_TIMEOUT_MS = 3_000;
 export const HEALTH_TIMEOUT_MS = 15_000;
 export const PREPARATION_LAUNCHES = 2;
+export const LAB_OFFICIAL_SAMPLES = 3;
 export const REQUIRED_EVENTS = Object.freeze([
   "service-ready",
   "window-painted",
@@ -24,6 +25,18 @@ const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function smokeError(code, message) {
   return Object.assign(new Error(message), { code });
+}
+
+export function preservePrimarySmokeError(primaryError, cleanupFailures = []) {
+  if (cleanupFailures.length === 0) return primaryError;
+  const cleanupFailure = Object.assign(
+    new AggregateError(cleanupFailures, "Smoke cleanup did not complete."),
+    { code: "SMOKE_CLEANUP_FAILED" },
+  );
+  if (!primaryError) return cleanupFailure;
+  primaryError.cleanupFailure = cleanupFailure;
+  primaryError.message += ` Cleanup failures: ${cleanupFailures.map(error => error?.code ?? error?.message ?? "unknown").join(", ")}.`;
+  return primaryError;
 }
 
 export function assertLaunchDuration(launchElapsedMs) {
@@ -133,6 +146,32 @@ async function terminateTree(pid) {
   }
 }
 
+async function cleanupSmokeRun({ children, port, imageName, baselinePids, temporaryDirectory }) {
+  const failures = [];
+  for (const child of children.filter(Boolean)) {
+    try {
+      if (child.exitCode === null) await terminateTree(child.pid);
+      await waitForExit(child, 5_000);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (port) {
+    try { await waitForPortRelease(port); } catch (error) { failures.push(error); }
+  }
+  try {
+    const finalPids = await processIdsForImage(imageName);
+    const leaked = [...finalPids].filter(pid => !baselinePids.has(pid));
+    if (leaked.length > 0) {
+      failures.push(smokeError("SMOKE_PROCESS_LEAK", `Processes remained: ${leaked.join(", ")}.`));
+    }
+  } catch (error) {
+    failures.push(error);
+  }
+  try { await rm(temporaryDirectory, { recursive: true, force: true }); } catch (error) { failures.push(error); }
+  return failures;
+}
+
 async function preflightPackagedFiles(executable) {
   const files = [executable, join(dirname(executable), "resources", "app.asar")];
   for (const file of files) {
@@ -144,7 +183,7 @@ async function preflightPackagedFiles(executable) {
   }
 }
 
-async function warmPackagedExecutable(executable) {
+async function warmPackagedExecutable(executable, imageName, baselinePids) {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "docpronto-smoke-warmup-"));
   const reportPath = join(temporaryDirectory, "events.jsonl");
   const controlPath = join(temporaryDirectory, "control.txt");
@@ -161,18 +200,26 @@ async function warmPackagedExecutable(executable) {
     shell: false,
     stdio: "ignore",
   });
+  let port;
+  let primaryError;
+  let elapsed;
   try {
     const service = await waitForEvent(reportPath, event => event.type === "service-ready", 30_000, "SMOKE_WARMUP_TIMEOUT");
+    port = Number(new URL(service.origin).port);
     const painted = await waitForEvent(reportPath, event => event.type === "window-painted", 30_000, "SMOKE_WARMUP_TIMEOUT");
     await writeFile(controlPath, "quit", "utf8");
     await waitForEvent(reportPath, event => event.type === "stopping", 5_000, "SMOKE_WARMUP_STOP_TIMEOUT");
     await waitForExit(child, 15_000);
-    await waitForPortRelease(new URL(service.origin).port);
-    return Date.parse(painted.timestamp) - startedAt;
-  } finally {
-    if (child.exitCode === null) await terminateTree(child.pid);
-    await rm(temporaryDirectory, { recursive: true, force: true });
+    await waitForPortRelease(port);
+    elapsed = Date.parse(painted.timestamp) - startedAt;
+  } catch (error) {
+    primaryError = error;
   }
+  const cleanupFailures = await cleanupSmokeRun({
+    children: [child], port, imageName, baselinePids, temporaryDirectory,
+  });
+  if (primaryError || cleanupFailures.length) throw preservePrimarySmokeError(primaryError, cleanupFailures);
+  return elapsed;
 }
 
 export async function runPackagedSmoke({
@@ -191,7 +238,7 @@ export async function runPackagedSmoke({
   }
   const warmupElapsedMs = [];
   for (let launch = 0; launch < PREPARATION_LAUNCHES; launch += 1) {
-    warmupElapsedMs.push(await warmPackagedExecutable(executable));
+    warmupElapsedMs.push(await warmPackagedExecutable(executable, imageName, baselinePids));
   }
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "docpronto-smoke-"));
   const reportPath = join(temporaryDirectory, "events.jsonl");
@@ -205,6 +252,9 @@ export async function runPackagedSmoke({
   };
   let first;
   let second;
+  let servicePort;
+  let primaryError;
+  let result;
   try {
     const startedAt = Date.now();
     first = spawn(executable, [], {
@@ -213,6 +263,7 @@ export async function runPackagedSmoke({
     first.once("error", () => {});
 
     const service = await waitForEvent(reportPath, event => event.type === "service-ready", HEALTH_TIMEOUT_MS, "SMOKE_HEALTH_TIMEOUT");
+    servicePort = Number(new URL(service.origin).port);
     const healthRemainingMs = HEALTH_TIMEOUT_MS - (Date.now() - startedAt);
     if (healthRemainingMs <= 0) throw smokeError("SMOKE_HEALTH_TIMEOUT", "Health was not ready within 15000 ms.");
     const healthResponse = await fetch(`${service.origin}/api/health`, {
@@ -258,28 +309,31 @@ export async function runPackagedSmoke({
     await waitForEvent(reportPath, event => event.type === "stopping", 5_000, "SMOKE_STOP_EVENT_MISSING");
     const firstExit = await waitForExit(first, 10_000);
     if (firstExit.code !== 0) throw smokeError("SMOKE_EXIT_FAILED", `${expectedChannel} exited with code ${firstExit.code}.`);
-    await waitForPortRelease(new URL(service.origin).port);
+    await waitForPortRelease(servicePort);
     await new Promise(resolveWait => setTimeout(resolveWait, 500));
 
     const finalPids = await processIdsForImage(imageName);
     const leaked = [...finalPids].filter(pid => !baselinePids.has(pid));
     if (leaked.length > 0) throw smokeError("SMOKE_PROCESS_LEAK", `Processes remained: ${leaked.join(", ")}.`);
 
-    return {
+    result = {
       executable,
       channel: health.channel,
       version: health.version,
-      port: Number(new URL(service.origin).port),
+      port: servicePort,
       uiElapsedMs: launchElapsedMs,
       launchElapsedMs,
       warmupElapsedMs,
       events: REQUIRED_EVENTS,
     };
-  } finally {
-    if (second && second.exitCode === null) await terminateTree(second.pid);
-    if (first && first.exitCode === null) await terminateTree(first.pid);
-    await rm(temporaryDirectory, { recursive: true, force: true });
+  } catch (error) {
+    primaryError = error;
   }
+  const cleanupFailures = await cleanupSmokeRun({
+    children: [second, first], port: servicePort, imageName, baselinePids, temporaryDirectory,
+  });
+  if (primaryError || cleanupFailures.length) throw preservePrimarySmokeError(primaryError, cleanupFailures);
+  return result;
 }
 
 export async function runPackagedSmokes({ root = projectDir } = {}) {
@@ -287,20 +341,26 @@ export async function runPackagedSmokes({ root = projectDir } = {}) {
     {
       expectedChannel: "lab",
       executable: join(root, "release", "lab", "win-unpacked", "DOCPronto Laboratorio.exe"),
+      samples: LAB_OFFICIAL_SAMPLES,
     },
     {
       expectedChannel: "stable",
       executable: join(root, "release", "stable", "win-unpacked", "DOCPronto.exe"),
+      samples: 1,
     },
   ];
   const results = [];
-  for (const target of targets) results.push(await runPackagedSmoke(target));
+  for (const target of targets) {
+    for (let sample = 1; sample <= target.samples; sample += 1) {
+      results.push({ ...await runPackagedSmoke(target), sample, samples: target.samples });
+    }
+  }
   return results;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const results = await runPackagedSmokes();
   for (const result of results) {
-    console.log(`Desktop smoke passed: ${result.channel} ${result.version}, painted window ${result.launchElapsedMs} ms from measured spawn (preparations ${result.warmupElapsedMs.join(", ")} ms), port ${result.port}.`);
+    console.log(`Desktop smoke passed: ${result.channel} ${result.version}, official sample ${result.sample}/${result.samples}, painted window ${result.launchElapsedMs} ms from measured spawn (preparations ${result.warmupElapsedMs.join(", ")} ms), port ${result.port}.`);
   }
 }

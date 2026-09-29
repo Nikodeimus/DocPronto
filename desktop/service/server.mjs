@@ -5,13 +5,6 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 
-import {
-  convertOfficeDocument,
-  listWindowsCertificates,
-  signPdfWithWindowsCertificate,
-  signWithWindowsCertificate,
-} from "./windows-capabilities.mjs";
-
 const MAX_API_REQUEST_BYTES = 56 * 1024 * 1024;
 const MAX_NATIVE_INPUT_BYTES = 40 * 1024 * 1024;
 const LOOPBACK_HOST = "127.0.0.1";
@@ -27,12 +20,25 @@ const MIME_TYPES = new Map([
   [".wasm", "application/wasm"],
   [".gz", "application/gzip"],
 ]);
-const DEFAULT_CAPABILITIES = Object.freeze({
-  convertOfficeDocument,
-  listWindowsCertificates,
-  signPdfWithWindowsCertificate,
-  signWithWindowsCertificate,
-});
+const NATIVE_CAPABILITY_NAMES = Object.freeze([
+  "convertOfficeDocument",
+  "listWindowsCertificates",
+  "signPdfWithWindowsCertificate",
+  "signWithWindowsCertificate",
+]);
+let windowsCapabilitiesPromise;
+
+async function loadWindowsCapabilities() {
+  windowsCapabilitiesPromise ??= import("./windows-capabilities.mjs");
+  return await windowsCapabilitiesPromise;
+}
+
+const DEFAULT_CAPABILITIES = Object.freeze(Object.fromEntries(
+  NATIVE_CAPABILITY_NAMES.map(name => [name, async (...args) => {
+    const capabilities = await loadWindowsCapabilities();
+    return capabilities[name](...args);
+  }]),
+));
 const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "CERTIFICATE_NOT_FOUND",
   "CERTIFICATE_PROVIDER_UNAVAILABLE",
@@ -55,7 +61,7 @@ function codedError(code, message, status = 400, cause) {
 }
 
 function isPublicAsset(name) {
-  return ["index.html", "app.js", "lab-ui.mjs", "styles.css"].includes(name)
+  return ["index.html", "startup.js", "app.js", "lab-ui.mjs", "styles.css"].includes(name)
     || /^vendor\/(?:[a-zA-Z0-9_-]+(?:\.worker)?(?:\.min)?\.(?:js|mjs)|tesseract-core\/[a-zA-Z0-9_.-]+\.(?:js|wasm))$/.test(name);
 }
 
