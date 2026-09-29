@@ -67,6 +67,44 @@ function createPdfSigningRunner({ onVerify } = {}) {
   };
 }
 
+function inspectSignatureWidget(PDFLib, document, pageIndex) {
+  const { PDFArray, PDFDict, PDFName } = PDFLib;
+  const page = document.getPage(pageIndex);
+  const annotations = page.node.lookupMaybe(PDFName.of("Annots"), PDFArray);
+  assert.ok(annotations, "signed page must contain annotations");
+  for (let index = 0; index < annotations.size(); index += 1) {
+    const reference = annotations.get(index);
+    const widget = document.context.lookup(reference, PDFDict);
+    if (String(widget?.get(PDFName.of("Subtype"))) === "/Widget"
+      && String(widget?.get(PDFName.of("FT"))) === "/Sig") {
+      return { page, reference, widget };
+    }
+  }
+  assert.fail("signed page must contain a signature widget");
+}
+
+async function withSerializedMutation(search, replacement, operation) {
+  assert.equal(search.length, replacement.length, "serialized mutation must preserve PDF offsets");
+  const originalWrite = Buffer.prototype.write;
+  let mutated = false;
+  Buffer.prototype.write = function writeAndMutatePdf(value, ...args) {
+    const written = Reflect.apply(originalWrite, this, [value, ...args]);
+    if (!mutated && typeof value === "string" && value.length === 65_536) {
+      const mutationOffset = this.indexOf(search, 0, "ascii");
+      assert.notEqual(mutationOffset, -1, `serialized PDF must contain ${search} before mutation`);
+      Reflect.apply(originalWrite, this, [replacement, mutationOffset, "ascii"]);
+      mutated = true;
+    }
+    return written;
+  };
+  try {
+    return await operation();
+  } finally {
+    Buffer.prototype.write = originalWrite;
+    assert.equal(mutated, true, "test must mutate the serialized PDF widget");
+  }
+}
+
 function hasCode(code) {
   return error => {
     assert.equal(error.code, code);
@@ -161,27 +199,52 @@ test("returns_a_reopenable_signed_PDF_with_complete_cryptographic_coverage", asy
     updateMetadata: false,
   });
   assert.equal(reopened.getPageCount(), 1);
+  const { PDFArray, PDFDict, PDFName } = PDFLib;
+  const { page, widget } = inspectSignatureWidget(PDFLib, reopened, 0);
+  assert.equal(String(widget.get(PDFName.of("P"))), String(page.ref));
+  const rectangle = widget.lookup(PDFName.of("Rect"), PDFArray);
+  assert.deepEqual(
+    Array.from({ length: rectangle.size() }, (_, index) => rectangle.lookup(index).asNumber()),
+    [72, 72, 292, 132],
+  );
+  const signature = widget.lookup(PDFName.of("V"), PDFDict);
+  assert.equal(String(signature.get(PDFName.of("Type"))), "/Sig");
+  const appearanceDictionary = widget.lookup(PDFName.of("AP"), PDFDict);
+  const normalAppearance = reopened.context.lookup(appearanceDictionary.get(PDFName.of("N")));
+  assert.equal(String(normalAppearance.dict.get(PDFName.of("Type"))), "/XObject");
+  assert.equal(String(normalAppearance.dict.get(PDFName.of("Subtype"))), "/Form");
+  const appearanceBounds = normalAppearance.dict.lookup(PDFName.of("BBox"), PDFArray);
+  assert.deepEqual(
+    Array.from({ length: appearanceBounds.size() }, (_, index) => appearanceBounds.lookup(index).asNumber()),
+    [0, 0, 220, 60],
+  );
+  const appearanceContent = Buffer.from(PDFLib.decodePDFRawStream(normalAppearance).decode()).toString("latin1");
+  assert.match(appearanceContent, /\b(?:Tj|S|f)\b/);
   assert.deepEqual(await readdir(tempRoot), []);
 });
 
-test("validates_final_visible_placement_before_returning_the_signed_PDF", async () => {
-  const placement = { ...VALID_PLACEMENT };
+test("rejects_missing_displaced_or_invisible_serialized_signature_widgets", async () => {
   const sourcePdf = await createPdfFixture();
+  const mutations = [
+    ["/AP", "/XX"],
+    ["/Rect [ 72 72 292 132 ]", "/Rect [ 82 72 302 132 ]"],
+    ["/Subtype /Form", "/Subtype /Fake"],
+  ];
 
-  await assert.rejects(
-    signPdfWithWindowsCertificate({
-      filename: "contrato.pdf",
-      thumbprint: VALID_THUMBPRINT,
-      contentBase64: sourcePdf.toString("base64"),
-      signerName: "Test Signer",
-      placement,
-    }, {
-      runPowerShell: createPdfSigningRunner({
-        onVerify: () => { placement.x = 10_000; },
-      }),
-    }),
-    hasCode("INVALID_SIGNED_PDF"),
-  );
+  for (const [search, replacement] of mutations) {
+    await assert.rejects(
+      withSerializedMutation(search, replacement, () => signPdfWithWindowsCertificate({
+        filename: "contrato.pdf",
+        thumbprint: VALID_THUMBPRINT,
+        contentBase64: sourcePdf.toString("base64"),
+        signerName: "Test Signer",
+        placement: { ...VALID_PLACEMENT },
+      }, {
+        runPowerShell: createPdfSigningRunner(),
+      })),
+      hasCode("INVALID_SIGNED_PDF"),
+    );
+  }
 });
 
 test("reports_Word_or_PowerShell_unavailability_and_removes_temporaries", async t => {

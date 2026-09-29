@@ -287,14 +287,14 @@ export async function signPdfWithWindowsCertificate(input, dependencies = {}) {
   }
   const output = Buffer.from(prepared.pdf);
   output.write(signatureHex.padEnd(prepared.placeholderHexLength, "0"), prepared.contentsHexStart, "ascii");
-  await validateSignedPdfOutput(output, prepared.byteRange, input.placement);
+  await validateSignedPdfOutput(output, prepared.byteRange, prepared.expectedWidget);
   return {
     filename: `${baseName(input?.filename)}-assinado.pdf`,
     contentBase64: output.toString("base64"),
   };
 }
 
-async function validateSignedPdfOutput(output, expectedByteRange, placement) {
+async function validateSignedPdfOutput(output, expectedByteRange, expectedWidget) {
   try {
     const source = output.toString("latin1");
     if (output.subarray(0, 5).toString("latin1") !== "%PDF-" || !/%%EOF\s*$/.test(source)) {
@@ -321,20 +321,70 @@ async function validateSignedPdfOutput(output, expectedByteRange, placement) {
       throwOnInvalidObject: true,
       updateMetadata: false,
     });
-    const pageNumber = Number(placement?.page);
+    const pageNumber = expectedWidget.pageNumber;
     if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > document.getPageCount()) {
       throw new Error("A pagina escolhida para a assinatura nao existe no PDF final.");
     }
     const page = document.getPage(pageNumber - 1);
-    const crop = typeof page.getCropBox === "function"
-      ? page.getCropBox()
-      : { x: 0, y: 0, ...page.getSize() };
-    const rect = normalizeSignaturePlacement(placement, crop);
-    const tolerance = 0.5;
-    if (rect.x < crop.x - tolerance || rect.y < crop.y - tolerance
-      || rect.x + rect.width > crop.x + crop.width + tolerance
-      || rect.y + rect.height > crop.y + crop.height + tolerance) {
-      throw new Error("A assinatura ficou fora da area visivel da pagina.");
+    const { PDFArray, PDFDict, PDFName } = PDFLib;
+    const annotations = page.node.lookupMaybe(PDFName.of("Annots"), PDFArray);
+    const signatureWidgets = [];
+    if (annotations) {
+      for (let index = 0; index < annotations.size(); index += 1) {
+        const reference = annotations.get(index);
+        const widget = document.context.lookup(reference, PDFDict);
+        if (String(widget?.get(PDFName.of("Subtype"))) === "/Widget"
+          && String(widget?.get(PDFName.of("FT"))) === "/Sig") {
+          signatureWidgets.push(widget);
+        }
+      }
+    }
+    if (signatureWidgets.length !== 1) {
+      throw new Error("O widget de assinatura nao foi encontrado na pagina esperada.");
+    }
+
+    const [widget] = signatureWidgets;
+    if (String(widget.get(PDFName.of("P"))) !== String(page.ref)) {
+      throw new Error("O widget de assinatura nao esta associado a pagina esperada.");
+    }
+    const signature = widget.lookupMaybe(PDFName.of("V"), PDFDict);
+    if (!signature || String(signature.get(PDFName.of("Type"))) !== "/Sig") {
+      throw new Error("O widget nao referencia uma assinatura PDF valida.");
+    }
+
+    const rectangle = widget.lookupMaybe(PDFName.of("Rect"), PDFArray);
+    const actualRectangle = rectangle
+      ? Array.from({ length: rectangle.size() }, (_, index) => rectangle.lookup(index)?.asNumber?.())
+      : [];
+    const tolerance = 0.01;
+    if (actualRectangle.length !== 4 || actualRectangle.some((value, index) =>
+      !Number.isFinite(value) || Math.abs(value - expectedWidget.rectangle[index]) > tolerance)) {
+      throw new Error("O widget de assinatura foi deslocado no PDF final.");
+    }
+
+    const appearanceDictionary = widget.lookupMaybe(PDFName.of("AP"), PDFDict);
+    const normalAppearanceReference = appearanceDictionary?.get(PDFName.of("N"));
+    const normalAppearance = normalAppearanceReference
+      ? document.context.lookup(normalAppearanceReference)
+      : undefined;
+    if (String(normalAppearance?.dict?.get(PDFName.of("Type"))) !== "/XObject"
+      || String(normalAppearance?.dict?.get(PDFName.of("Subtype"))) !== "/Form") {
+      throw new Error("A aparencia normal da assinatura nao e um Form XObject valido.");
+    }
+    const appearanceBounds = normalAppearance?.dict?.lookupMaybe(PDFName.of("BBox"), PDFArray);
+    const actualBounds = appearanceBounds
+      ? Array.from({ length: appearanceBounds.size() }, (_, index) => appearanceBounds.lookup(index)?.asNumber?.())
+      : [];
+    if (actualBounds.length !== 4 || actualBounds.some((value, index) =>
+      !Number.isFinite(value) || Math.abs(value - expectedWidget.appearanceBounds[index]) > tolerance)) {
+      throw new Error("A aparencia visual da assinatura possui limites invalidos.");
+    }
+    if (typeof normalAppearance?.getContents !== "function") {
+      throw new Error("O widget de assinatura nao possui aparencia normal visivel.");
+    }
+    const appearanceContent = Buffer.from(PDFLib.decodePDFRawStream(normalAppearance).decode()).toString("latin1");
+    if (!/(?:^|\s)(?:Tj|TJ|Do|S|s|f|F|f\*|B|B\*|b|b\*)(?:\s|$)/.test(appearanceContent)) {
+      throw new Error("A aparencia normal da assinatura nao contem conteudo visivel.");
     }
   } catch (error) {
     if (error?.code === "INVALID_SIGNED_PDF") throw error;
@@ -469,7 +519,17 @@ async function appendPdfSignaturePlaceholder(pdf, { signerName, reason, placemen
   const rangeValue = `[ ${byteRange.join(" ")} ]`;
   if (rangeValue.length > rangeToken.length) throw new Error("PDF grande demais para assinatura.");
   output.write(rangeValue.padEnd(rangeToken.length, " "), rangeOffset, "ascii");
-  return { pdf: output, byteRange, contentsHexStart: contentsStart + 1, placeholderHexLength };
+  return {
+    pdf: output,
+    byteRange,
+    contentsHexStart: contentsStart + 1,
+    placeholderHexLength,
+    expectedWidget: {
+      pageNumber,
+      rectangle: [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height],
+      appearanceBounds: [0, 0, rect.width, rect.height],
+    },
+  };
 }
 
 function estimateHelveticaWidth(text) {
