@@ -77,18 +77,25 @@ async function invokePowerShell(script, env, defaultTimeoutMs, dependencies, ope
 
 const LIST_CERTIFICATES_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
 $now = Get-Date
-Get-ChildItem Cert:\CurrentUser\My |
-  Where-Object { $_.HasPrivateKey -and $_.NotAfter -gt $now } |
-  Sort-Object NotAfter |
-  ForEach-Object {
-    [PSCustomObject]@{
-      subject = $_.Subject
-      thumbprint = $_.Thumbprint
-      notAfter = $_.NotAfter.ToString('yyyy-MM-dd HH:mm:ss')
-      label = ($_.Subject -replace '^CN=', '' -replace ', OU=.*$', '') + ' - vence ' + $_.NotAfter.ToString('dd/MM/yyyy')
-    }
-  } | ConvertTo-Json -Compress
+$store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'CurrentUser')
+$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+try {
+  $store.Certificates |
+    Where-Object { $_.HasPrivateKey -and $_.NotAfter -gt $now } |
+    Sort-Object NotAfter |
+    ForEach-Object {
+      [PSCustomObject]@{
+        subject = $_.Subject
+        thumbprint = $_.Thumbprint
+        notAfter = $_.NotAfter.ToString('yyyy-MM-dd HH:mm:ss')
+        label = $_.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) + ' - vence ' + $_.NotAfter.ToString('dd/MM/yyyy')
+      }
+    } | ConvertTo-Json -Compress
+} finally {
+  $store.Close()
+}
 `;
 
 export async function listWindowsCertificates(dependencies = {}) {

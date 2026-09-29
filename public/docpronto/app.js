@@ -300,7 +300,7 @@ function renderOptions(type) {
     "pdf-ofx": `<div class="queue-meta"><span>Fila <strong id="ofxQueueCount">0/${MAX_OFX_QUEUE_FILES}</strong></span><span>Saída <strong>ZIP com OFXs</strong></span></div><label><input id="pdfUseOcr" type="checkbox" checked> Usar OCR automaticamente quando necessário</label><progress id="ofxQueueProgress" max="1" value="0" hidden></progress><small id="ofxQueueProgressText">Os arquivos serão processados na ordem da fila.</small>`,
     "pdf-word": `<label for="pdfWordMode">Modo de conversão</label><select id="pdfWordMode"><option value="editable-layout">Documento oficial — fiel e editável (recomendado)</option><option value="fast">Somente o texto editável</option><option value="visual">Cópia visual exata (imagem)</option></select><small>O modo recomendado preserva carimbos, logotipos, códigos, validações e rodapés como elementos gráficos, enquanto reconstrói o corpo do documento como texto editável nas posições originais.</small>`,
     "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
-    "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — assinatura separada .p7s</option><option value="installed">Certificado instalado no Windows — PDF com assinatura embutida</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">O Chrome mostra certificados no gov.br porque aquele serviço solicita autenticação por certificado. Para assinar qualquer arquivo com o certificado do Windows, mantenha o conector do DOCPronto aberto e atualizado. <a href="/docpronto/downloads/DOCPronto-Conector-Windows.zip" download>Baixar ou atualizar o conector</a>.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em conectar e carregar</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Conectar e carregar</button></div><small>PDFs recebem assinatura digital embutida. Nos outros formatos, a assinatura é entregue como arquivo .p7s.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>O modo A1 online gera uma assinatura separada .p7s, inclusive para PDFs. A senha é usada somente na memória desta página.</small></div><small>Escolha o modo conforme o formato de assinatura que o sistema de destino aceita.</small>`,
+    "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — assinatura separada .p7s</option><option value="installed">Certificado instalado no Windows — PDF com assinatura embutida</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">Os certificados instalados são acessados diretamente pelo aplicativo DOCPronto para Windows. A chave privada permanece protegida pelo Windows e não é extraída.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar certificados</button></div><small>PDFs recebem assinatura digital embutida. Nos outros formatos, a assinatura é entregue como arquivo .p7s.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>O modo A1 local gera uma assinatura separada .p7s, inclusive para PDFs. A senha é usada somente na memória desta página.</small></div><small>Escolha o modo conforme o formato de assinatura que o sistema de destino aceita.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`,
     "pdf-xml-abrasf": `<div class="notice visible">O motor reconhece layouts de Barueri, São José do Rio Preto e DANFSe/NFS-e Nacional, identifica prestador e tomador por seção, confere retenções e gera CompNfse ABRASF 2.04.</div><label><input id="abrasfStrictValidation" type="checkbox" checked> Bloquear o XML se os totais não fecharem</label><small>Municípios validados nesta versão: Barueri/SP, São José do Rio Preto/SP, Criciúma/SC e Novo Hamburgo/RS.</small>`
   };
@@ -1323,7 +1323,7 @@ async function convertWithLocalOffice(file, endpoint) {
     })
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || "Não foi possível converter com o Microsoft Word local.");
+  if (!response.ok) throw localConnectorError(result, "Não foi possível converter com o Microsoft Word local.");
   return result;
 }
 
@@ -1375,11 +1375,11 @@ async function signWithInstalledCertificate(file) {
       thumbprint,
       contentBase64: base64FromBytes(fileBytes),
       signerName: document.querySelector("#writtenSignature")?.value?.trim() || select?.selectedOptions?.[0]?.textContent || "",
-      placement
+      ...(pdfMode ? { placement } : {})
     })
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || "Não foi possível assinar com o certificado instalado.");
+  if (!response.ok) throw localConnectorError(result, "Não foi possível assinar com o certificado instalado.");
   if (pdfMode) {
     download(bytesFromBase64(result.contentBase64), result.filename || `${baseName(file.name)}-assinado.pdf`, "application/pdf");
   } else {
@@ -1592,7 +1592,7 @@ async function fetchWindowsCertificates(timeoutMs = 2500) {
   try {
     const response = await localConnectorFetch("/api/certificates", { signal: controller.signal });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "Serviço local indisponível.");
+    if (!response.ok) throw localConnectorError(result, "Serviço local indisponível.");
     return result.certificates || [];
   } finally {
     clearTimeout(timeout);
@@ -1624,29 +1624,48 @@ function filterCertificateOptions(event) {
 }
 
 function localSignerApiBase() {
-  return ["localhost", "127.0.0.1"].includes(window.location.hostname) ? "" : "http://127.0.0.1:4174";
+  if (["localhost", "127.0.0.1"].includes(window.location.hostname)) return "";
+  throw Object.assign(new Error("Certificados instalados estão disponíveis somente no aplicativo DOCPronto para Windows."), {
+    code: "DESKTOP_REQUIRED"
+  });
 }
 
 let localConnectorToken = "";
 
+function localConnectorError(payload, fallback) {
+  return Object.assign(new Error(payload.error || fallback), {
+    code: payload.code || "LOCAL_CONNECTOR_ERROR"
+  });
+}
+
+async function requestLocalConnectorSession(apiBase) {
+  const sessionResponse = await fetch(`${apiBase}/api/session`, {
+    method: "POST",
+    cache: "no-store"
+  });
+  const payload = await sessionResponse.json().catch(() => ({}));
+  if (!sessionResponse.ok || !payload.token) {
+    throw localConnectorError(payload, "Não foi possível iniciar uma sessão segura com o conector local.");
+  }
+  return payload.token;
+}
+
 async function localConnectorFetch(path, options = {}) {
   const apiBase = localSignerApiBase();
   if (!localConnectorToken) {
-    const sessionResponse = await fetch(`${apiBase}/api/session`, { cache: "no-store" });
-    const session = await sessionResponse.json().catch(() => ({}));
-    if (!sessionResponse.ok || !session.token) throw new Error(session.error || "Não foi possível iniciar uma sessão segura com o conector local.");
-    localConnectorToken = session.token;
+    localConnectorToken = await requestLocalConnectorSession(apiBase);
   }
   const headers = new Headers(options.headers || {});
   headers.set("X-DocPronto-Token", localConnectorToken);
   let response = await fetch(`${apiBase}${path}`, { ...options, headers });
   if (response.status === 401) {
     localConnectorToken = "";
-    const sessionResponse = await fetch(`${apiBase}/api/session`, { cache: "no-store" });
-    const session = await sessionResponse.json().catch(() => ({}));
-    if (!sessionResponse.ok || !session.token) return response;
-    localConnectorToken = session.token;
-    headers.set("X-DocPronto-Token", session.token);
+    try {
+      localConnectorToken = await requestLocalConnectorSession(apiBase);
+    } catch {
+      return response;
+    }
+    headers.set("X-DocPronto-Token", localConnectorToken);
     response = await fetch(`${apiBase}${path}`, { ...options, headers });
   }
   return response;

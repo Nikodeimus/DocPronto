@@ -75,7 +75,7 @@ async function createPdfFixture({ pageCount = 1, unsignedSignatureName } = {}) {
 
 function createPdfSigningRunner({ onVerify } = {}) {
   return async script => {
-    if (script.includes("Get-ChildItem Cert:")) {
+    if (script.includes("X509Store")) {
       return JSON.stringify({
         subject: "CN=Test Signer",
         thumbprint: VALID_THUMBPRINT,
@@ -386,4 +386,16 @@ test("bounds_injected_PowerShell_operations_with_a_stable_timeout_code", async (
     }),
     hasCode("LOCAL_OPERATION_TIMEOUT"),
   );
+});
+
+test("enumerates_certificates_through_X509Store_without_the_optional_Cert_drive", async () => {
+  const certificates = await listWindowsCertificates({
+    runPowerShell: async script => {
+      assert.match(script, /X509Store/);
+      assert.match(script, /\.Close\(\)/);
+      assert.doesNotMatch(script, /Cert:\\/);
+      return "[]";
+    },
+  });
+  assert.deepEqual(certificates, []);
 });
