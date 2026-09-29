@@ -1,6 +1,8 @@
 {
   "name": "docpronto-online",
   "version": "0.1.0",
+  "description": "Ferramentas locais para converter, organizar e assinar documentos.",
+  "author": "DOCPronto",
   "private": true,
   "main": "desktop/main.mjs",
   "engines": {
@@ -15,20 +17,16 @@
     "validate:artifact": "bash scripts/validate-artifact.sh",
     "lint": "bash scripts/sites-env.sh -- eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "bash scripts/sites-env.sh -- drizzle-kit generate",
-    "desktop:lab": "electron . --channel=lab",
-    "desktop:stable": "electron . --channel=stable",
-    "desktop:dev": "electron . --channel=lab",
-    "desktop:test": "node --test tests/desktop/*.test.mjs"
+    "desktop:lab": "node scripts/desktop-command.mjs --channel lab",
+    "desktop:stable": "node scripts/desktop-command.mjs --channel stable",
+    "desktop:dev": "node scripts/desktop-command.mjs --channel lab",
+    "desktop:test": "node --test tests/desktop/*.test.mjs",
+    "desktop:package:lab": "node scripts/build-desktop.mjs --channel lab",
+    "desktop:package:stable": "node scripts/build-desktop.mjs --channel stable"
   },
   "dependencies": {
-    "docx-preview": "^0.3.6",
-    "drizzle-orm": "0.45.2",
     "electron-updater": "6.8.9",
-    "html2canvas": "^1.4.1",
-    "jszip": "3.10.1",
-    "next": "16.2.6",
-    "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "jszip": "3.10.1"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
@@ -38,12 +36,19 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
+    "docx-preview": "^0.3.6",
     "drizzle-kit": "0.31.10",
+    "drizzle-orm": "0.45.2",
     "electron": "44.4.5",
     "electron-builder": "26.15.3",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
+    "html2canvas": "^1.4.1",
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
     "react-server-dom-webpack": "19.2.6",
+    "sharp": "^0.34.5",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "vinext": "0.0.50",

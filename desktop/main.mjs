@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,8 +13,13 @@ import { startDocProntoService } from "./service/server.mjs";
 import { listWindowsCertificates } from "./service/windows-capabilities.mjs";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const packageMetadata = require("../package.json");
 const channelArgument = process.argv.find(argument => argument.startsWith("--channel="));
-const channel = channelArgument?.slice("--channel=".length) || process.env.DOCPRONTO_CHANNEL || "lab";
+const channel = channelArgument?.slice("--channel=".length)
+  || process.env.DOCPRONTO_CHANNEL
+  || packageMetadata.docprontoChannel
+  || "lab";
 const sessionToken = randomBytes(32).toString("hex");
 
 async function checkServiceHealth({ origin }) {
