@@ -231,3 +231,57 @@ test("workflow separa tags, canais e publica hashes e metadados", async () => {
   assert.match(workflow, /prerelease:/);
   assert.match(workflow, /GITHUB_TOKEN/);
 });
+
+function workflowJob(workflow, jobName) {
+  const startMatch = new RegExp(`^  ${jobName}:\\r?$`, "m").exec(workflow);
+  assert.ok(startMatch, `job ${jobName} ausente`);
+  const remainder = workflow.slice(startMatch.index + startMatch[0].length);
+  const nextJob = /^  [a-z][a-z0-9_-]*:\r?$/m.exec(remainder);
+  return workflow.slice(startMatch.index, nextJob ? startMatch.index + startMatch[0].length + nextJob.index : undefined);
+}
+
+test("build e testes de release nao recebem contents write", async () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const workflow = await readFile(join(root, ".github", "workflows", "desktop-release.yml"), "utf8");
+
+  assert.match(workflow, /^permissions:\r?\n  contents: read$/m);
+
+  for (const jobName of ["laboratory_build", "stable_build"]) {
+    const job = workflowJob(workflow, jobName);
+    assert.match(job, /permissions:\r?\n      contents: read/);
+    assert.doesNotMatch(job, /contents: write/);
+    assert.match(job, /npm (?:ci|test)|npm run desktop:test/);
+    assert.match(job, /actions\/checkout@[0-9a-f]{40}/);
+    assert.match(job, /persist-credentials: false/);
+    assert.match(job, /actions\/upload-artifact@[0-9a-f]{40}/);
+    assert.doesNotMatch(job, /action-gh-release/);
+  }
+});
+
+test("publicacao e isolada em jobs sem checkout build ou testes", async () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const workflow = await readFile(join(root, ".github", "workflows", "desktop-release.yml"), "utf8");
+
+  for (const [jobName, buildJob] of [
+    ["laboratory_publish", "laboratory_build"],
+    ["stable_publish", "stable_build"],
+  ]) {
+    const job = workflowJob(workflow, jobName);
+    assert.match(job, new RegExp(`needs: ${buildJob}`));
+    assert.match(job, /permissions:\r?\n      contents: write/);
+    assert.match(job, /actions\/download-artifact@[0-9a-f]{40}/);
+    assert.match(job, /softprops\/action-gh-release@[0-9a-f]{40}/);
+    assert.doesNotMatch(job, /actions\/checkout|actions\/setup-node|npm (?:ci|test)|desktop:package/);
+  }
+});
+
+test("actions do workflow de release usam somente SHAs imutaveis", async () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const workflow = await readFile(join(root, ".github", "workflows", "desktop-release.yml"), "utf8");
+  const references = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)/gm)].map(match => match[1]);
+
+  assert.ok(references.length >= 8);
+  for (const reference of references) {
+    assert.match(reference, /^[^@\s]+@[0-9a-f]{40}$/, reference);
+  }
+});
