@@ -15,6 +15,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
+    outputs:
+      manifest_sha256: ${{ steps.release_artifacts.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -39,6 +41,7 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
           DOCPRONTO_PUBLISHER_NAME: ${{ secrets.WINDOWS_PUBLISHER_NAME }}
       - name: Generate release metadata and SHA-256
+        id: release_artifacts
         shell: pwsh
         run: |
           [pscustomobject]@{
@@ -57,6 +60,8 @@ jobs:
             [pscustomobject]@{ file = $_.Name; sha256 = $hash.Hash.ToLowerInvariant() }
           }
           $hashes | ConvertTo-Json | Set-Content release/lab/sha256.json -Encoding utf8
+          $manifestHash = (Get-FileHash -LiteralPath release/lab/sha256.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          "manifest_sha256=$manifestHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Stage Laboratory release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -84,8 +89,13 @@ jobs:
           path: release/lab
       - name: Verify downloaded SHA-256 manifest
         shell: pwsh
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.laboratory_build.outputs.manifest_sha256 }}
         run: |
           $directory = 'release/lab'
+          if ($env:EXPECTED_MANIFEST_SHA256 -notmatch '^[0-9a-f]{64}$') { throw 'Build job did not provide a valid manifest anchor.' }
+          $downloadedManifestHash = (Get-FileHash -LiteralPath release/lab/sha256.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($downloadedManifestHash -ne $env:EXPECTED_MANIFEST_SHA256) { throw 'Downloaded manifest does not match the build job anchor.' }
           $manifest = @(Get-Content release/lab/sha256.json -Raw | ConvertFrom-Json)
           if ($manifest.Count -eq 0) { throw 'SHA-256 manifest is empty.' }
           $manifestNames = @{}
@@ -121,6 +131,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
+    outputs:
+      manifest_sha256: ${{ steps.release_artifacts.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -147,18 +159,33 @@ jobs:
           DOCPRONTO_REQUIRE_SIGNED: "true"
       - name: Verify stable Authenticode signatures
         shell: pwsh
+        env:
+          EXPECTED_PUBLISHERS: ${{ secrets.WINDOWS_PUBLISHER_NAME }}
+          AUTHORIZED_THUMBPRINTS: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINTS }}
         run: |
           $executables = @(Get-ChildItem release/stable -File -Filter *.exe)
           if ($executables.Count -eq 0) {
             throw 'Stable release produced no executable to verify.'
           }
+          $expectedPublishers = @($env:EXPECTED_PUBLISHERS -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          if ($expectedPublishers.Count -eq 0) { throw 'Stable release has no authorized publisher.' }
+          $authorizedThumbprints = @($env:AUTHORIZED_THUMBPRINTS -split '[,;]' | ForEach-Object { ($_ -replace '\s', '').ToUpperInvariant() } | Where-Object { $_ })
           foreach ($executable in $executables) {
             $signature = Get-AuthenticodeSignature -LiteralPath $executable.FullName
             if ($signature.Status -ne 'Valid') {
               throw "Invalid Authenticode signature for $($executable.Name): $($signature.Status)."
             }
+            $actualPublisher = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+            if ($expectedPublishers -notcontains $actualPublisher) {
+              throw "Unauthorized Authenticode publisher for $($executable.Name)."
+            }
+            $actualThumbprint = (($signature.SignerCertificate.Thumbprint -replace '\s', '').ToUpperInvariant())
+            if ($authorizedThumbprints.Count -gt 0 -and $authorizedThumbprints -notcontains $actualThumbprint) {
+              throw "Unauthorized Authenticode thumbprint for $($executable.Name)."
+            }
           }
       - name: Generate release metadata and SHA-256
+        id: release_artifacts
         shell: pwsh
         run: |
           [pscustomobject]@{
@@ -177,6 +204,8 @@ jobs:
             [pscustomobject]@{ file = $_.Name; sha256 = $hash.Hash.ToLowerInvariant() }
           }
           $hashes | ConvertTo-Json | Set-Content release/stable/sha256.json -Encoding utf8
+          $manifestHash = (Get-FileHash -LiteralPath release/stable/sha256.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          "manifest_sha256=$manifestHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Stage stable release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -204,8 +233,13 @@ jobs:
           path: release/stable
       - name: Verify downloaded SHA-256 manifest
         shell: pwsh
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.stable_build.outputs.manifest_sha256 }}
         run: |
           $directory = 'release/stable'
+          if ($env:EXPECTED_MANIFEST_SHA256 -notmatch '^[0-9a-f]{64}$') { throw 'Build job did not provide a valid manifest anchor.' }
+          $downloadedManifestHash = (Get-FileHash -LiteralPath release/stable/sha256.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($downloadedManifestHash -ne $env:EXPECTED_MANIFEST_SHA256) { throw 'Downloaded manifest does not match the build job anchor.' }
           $manifest = @(Get-Content release/stable/sha256.json -Raw | ConvertFrom-Json)
           if ($manifest.Count -eq 0) { throw 'SHA-256 manifest is empty.' }
           $manifestNames = @{}

@@ -336,3 +336,42 @@ test("manifesto cobre metadados de release alem dos binarios e feeds", async () 
     assert.match(publish, /\$_.Name -ne 'sha256\.json'/);
   }
 });
+
+test("Authenticode estavel rejeita publisher ou thumbprint fora da allowlist", async () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const workflow = await readFile(join(root, ".github", "workflows", "desktop-release.yml"), "utf8");
+  const build = workflowJob(workflow, "stable_build");
+
+  assert.match(build, /EXPECTED_PUBLISHERS:\s*\$\{\{ secrets\.WINDOWS_PUBLISHER_NAME \}\}/);
+  assert.match(build, /AUTHORIZED_THUMBPRINTS:\s*\$\{\{ secrets\.WINDOWS_CERTIFICATE_THUMBPRINTS \}\}/);
+  assert.match(build, /\$env:EXPECTED_PUBLISHERS -split '\[,;\]'/);
+  assert.match(build, /X509NameType\]::SimpleName/);
+  assert.match(build, /\$expectedPublishers -notcontains \$actualPublisher/);
+  assert.match(build, /\$authorizedThumbprints\.Count -gt 0/);
+  assert.match(build, /\$authorizedThumbprints -notcontains \$actualThumbprint/);
+  assert.ok(build.indexOf("actualPublisher") < build.indexOf("Generate release metadata"));
+});
+
+test("publicacao compara manifesto com ancora independente do job de build", async () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const workflow = await readFile(join(root, ".github", "workflows", "desktop-release.yml"), "utf8");
+
+  for (const [buildName, publishName, directory] of [
+    ["laboratory_build", "laboratory_publish", "lab"],
+    ["stable_build", "stable_publish", "stable"],
+  ]) {
+    const build = workflowJob(workflow, buildName);
+    const publish = workflowJob(workflow, publishName);
+    assert.match(build, /outputs:\r?\n\s+manifest_sha256: \$\{\{ steps\.release_artifacts\.outputs\.manifest_sha256 \}\}/);
+    assert.match(build, /id: release_artifacts/);
+    assert.match(build, new RegExp(`Get-FileHash -LiteralPath release/${directory}/sha256\\.json -Algorithm SHA256`));
+    assert.match(build, /manifest_sha256=\$manifestHash/);
+    assert.match(build, /GITHUB_OUTPUT/);
+
+    assert.match(publish, new RegExp(`EXPECTED_MANIFEST_SHA256: \\$\\{\\{ needs\\.${buildName}\\.outputs\\.manifest_sha256 \\}\\}`));
+    assert.match(publish, new RegExp(`Get-FileHash -LiteralPath release/${directory}/sha256\\.json -Algorithm SHA256`));
+    assert.match(publish, /\$downloadedManifestHash -ne \$env:EXPECTED_MANIFEST_SHA256/);
+    assert.ok(publish.indexOf("downloadedManifestHash") < publish.indexOf("ConvertFrom-Json"));
+    assert.ok(publish.indexOf("downloadedManifestHash") < publish.indexOf("action-gh-release"));
+  }
+});
