@@ -4,7 +4,16 @@ import test from "node:test";
 
 import { createDesktopRuntime } from "../../desktop/runtime.mjs";
 
-function createHarness({ lock = true, serviceError, optionalError } = {}) {
+function createHarness({
+  lock = true,
+  serviceError,
+  optionalError,
+  storeError,
+  windowError,
+  loadError,
+  ipcError,
+  destroyError,
+} = {}) {
   const app = new EventEmitter();
   const paths = new Map([["appData", "C:\\Users\\Test\\AppData\\Roaming"]]);
   app.getPath = name => paths.get(name);
@@ -39,12 +48,29 @@ function createHarness({ lock = true, serviceError, optionalError } = {}) {
   window.restore = () => { window.restoreCalls += 1; };
   window.focus = () => { window.focusCalls += 1; };
   window.show = () => { window.showCalls += 1; };
+  window.destroyCalls = 0;
+  window.destroy = () => {
+    window.destroyCalls += 1;
+    if (destroyError) throw destroyError;
+  };
+  window.docprontoLoadPromise = loadError ? Promise.reject(loadError) : Promise.resolve();
 
   const ipcHandlers = new Map();
-  const ipcMain = { handle: (name, handler) => ipcHandlers.set(name, handler), removeHandler: name => ipcHandlers.delete(name) };
-  const calls = { service: 0, store: 0, window: 0, updater: 0, optional: 0 };
+  const ipcMain = {
+    handle(name, handler) {
+      if (ipcError) throw ipcError;
+      ipcHandlers.set(name, handler);
+    },
+    removeHandler: name => ipcHandlers.delete(name),
+  };
+  const calls = { service: 0, store: 0, window: 0, updater: 0, optional: 0, export: 0 };
+  const fatalErrors = [];
   return {
-    app, store, service, window, diagnostics, ipcHandlers, calls,
+    app, store, service, window, diagnostics, ipcHandlers, calls, fatalErrors,
+    trustedEvent() {
+      const senderFrame = { url: `${service.origin}/` };
+      return { senderFrame, sender: { mainFrame: senderFrame } };
+    },
     dependencies: {
       app,
       BrowserWindow: class {},
@@ -54,17 +80,19 @@ function createHarness({ lock = true, serviceError, optionalError } = {}) {
       createStore: ({ userData }) => {
         calls.store += 1;
         assert.equal(userData, "C:\\Users\\Test\\AppData\\Roaming\\DOCPronto-Laboratorio");
+        if (storeError) throw storeError;
         return store;
       },
       startService: async ({ onDiagnostic }) => {
         calls.service += 1;
         if (serviceError) throw serviceError;
-        await onDiagnostic({ code: "LOCAL_SERVICE_STARTED" });
+        onDiagnostic({ code: "LOCAL_SERVICE_STARTED" });
         return service;
       },
       createWindow: options => {
         calls.window += 1;
         assert.equal(options.origin, service.origin);
+        if (windowError) throw windowError;
         return window;
       },
       updateManager: { async initialize() { calls.updater += 1; } },
@@ -72,8 +100,13 @@ function createHarness({ lock = true, serviceError, optionalError } = {}) {
         calls.optional += 1;
         if (optionalError) throw optionalError;
       },
-      exportDiagnostics: async options => ({ options }),
-      preloadPath: "C:\\app\\desktop\\preload.mjs",
+      exportDiagnostics: async options => {
+        calls.export += 1;
+        return options.destination;
+      },
+      chooseDiagnosticDestination: async () => "C:\\Users\\Test\\Desktop\\docpronto-diagnostico.zip",
+      reportFatalError: error => { fatalErrors.push(error); },
+      preloadPath: "C:\\app\\desktop\\preload.cjs",
     },
   };
 }
@@ -83,7 +116,7 @@ test("lock negado encerra sem criar servico, store ou janela", async () => {
   const runtime = createDesktopRuntime(harness.dependencies);
   await runtime.start();
   assert.equal(harness.app.quitCalls, 1);
-  assert.deepEqual(harness.calls, { service: 0, store: 0, window: 0, updater: 0, optional: 0 });
+  assert.deepEqual(harness.calls, { service: 0, store: 0, window: 0, updater: 0, optional: 0, export: 0 });
 });
 
 test("lock aceito configura userData e inicia exatamente um servico", async () => {
@@ -117,6 +150,16 @@ test("before-quit fecha store e servico exatamente uma vez", async () => {
   assert.equal(harness.service.closeCalls, 1);
 });
 
+test("cleanup continua fechando store e servico se destruir janela falhar", async () => {
+  const harness = createHarness({ destroyError: new Error("destroy falhou") });
+  const runtime = createDesktopRuntime(harness.dependencies);
+  await runtime.start();
+  await runtime.stop();
+  assert.equal(harness.window.destroyCalls, 1);
+  assert.equal(harness.store.closeCalls, 1);
+  assert.equal(harness.service.closeCalls, 1);
+});
+
 test("before-quit segura a saida ate concluir o encerramento", async () => {
   const harness = createHarness();
   const runtime = createDesktopRuntime(harness.dependencies);
@@ -144,8 +187,86 @@ test("falha ao iniciar servico registra codigo estavel e encerra", async () => {
   const runtime = createDesktopRuntime(harness.dependencies);
   await assert.rejects(runtime.start(), /EADDRINUSE/);
   assert.ok(harness.diagnostics.some(event => event.code === "DESKTOP_SERVICE_START_FAILED"));
+  assert.equal(harness.store.closeCalls, 1);
   assert.equal(harness.app.quitCalls, 1);
-  assert.equal(harness.calls.window, 0);
+  assert.equal(harness.fatalErrors.length, 1);
+});
+
+test("falha ao criar store encerra e reporta sem iniciar servico", async () => {
+  const harness = createHarness({ storeError: new Error("store indisponivel") });
+  const runtime = createDesktopRuntime(harness.dependencies);
+  await assert.rejects(runtime.start(), /store indisponivel/);
+  assert.equal(harness.calls.service, 0);
+  assert.equal(harness.app.quitCalls, 1);
+  assert.equal(harness.fatalErrors[0].code, "DESKTOP_STORE_START_FAILED");
+});
+
+test("falha ao registrar IPC fecha store e servico e encerra", async () => {
+  const harness = createHarness({ ipcError: new Error("IPC duplicado") });
+  const runtime = createDesktopRuntime(harness.dependencies);
+  await assert.rejects(runtime.start(), /IPC duplicado/);
+  assert.equal(harness.store.closeCalls, 1);
+  assert.equal(harness.service.closeCalls, 1);
+  assert.ok(harness.diagnostics.some(event => event.code === "DESKTOP_IPC_START_FAILED"));
+  assert.equal(harness.app.quitCalls, 1);
+});
+
+test("falha ao criar janela fecha store e servico e encerra", async () => {
+  const harness = createHarness({ windowError: new Error("janela indisponivel") });
+  const runtime = createDesktopRuntime(harness.dependencies);
+  await assert.rejects(runtime.start(), /janela indisponivel/);
+  assert.equal(harness.store.closeCalls, 1);
+  assert.equal(harness.service.closeCalls, 1);
+  assert.ok(harness.diagnostics.some(event => event.code === "DESKTOP_WINDOW_START_FAILED"));
+  assert.equal(harness.app.quitCalls, 1);
+});
+
+test("loadURL rejeitado registra falha, limpa recursos e encerra", async () => {
+  const error = Object.assign(new Error("net::ERR_CONNECTION_REFUSED"), { code: "DESKTOP_WINDOW_LOAD_FAILED" });
+  const harness = createHarness({ loadError: error });
+  const runtime = createDesktopRuntime(harness.dependencies);
+  await assert.rejects(runtime.start(), /ERR_CONNECTION_REFUSED/);
+  assert.equal(harness.store.closeCalls, 1);
+  assert.equal(harness.service.closeCalls, 1);
+  assert.ok(harness.diagnostics.some(event => event.code === "DESKTOP_WINDOW_LOAD_FAILED"));
+  assert.equal(harness.app.quitCalls, 1);
+});
+
+test("IPC aceita somente o frame principal da origem confiavel", async () => {
+  const harness = createHarness();
+  const runtime = createDesktopRuntime(harness.dependencies);
+  await runtime.start();
+  const handler = harness.ipcHandlers.get("docpronto:get-app-info");
+  await assert.rejects(
+    handler({ senderFrame: { url: "https://evil.example/" }, sender: { mainFrame: {} } }),
+    error => error.code === "UNTRUSTED_IPC_SENDER",
+  );
+  const subframe = { url: `${harness.service.origin}/frame` };
+  await assert.rejects(
+    handler({ senderFrame: subframe, sender: { mainFrame: { url: `${harness.service.origin}/` } } }),
+    error => error.code === "UNTRUSTED_IPC_SENDER",
+  );
+  const info = await handler(harness.trustedEvent());
+  assert.equal(info.channel, "lab");
+});
+
+test("IPC valida argumentos e exportacao nunca aceita destino do renderer", async () => {
+  const harness = createHarness();
+  const runtime = createDesktopRuntime(harness.dependencies);
+  await runtime.start();
+  const event = harness.trustedEvent();
+  await assert.rejects(
+    harness.ipcHandlers.get("docpronto:diagnostics:list")(event, { unknown: true }),
+    error => error.code === "INVALID_IPC_ARGUMENTS",
+  );
+  await assert.rejects(
+    harness.ipcHandlers.get("docpronto:diagnostics:export")(event, { destination: "C:\\Windows\\win.ini" }),
+    error => error.code === "INVALID_IPC_ARGUMENTS",
+  );
+  assert.equal(harness.calls.export, 0);
+  const destination = await harness.ipcHandlers.get("docpronto:diagnostics:export")(event);
+  assert.equal(destination, "C:\\Users\\Test\\Desktop\\docpronto-diagnostico.zip");
+  assert.equal(harness.calls.export, 1);
 });
 
 test("IPC expoe somente contratos enumerados e usa o store", async () => {
@@ -159,9 +280,6 @@ test("IPC expoe somente contratos enumerados e usa o store", async () => {
     "docpronto:diagnostics:record",
     "docpronto:get-app-info",
   ]);
-  const info = await harness.ipcHandlers.get("docpronto:get-app-info")();
-  assert.equal(info.channel, "lab");
-  assert.equal(info.isLab, true);
-  await harness.ipcHandlers.get("docpronto:diagnostics:record")(null, { code: "TEST_EVENT" });
+  await harness.ipcHandlers.get("docpronto:diagnostics:record")(harness.trustedEvent(), { code: "TEST_EVENT" });
   assert.ok(harness.diagnostics.some(event => event.code === "TEST_EVENT"));
 });

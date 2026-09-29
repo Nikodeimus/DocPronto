@@ -14,6 +14,14 @@ function isSafeExternalUrl(target) {
   }
 }
 
+function openExternal(shell, target) {
+  try {
+    void Promise.resolve(shell.openExternal(target)).catch(() => {});
+  } catch {
+    // External navigation remains blocked even when the system shell fails.
+  }
+}
+
 export function createMainWindow({ BrowserWindow, origin, preloadPath, channelConfig, shell }) {
   if (typeof origin !== "string" || !origin) throw new TypeError("origin is required.");
   if (typeof preloadPath !== "string" || !preloadPath) throw new TypeError("preloadPath is required.");
@@ -41,13 +49,31 @@ export function createMainWindow({ BrowserWindow, origin, preloadPath, channelCo
   window.removeMenu?.();
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (isSafeExternalUrl(url)) void Promise.resolve(shell.openExternal(url)).catch(() => {});
+    if (isSafeExternalUrl(url)) openExternal(shell, url);
     return { action: "deny" };
   });
-  window.webContents.on("will-navigate", (event, url) => {
-    if (!sameOrigin(url, origin)) event.preventDefault();
-  });
+  const guardNavigation = (event, url) => {
+    if (sameOrigin(url, origin)) return;
+    event.preventDefault();
+    if (isSafeExternalUrl(url)) openExternal(shell, url);
+  };
+  window.webContents.on("will-navigate", guardNavigation);
+  window.webContents.on("will-redirect", guardNavigation);
 
-  void window.loadURL(`${origin}/`);
+  const loadPromise = Promise.resolve()
+    .then(() => window.loadURL(`${origin}/`))
+    .catch(cause => {
+      window.destroy?.();
+      throw Object.assign(new Error("Nao foi possivel carregar a interface local do DOCPronto."), {
+        code: "DESKTOP_WINDOW_LOAD_FAILED",
+        cause,
+      });
+    });
+  Object.defineProperty(window, "docprontoLoadPromise", {
+    configurable: false,
+    enumerable: false,
+    value: loadPromise,
+    writable: false,
+  });
   return window;
 }

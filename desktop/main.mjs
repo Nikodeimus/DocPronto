@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import electronUpdater from "electron-updater";
 
 import { DiagnosticStore } from "./diagnostics/store.mjs";
@@ -48,15 +48,31 @@ const runtime = createDesktopRuntime({
   createStore: options => new DiagnosticStore(options),
   updateManager,
   exportDiagnostics: exportDiagnosticBundle,
+  chooseDiagnosticDestination: async ({ window }) => {
+    const date = new Date().toISOString().slice(0, 10);
+    const result = await dialog.showSaveDialog(window, {
+      title: "Exportar diagnostico do DOCPronto",
+      defaultPath: `docpronto-diagnostico-${date}.zip`,
+      filters: [{ name: "Arquivo ZIP", extensions: ["zip"] }],
+      properties: ["createDirectory", "showOverwriteConfirmation"],
+    });
+    return result.canceled ? null : result.filePath;
+  },
+  reportFatalError: error => {
+    dialog.showErrorBox(
+      "DOCPronto nao iniciou",
+      `Nao foi possivel abrir o DOCPronto.\n\nCodigo: ${error.code}`,
+    );
+  },
   initializeOptionalCapabilities: async () => {
     if (process.platform === "win32") await listWindowsCertificates();
   },
   healthCheck: checkServiceHealth,
   assetsRoot: join(currentDirectory, "..", "public", "docpronto"),
-  preloadPath: join(currentDirectory, "preload.mjs"),
+  preloadPath: join(currentDirectory, "preload.cjs"),
   sessionToken,
 });
 
-void runtime.start().catch(() => {
-  // Startup diagnostics are persisted by the runtime before Electron exits.
+void runtime.start().catch(error => {
+  console.error(`[DOCPronto] startup failed (${error.code ?? "DESKTOP_START_FAILED"}):`, error);
 });

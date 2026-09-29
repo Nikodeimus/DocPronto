@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Prebuilt third-party browser libraries are verified by their own upstream builds.
+    "public/docpronto/vendor/**",
   ]),
 ]);
 

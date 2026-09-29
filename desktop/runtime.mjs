@@ -10,6 +10,59 @@ const IPC_CHANNELS = Object.freeze([
   "docpronto:diagnostics:export",
   "docpronto:diagnostics:record",
 ]);
+const FILTER_KEYS = new Set(["level", "tool", "stage", "code", "executionId", "since", "until", "limit"]);
+const EVENT_KEYS = new Set(["level", "tool", "stage", "code", "message", "technical", "durationMs", "metadata"]);
+const STARTUP_CODES = Object.freeze({
+  configuration: "DESKTOP_CONFIGURATION_FAILED",
+  store: "DESKTOP_STORE_START_FAILED",
+  service: "DESKTOP_SERVICE_START_FAILED",
+  ipc: "DESKTOP_IPC_START_FAILED",
+  window: "DESKTOP_WINDOW_START_FAILED",
+  "window-load": "DESKTOP_WINDOW_LOAD_FAILED",
+});
+
+function ipcArgumentError(message) {
+  return Object.assign(new TypeError(message), { code: "INVALID_IPC_ARGUMENTS" });
+}
+
+function isPlainObject(value) {
+  if (!value || Object.prototype.toString.call(value) !== "[object Object]") return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function validateFilters(filters) {
+  if (filters === undefined) return {};
+  if (!isPlainObject(filters)) throw ipcArgumentError("Diagnostic filters must be an object.");
+  for (const [key, value] of Object.entries(filters)) {
+    if (!FILTER_KEYS.has(key)) throw ipcArgumentError(`Unsupported diagnostic filter: ${key}`);
+    if (key === "limit") {
+      if (!Number.isInteger(value) || value < 0 || value > 2_000) {
+        throw ipcArgumentError("Diagnostic limit must be an integer between 0 and 2000.");
+      }
+    } else if (typeof value !== "string" || value.length > 256) {
+      throw ipcArgumentError(`Diagnostic filter ${key} must be a short string.`);
+    }
+  }
+  return filters;
+}
+
+function validateDiagnosticEvent(event) {
+  if (!isPlainObject(event)) throw ipcArgumentError("Diagnostic event must be an object.");
+  for (const key of Object.keys(event)) {
+    if (!EVENT_KEYS.has(key)) throw ipcArgumentError(`Unsupported diagnostic event field: ${key}`);
+  }
+  let serialized;
+  try {
+    serialized = JSON.stringify(event);
+  } catch {
+    throw ipcArgumentError("Diagnostic event must be serializable.");
+  }
+  if (!serialized || Buffer.byteLength(serialized) > 64 * 1024) {
+    throw ipcArgumentError("Diagnostic event exceeds the IPC limit.");
+  }
+  return event;
+}
 
 function technicalDetails(error) {
   return {
@@ -35,6 +88,8 @@ export function createDesktopRuntime({
   channel,
   createWindow = createMainWindow,
   exportDiagnostics,
+  chooseDiagnosticDestination,
+  reportFatalError = () => {},
   initializeOptionalCapabilities = async () => {},
   healthCheck = defaultHealthCheck,
   assetsRoot,
@@ -76,24 +131,72 @@ export function createDesktopRuntime({
   function registerIpc() {
     if (ipcRegistered) return;
     ipcRegistered = true;
-    ipcMain.handle("docpronto:get-app-info", async () => ({
+
+    function assertTrustedSender(event) {
+      const frame = event?.senderFrame;
+      const mainFrame = event?.sender?.mainFrame;
+      let trustedOrigin = false;
+      try {
+        trustedOrigin = new URL(frame?.url).origin === service.origin;
+      } catch {
+        trustedOrigin = false;
+      }
+      if (!frame || !mainFrame || frame !== mainFrame || !trustedOrigin) {
+        throw Object.assign(new Error("IPC sender is not trusted."), {
+          code: "UNTRUSTED_IPC_SENDER",
+        });
+      }
+    }
+
+    function handle(name, validateArguments, operation) {
+      ipcMain.handle(name, async (event, ...args) => {
+        assertTrustedSender(event);
+        const validated = validateArguments(args);
+        return operation(...validated);
+      });
+    }
+
+    const noArguments = args => {
+      if (args.length !== 0) throw ipcArgumentError("This IPC operation does not accept arguments.");
+      return [];
+    };
+
+    handle("docpronto:get-app-info", noArguments, async () => ({
       ...environment(),
       productName: channelConfig.productName,
       isLab: channelConfig.isLab,
     }));
-    ipcMain.handle("docpronto:diagnostics:list", (_event, filters = {}) => store.list(filters));
-    ipcMain.handle("docpronto:diagnostics:clear", () => store.clear());
-    ipcMain.handle("docpronto:diagnostics:record", (_event, diagnosticEvent) => store.append(diagnosticEvent));
-    ipcMain.handle("docpronto:diagnostics:export", async (_event, options = {}) => {
+    handle("docpronto:diagnostics:list", args => {
+      if (args.length > 1) throw ipcArgumentError("Diagnostic list accepts at most one argument.");
+      return [validateFilters(args[0])];
+    }, filters => store.list(filters));
+    handle("docpronto:diagnostics:clear", noArguments, () => store.clear());
+    handle("docpronto:diagnostics:record", args => {
+      if (args.length !== 1) throw ipcArgumentError("Diagnostic record requires one event.");
+      return [validateDiagnosticEvent(args[0])];
+    }, diagnosticEvent => store.append(diagnosticEvent));
+    handle("docpronto:diagnostics:export", noArguments, async () => {
       if (typeof exportDiagnostics !== "function") {
         throw Object.assign(new Error("Diagnostic export is unavailable."), {
           code: "DIAGNOSTIC_EXPORT_UNAVAILABLE",
         });
       }
+      if (typeof chooseDiagnosticDestination !== "function") {
+        throw Object.assign(new Error("Diagnostic destination selection is unavailable."), {
+          code: "DIAGNOSTIC_DESTINATION_UNAVAILABLE",
+        });
+      }
+      const destination = await chooseDiagnosticDestination({ window: mainWindow, channelConfig });
+      if (destination === null || destination === undefined) return null;
+      if (typeof destination !== "string" || !destination) {
+        throw Object.assign(new Error("Diagnostic destination selection returned an invalid path."), {
+          code: "INVALID_DIAGNOSTIC_DESTINATION",
+        });
+      }
       return exportDiagnostics({
         events: await store.list({ limit: 2_000 }),
         environment: environment(),
-        destination: options.destination,
+        destination,
       });
     });
   }
@@ -135,12 +238,18 @@ export function createDesktopRuntime({
       }
       const currentService = service;
       const currentStore = store;
+      const currentWindow = mainWindow;
       service = undefined;
       store = undefined;
-      await Promise.allSettled([
-        currentService?.close?.(),
-        currentStore?.close?.(),
-      ]);
+      mainWindow = undefined;
+      const cleanupOperations = [
+        () => {
+          if (currentWindow && !currentWindow.isDestroyed?.()) currentWindow.destroy?.();
+        },
+        () => currentService?.close?.(),
+        () => currentStore?.close?.(),
+      ];
+      await Promise.allSettled(cleanupOperations.map(operation => Promise.resolve().then(operation)));
     })();
     return stopPromise;
   }
@@ -168,49 +277,69 @@ export function createDesktopRuntime({
       app.quit();
       return false;
     }
-    registerLifecycle();
-
-    const userData = join(app.getPath("appData"), channelConfig.userDataName);
-    app.setName?.(channelConfig.productName);
-    app.setPath("userData", userData);
-    await app.whenReady();
-    store = createStore({ userData, channelConfig });
-    registerIpc();
-
+    let startupStage = "configuration";
     try {
+      registerLifecycle();
+      const userData = join(app.getPath("appData"), channelConfig.userDataName);
+      app.setName?.(channelConfig.productName);
+      app.setPath("userData", userData);
+      await app.whenReady();
+
+      startupStage = "store";
+      store = createStore({ userData, channelConfig });
+
+      startupStage = "service";
       service = await startService({
         assetsRoot,
         sessionToken,
         onDiagnostic: event => { void recordDiagnostic(event); },
       });
       await healthCheck({ origin: service.origin, sessionToken });
-    } catch (error) {
+
+      startupStage = "ipc";
+      registerIpc();
+
+      startupStage = "window";
+      mainWindow = createWindow({
+        BrowserWindow,
+        origin: service.origin,
+        preloadPath,
+        channelConfig,
+        shell,
+      });
+      mainWindow.once?.("closed", () => { mainWindow = undefined; });
+      mainWindow.once?.("ready-to-show", () => {
+        mainWindow?.show?.();
+        optionalReady = initializeDeferredFeatures();
+      });
+
+      startupStage = "window-load";
+      await (mainWindow.docprontoLoadPromise ?? Promise.resolve());
+      return true;
+    } catch (cause) {
+      const code = cause?.code === "DESKTOP_WINDOW_LOAD_FAILED"
+        ? cause.code
+        : STARTUP_CODES[startupStage] ?? "DESKTOP_START_FAILED";
+      const error = Object.assign(new Error(cause?.message || "DOCPronto desktop startup failed.", { cause }), {
+        code,
+      });
       await recordDiagnostic({
         level: "error",
-        tool: "desktop-service",
+        tool: "desktop",
         stage: "startup",
-        code: "DESKTOP_SERVICE_START_FAILED",
-        message: "Nao foi possivel iniciar o servico local do DOCPronto.",
-        technical: technicalDetails(error),
+        code,
+        message: "Nao foi possivel iniciar o DOCPronto.",
+        technical: technicalDetails(cause),
       });
       await stop();
+      try {
+        reportFatalError(error);
+      } catch {
+        // The fatal reporting surface cannot prevent process cleanup.
+      }
       app.quit();
       throw error;
     }
-
-    mainWindow = createWindow({
-      BrowserWindow,
-      origin: service.origin,
-      preloadPath,
-      channelConfig,
-      shell,
-    });
-    mainWindow.once?.("closed", () => { mainWindow = undefined; });
-    mainWindow.once?.("ready-to-show", () => {
-      mainWindow?.show?.();
-      optionalReady = initializeDeferredFeatures();
-    });
-    return true;
   }
 
   return {
