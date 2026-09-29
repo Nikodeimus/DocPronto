@@ -296,11 +296,13 @@ export async function runPackagedSmoke({
     const painted = await waitForEvent(reportPath, event => event.type === "window-painted", HEALTH_TIMEOUT_MS, "SMOKE_UI_TIMEOUT");
     const launchElapsedMs = Date.parse(painted.timestamp) - startedAt;
 
-    const certificate = await waitForEvent(reportPath, event => event.type === "certificate-capability", OPTIONAL_CAPABILITY_TIMEOUT_MS, "SMOKE_CERTIFICATE_RESULT_MISSING");
+    const [certificate, word] = await Promise.all([
+      waitForEvent(reportPath, event => event.type === "certificate-capability", OPTIONAL_CAPABILITY_TIMEOUT_MS, "SMOKE_CERTIFICATE_RESULT_MISSING"),
+      waitForEvent(reportPath, event => event.type === "word-capability", OPTIONAL_CAPABILITY_TIMEOUT_MS, "SMOKE_WORD_RESULT_MISSING"),
+    ]);
     if (first.exitCode !== null || !acceptsCertificateCapability(certificate)) {
       throw smokeError("SMOKE_OPTIONAL_CAPABILITY_CRASH", "The real certificate provider affected the main window.");
     }
-    const word = await waitForEvent(reportPath, event => event.type === "word-capability", OPTIONAL_CAPABILITY_TIMEOUT_MS, "SMOKE_WORD_RESULT_MISSING");
     if (first.exitCode !== null || !acceptsWordCapability(word)) {
       throw smokeError("SMOKE_OPTIONAL_CAPABILITY_CRASH", "The real Word capability returned an unexpected result.");
     }
