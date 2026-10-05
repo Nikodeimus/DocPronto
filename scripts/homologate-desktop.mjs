@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = resolve(dirname(SCRIPT_PATH), "..");
-const SUPPORTED_TOOLS = new Set(["pdf-word", "visual-sign", "pdf-ofx"]);
+const SUPPORTED_TOOLS = new Set(["pdf-word", "visual-sign", "pdf-ofx", "pdf-xml-abrasf"]);
 const WORD_MODES = new Set(["editable-layout", "fast", "visual"]);
 const DEFAULT_TIMEOUT_MS = 180_000;
 
@@ -54,7 +54,7 @@ export function parseHarnessArguments(arguments_, { cwd = process.cwd() } = {}) 
     else throw new HarnessError("UNKNOWN_ARGUMENT", `Argumento desconhecido: ${option}`);
   }
   if (!SUPPORTED_TOOLS.has(parsed.tool)) {
-    throw new HarnessError("INVALID_TOOL", "Use --tool pdf-word, visual-sign ou pdf-ofx.");
+    throw new HarnessError("INVALID_TOOL", "Use --tool pdf-word, visual-sign, pdf-ofx ou pdf-xml-abrasf.");
   }
   if (!parsed.inputs.length) throw new HarnessError("INPUT_REQUIRED", "Informe ao menos um --input.");
   if (!parsed.outputDirectory) throw new HarnessError("OUTPUT_REQUIRED", "Informe --output.");
@@ -139,6 +139,13 @@ export async function validateOutput(path, tool) {
     const validZip = extension === ".zip" && bytes[0] === 0x50 && bytes[1] === 0x4b;
     if (!validOfx && !validZip) throw new HarnessError("INVALID_OFX_OUTPUT", `Saída OFX/ZIP inválida: ${basename(path)}`);
     return { path, kind: validZip ? "zip" : "ofx", size: bytes.length };
+  }
+  if (tool === "pdf-xml-abrasf") {
+    const text = bytes.toString("utf8");
+    if (extname(path).toLowerCase() !== ".xml" || !/<CompNfse\b[^>]*xmlns="http:\/\/www\.abrasf\.org\.br\/nfse\.xsd"/i.test(text) || !/<Nfse\b[^>]*versao="2\.04"/i.test(text)) {
+      throw new HarnessError("INVALID_ABRASF_OUTPUT", `Saída XML ABRASF inválida: ${basename(path)}`);
+    }
+    return { path, kind: "xml", size: bytes.length };
   }
   throw new HarnessError("INVALID_TOOL", `Ferramenta sem validador: ${tool}`);
 }

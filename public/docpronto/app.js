@@ -2268,7 +2268,12 @@ async function extractTextFromPdf(file, reportProgress = false) {
 async function pdfToAbrasfXml([file]) {
   showStatus("Lendo e classificando a NFS-e...");
   const pages = await extractTextFromPdf(file, true);
-  const rawLines = pages.flat();
+  let rawLines = pages.flat();
+  if (!rawLines.some(line => stripLayoutMarkers(line).trim())) {
+    showStatus("NFS-e digitalizada detectada. Executando OCR local...");
+    const ocrText = await extractEditableTextWithOcr(file);
+    rawLines = ocrText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  }
   const lines = rawLines.map(line => stripLayoutMarkers(line).replace(/\s+/g, " ").trim()).filter(Boolean);
   const text = lines.join("\n");
   const cancellation = detectNfseCancellation(text);
@@ -2357,16 +2362,17 @@ function parseNationalNfse(lines, text) {
   const municipality = isCriciuma ? { code: "4204608", uf: "SC", name: "Criciúma" } : { code: "4313409", uf: "RS", name: "Novo Hamburgo" };
   const providerSection = fiscalSection(text, /EMITENTE DA NFS-e/i, /TOMADOR DO SERVI[CÇ]O/i);
   const customerSection = fiscalSection(text, /TOMADOR DO SERVI[CÇ]O/i, /(?:INTERMEDI[AÁ]RIO|SERVI[CÇ]O PRESTADO)/i);
-  const serviceSection = fiscalSection(text, /SERVI[CÇ]O PRESTADO/i, /(?:TRIBUTA[CÇ][AÃ]O MUNICIPAL|VALOR TOTAL DA NFS-e)/i);
+  const serviceSection = fiscalSection(text, /SERVI[CÇ]O PRESTADO/i, /(?:^|\n)TRIBUTA[CÇ][AÃ]O MUNICIPAL(?:\n|$)|(?:^|\n)VALOR TOTAL DA NFS-e(?:\n|$)/im);
   const provider = parseNationalParty(providerSection);
   const customer = parseNationalParty(customerSection);
-  const number = findValueAfterLabel(lines, /N[uú]mero da (?:NFS-e|Nota Fiscal)/i, /^\d{1,15}$/);
-  const auth = (text.match(/\bNFS\d{35,60}\b/) || [])[0] || findValueAfterLabel(lines, /C[oó]digo de Autenticidade/i, /^\d{20,70}$/);
-  const issueRaw = findValueAfterLabel(lines, /Data e Hora da emiss[aã]o da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || findValueAfterLabel(lines, /Data e Hora da emiss[aã]o do DPS/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/);
-  const competenceRaw = findValueAfterLabel(lines, /Compet[eê]ncia da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}$/);
-  const municipalGrid = isCriciuma ? parseCriciumaMunicipalGrid(lines) : null;
+  const ocr = lines.some(line => /\uE000\d+\uE001/.test(line)) ? null : parseNationalOcrFields(text);
+  const number = findValueAfterLabel(lines, /N[uú]mero da (?:NFS-e|Nota Fiscal)/i, /^\d{1,15}$/) || ocr?.number;
+  const auth = (text.match(/\bNFS\d{35,60}\b/) || [])[0] || findValueAfterLabel(lines, /C[oó]digo de Autenticidade/i, /^\d{20,70}$/) || ocr?.auth;
+  const issueRaw = findValueAfterLabel(lines, /Data e Hora da emiss[aã]o da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || findValueAfterLabel(lines, /Data e Hora da emiss[aã]o do DPS/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || ocr?.issueRaw;
+  const competenceRaw = findValueAfterLabel(lines, /Compet[eê]ncia da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}$/) || ocr?.competenceRaw;
+  const municipalGrid = isCriciuma ? (parseCriciumaMunicipalGrid(lines) || ocr?.municipal) : null;
   const total = municipalGrid?.total ?? findFiscalLineValue(lines, /Valor do Servi[cç]o/i);
-  const net = findFiscalLineValue(lines, /Valor L[ií]quido(?: da NFS-e)?/i);
+  const net = ocr?.net ?? findFiscalLineValue(lines, /Valor L[ií]quido(?: da NFS-e)?/i);
   let deductions = municipalGrid?.deductions ?? findFiscalLineValue(lines, /(?:Total Dedu[cç][oõ]es\/Redu[cç][oõ]es|Dedu[cç][oõ]es)/i, 0);
   const base = municipalGrid?.base ?? findFiscalLineValue(lines, /BC ISSQN|Base de C[aá]lculo/i, total - deductions);
   // DANFSe prints the labels in one row and their amounts in another. Some
@@ -2377,7 +2383,7 @@ function parseNationalNfse(lines, text) {
     const derivedDeductions = roundFiscal(Math.max(0, total - base));
     if (!Number.isFinite(deductions) || Math.abs(roundFiscal(total - deductions) - base) > 0.02) deductions = derivedDeductions;
   }
-  const taxes = isNovoHamburgo ? parseNationalTaxTable(lines) : parseCriciumaTaxes(lines);
+  const taxes = ocr?.taxes || (isNovoHamburgo ? parseNationalTaxTable(lines) : parseCriciumaTaxes(lines));
   const rate = municipalGrid?.rate ?? (Number.isFinite(taxes._issRate) ? taxes._issRate : findFiscalLineValue(lines, /Al[ií]quota (?:Aplicada|ISSQN)/i));
   const iss = municipalGrid?.iss ?? (Number.isFinite(taxes._iss) ? taxes._iss : findFiscalLineValue(lines, /ISSQN (?:Apurado|Retido)|^ISSQN\b/i, roundFiscal(base * rate / 100)));
   delete taxes._issRate;
@@ -2393,6 +2399,48 @@ function parseNationalNfse(lines, text) {
     total, deductions, base, iss, net, description, issRetained: /Reten[cç][aã]o do ISSQN[\s\S]{0,100}\bRetido\b/i.test(text) && !/N[aã]o Retido/i.test(text),
     simple: /Simples Nacional[\s\S]{0,100}(?:Sim|Optante)/i.test(providerSection) && !/N[aã]o Optante/i.test(providerSection), exigibility: 1, incentive: false,
     substitutedNumber: null, rps: parseNationalRps(lines)
+  };
+}
+
+function parseNationalOcrFields(text) {
+  const source = String(text || "").replace(/\s+/g, " ").trim();
+  const heading = source.match(/N[uú]mero da NFS-e\s+Compet[eê]ncia da NFS-e\s+Data e Hora da emiss[aã]o da NFS-e\s+(\d{1,15})\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?)/i);
+  const keyBlock = (source.match(/Chave de Acesso(?: Nacional)? da NFS-e\s+([\s\S]{20,120}?)\s+N[uú]mero da NFS-e/i) || [])[1] || "";
+  const auth = (keyBlock.replace(/[^A-Z0-9]/gi, "").match(/NFS\d{35,60}/i) || [])[0] || "";
+  const municipalSection = (source.match(/TRIBUTA[CÇ][AÃ]O MUNICIPAL([\s\S]*?)TRIBUTA[CÇ][AÃ]O FEDERAL/i) || [])[1] || "";
+  const municipalMatch = municipalSection.match(/Valor do Servi[cç]o[\s\S]*?R\$\s*([\d.,]+)[\s\S]*?BC ISSQN[\s\S]*?R\$\s*([\d.,]+)\s+([\d.,]+)\s*%[\s\S]*?R\$\s*([\d.,]+)/i);
+  let municipal = null;
+  if (municipalMatch) {
+    const total = parseFlexibleFiscalMoney(municipalMatch[1]);
+    const base = parseFlexibleFiscalMoney(municipalMatch[2]);
+    municipal = {
+      total,
+      deductions: roundFiscal(Math.max(0, total - base)),
+      base,
+      rate: parseFlexibleFiscalMoney(municipalMatch[3]),
+      iss: parseFlexibleFiscalMoney(municipalMatch[4]),
+    };
+  }
+  const federalSection = (source.match(/TRIBUTA[CÇ][AÃ]O FEDERAL([\s\S]*?)VALOR TOTAL DA NFS-e/i) || [])[1] || "";
+  const federalAmounts = [...federalSection.matchAll(/R\$\s*([\d.,]+)/gi)].map(match => parseFlexibleFiscalMoney(match[1]));
+  const ir = federalAmounts[0] || 0;
+  const socialTotal = federalAmounts[1] || 0;
+  const ownTaxes = federalSection.match(/PIS\s*-?\s*D[eé]bito[\s\S]*?COFINS\s*-?\s*D[eé]bito[\s\S]*?R\$\s*([\d.,]+)\s+R\$\s*([\d.,]+)/i);
+  const ownPis = ownTaxes ? parseFlexibleFiscalMoney(ownTaxes[1]) : 0;
+  const ownCofins = ownTaxes ? parseFlexibleFiscalMoney(ownTaxes[2]) : 0;
+  const pis = socialTotal > 0 ? ownPis : 0;
+  const cofins = socialTotal > 0 ? ownCofins : 0;
+  const taxes = { pis, cofins, inss: 0, ir, csll: roundFiscal(Math.max(0, socialTotal - pis - cofins)), other: 0 };
+  const totalSection = (source.match(/VALOR TOTAL DA NFS-e([\s\S]*?)(?:TOTAIS APROXIMADOS|INFORMA[CÇ][OÕ]ES COMPLEMENTARES|$)/i) || [])[1] || "";
+  const totalAmounts = [...totalSection.matchAll(/R\$\s*([\d.,]+)/gi)].map(match => parseFlexibleFiscalMoney(match[1]));
+  return {
+    number: heading?.[1] || "",
+    competenceRaw: heading?.[2] || "",
+    issueRaw: heading?.[3] || "",
+    auth,
+    municipal,
+    taxes,
+    net: totalAmounts.length ? totalAmounts[totalAmounts.length - 1] : NaN,
   };
 }
 
@@ -2432,19 +2480,21 @@ function findGridAnchors(line, patterns, lastIss = false) {
 
 function readGridValueRow(lines, headerIndex, anchors) {
   if (!anchors.every(Number.isFinite)) return null;
+  const values = anchors.map(() => []);
   for (const line of lines.slice(headerIndex + 1, headerIndex + 4)) {
     const cells = splitLayoutCells(line);
-    if (!cells.some(cell => /\d[,.]\d{2}|^-$/i.test(cell.text))) continue;
-    return anchors.map((start, index) => {
+    if (!cells.some(cell => /\d[,.]\d{2}|^-|Retido|%/i.test(cell.text))) continue;
+    anchors.forEach((start, index) => {
       const end = anchors[index + 1] ?? Infinity;
-      return cells.filter(cell => cell.x >= start - 3 && cell.x < end - 3).map(cell => cell.text).join(" ");
+      values[index].push(...cells.filter(cell => cell.x >= start - 3 && cell.x < end - 3).map(cell => cell.text));
     });
+    if (values.every(parts => parts.length)) break;
   }
-  return null;
+  return values.every(parts => parts.length) ? values.map(parts => parts.join(" ")) : null;
 }
 
 function parseGridMoney(value, fallback = NaN) {
-  const match = String(value || "").match(/-?(?:\d{1,3}(?:\.\d{3})*|\d+)[,.]\d{2}/);
+  const match = String(value || "").match(/-?\d[\d.,]*[,.]\d{2}/);
   return match ? parseFlexibleFiscalMoney(match[0]) : fallback;
 }
 
@@ -2468,7 +2518,7 @@ function findValueAfterLabel(lines, label, valuePattern) {
     for (const nextLine of lines.slice(index + 1, index + 5)) {
       const cells = splitLayoutCells(nextLine);
       const nearest = [...cells].sort((a, b) => Math.abs(a.x - labelCell.x) - Math.abs(b.x - labelCell.x))[0];
-      if (nearest) candidates.push(nearest.text);
+      if (nearest && Math.abs(nearest.x - labelCell.x) <= 80) candidates.push(nearest.text);
       candidates.push(...cells.map(cell => cell.text));
     }
     for (const candidate of candidates) {
@@ -2519,6 +2569,10 @@ function parseNationalParty(section) {
   for (let index = nameIndex + 1; index < Math.min(lines.length, nameIndex + 4); index += 1) {
     if (!/^(?:E-mail|Endere[cç]o|Munic[ií]pio|CEP)$/i.test(lines[index]) && lines[index].length > 3) { name = lines[index].replace(/\s{2,}.*$/, "").trim(); break; }
   }
+  if (!name) {
+    const block = (String(section || "").match(/Nome\s*\/\s*Nome Empresarial\s+E-mail\s+([\s\S]*?)\s+Endere[cç]o/i) || [])[1] || "";
+    name = block.replace(/\s+\S*(?:@|&|\(Q)\S*[\s\S]*$/i, "").trim();
+  }
   const email = (section.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/) || [])[0] || "";
   const cep = onlyDigits((section.match(/\b\d{5}-?\d{3}\b/) || [])[0]);
   return { taxId, name, municipalRegistration: "", emails: email ? [email] : [], cep };
@@ -2543,7 +2597,7 @@ function findFiscalLineValue(lines, label, fallback = NaN) {
     // Some municipal PDFs print label and amount on the same baseline.
     candidates.push(...cells.slice(partIndex + 1).map(cell => cell.text));
     for (const candidate of candidates) {
-      const match = candidate.match(/-?(?:\d{1,3}(?:\.\d{3})*|\d+)[,.]\d{2}/);
+      const match = candidate.match(/-?\d[\d.,]*[,.]\d{2}/);
       if (match) return parseFlexibleFiscalMoney(match[0]);
     }
   }
@@ -2570,25 +2624,54 @@ function parseRioPretoFederalTaxes(lines) {
 function parseNationalTaxTable(lines) {
   const result = { pis: 0, cofins: 0, inss: 0, ir: 0, csll: 0, other: 0 };
   const keys = { PIS: "pis", COFINS: "cofins", INSS: "inss", IRRF: "ir", CSLL: "csll" };
-  for (const rawLine of lines) {
-    const line = stripLayoutMarkers(rawLine);
-    const issMatch = line.match(/^\s*ISSQN\s+([\d.,]+)\s*%\s+R\$\s*([\d.,]+)/i);
-    if (issMatch) { result._issRate = parseFlexibleFiscalMoney(issMatch[1]); result._iss = parseFlexibleFiscalMoney(issMatch[2]); }
-    const match = line.match(/^\s*(PIS|COFINS|INSS|IRRF|CSLL)\b[\s\S]*?R\$\s*([\d.,]+)[\s\S]*?\b(Sim|N[aã]o)\b/i);
-    if (match && /^Sim$/i.test(match[3])) result[keys[match[1].toUpperCase()]] = parseFlexibleFiscalMoney(match[2]);
+  const taxName = /^(PIS|COFINS|INSS|IRRF|CSLL|ISSQN)$/i;
+  const containsTaxName = cells => cells.some(cell => taxName.test(cell.text.trim()));
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = splitLayoutCells(lines[index]);
+    const label = current.find(cell => taxName.test(cell.text.trim()));
+    if (!label) continue;
+    const previous = index > 0 ? splitLayoutCells(lines[index - 1]) : [];
+    let row = containsTaxName(previous) ? [...current] : [...previous, ...current];
+    const hasRate = () => row.some(cell => /[\d.,]+\s*%/.test(cell.text));
+    const hasAmount = () => row.some(cell => /R\$\s*[\d.,]+/i.test(cell.text));
+    if ((!hasRate() || !hasAmount()) && index + 1 < lines.length) {
+      const next = splitLayoutCells(lines[index + 1]);
+      if (!containsTaxName(next)) row = [...row, ...next];
+    }
+    const rateText = row.map(cell => cell.text.match(/([\d.,]+)\s*%/)?.[1]).find(Boolean);
+    const amountText = row.map(cell => cell.text.match(/R\$\s*([\d.,]+)/i)?.[1]).find(Boolean);
+    const retained = row.map(cell => cell.text.match(/^(Sim|N[aã]o)$/i)?.[1]).find(Boolean) || "";
+    const name = label.text.trim().toUpperCase();
+    if (name === "ISSQN") {
+      if (rateText) result._issRate = parseFlexibleFiscalMoney(rateText);
+      if (amountText) result._iss = parseFlexibleFiscalMoney(amountText);
+    } else if (/^Sim$/i.test(retained) && amountText) {
+      result[keys[name]] = parseFlexibleFiscalMoney(amountText);
+    }
   }
   return result;
 }
 
 function parseCriciumaTaxes(lines) {
-  const result = { pis: 0, cofins: 0, inss: 0, ir: 0, csll: 0, other: 0 };
-  const header = lines.findIndex(line => /IRRF/i.test(line) && /Contribui[cç][aã]o Previdenci[aá]ria/i.test(line));
-  if (header >= 0) {
-    const next = lines.slice(header + 1, header + 3).flatMap(splitLayoutParts);
-    const amount = next.map(value => value.match(/R\$\s*([\d.,]+)/i)?.[1]).find(Boolean);
-    if (amount) result.ir = parseFlexibleFiscalMoney(amount);
-  }
-  return result;
+  const value = pattern => {
+    for (let index = 0; index < lines.length - 1; index += 1) {
+      const label = splitLayoutCells(lines[index]).find(cell => pattern.test(cell.text));
+      if (!label) continue;
+      const nextCells = splitLayoutCells(lines[index + 1]);
+      const nearest = [...nextCells].sort((a, b) => Math.abs(a.x - label.x) - Math.abs(b.x - label.x))[0];
+      if (!nearest || /^-$/.test(nearest.text)) return 0;
+      const amount = nearest.text.match(/-?\d[\d.,]*[,.]\d{2}/);
+      return amount ? parseFlexibleFiscalMoney(amount[0]) : 0;
+    }
+    return 0;
+  };
+  const ir = value(/^IRRF$/i);
+  const inss = value(/^Contribui[cç][aã]o Previdenci[aá]ria\s*-?\s*Retida$/i);
+  const socialTotal = value(/^Contribui[cç][oõ]es Sociais\s*-?\s*Retidas$/i);
+  const pis = value(/^PIS\s*-?\s*D[eé]bito Apura[cç][aã]o Pr[oó]pria$/i);
+  const cofins = value(/^COFINS\s*-?\s*D[eé]bito Apura[cç][aã]o Pr[oó]pria$/i);
+  const csll = roundFiscal(Math.max(0, socialTotal - pis - cofins));
+  return { pis, cofins, inss, ir, csll, other: 0 };
 }
 
 function parseBrDateTime(value) {
@@ -2789,17 +2872,32 @@ function validateAbrasfInvoice(invoice, strict) {
 function validateAbrasf204Document(documentNode) {
   const root = documentNode.documentElement;
   if (!root || root.localName !== "CompNfse" || root.namespaceURI !== "http://www.abrasf.org.br/nfse.xsd") throw new Error("A raiz ou o namespace do XML não corresponde ao CompNfse ABRASF.");
-  const one = name => {
-    const nodes = root.getElementsByTagNameNS("*", name);
+  const one = (parent, name) => {
+    const nodes = [...(parent?.children || [])].filter(node => node.localName === name);
     if (nodes.length !== 1) throw new Error(`Estrutura ABRASF inválida: esperado exatamente um campo ${name}.`);
     return nodes[0];
   };
-  const required = ["Nfse", "InfNfse", "Numero", "CodigoVerificacao", "DataEmissao", "ValoresNfse", "DeclaracaoPrestacaoServico", "Servico", "Prestador", "TomadorServico"];
-  required.forEach(one);
-  if (one("Nfse").getAttribute("versao") !== "2.04") throw new Error("A versão do bloco Nfse não é 2.04.");
-  const moneyFields = ["BaseCalculo", "ValorLiquidoNfse", "ValorServicos", "ValorDeducoes"];
-  moneyFields.forEach(name => {
-    const value = one(name).textContent?.trim() || "";
+  const nfse = one(root, "Nfse");
+  const infNfse = one(nfse, "InfNfse");
+  one(infNfse, "Numero");
+  one(infNfse, "CodigoVerificacao");
+  one(infNfse, "DataEmissao");
+  const valoresNfse = one(infNfse, "ValoresNfse");
+  const declaracao = one(infNfse, "DeclaracaoPrestacaoServico");
+  const infDeclaracao = one(declaracao, "InfDeclaracaoPrestacaoServico");
+  const servico = one(infDeclaracao, "Servico");
+  one(infDeclaracao, "Prestador");
+  one(infDeclaracao, "TomadorServico");
+  const valoresServico = one(servico, "Valores");
+  if (nfse.getAttribute("versao") !== "2.04") throw new Error("A versão do bloco Nfse não é 2.04.");
+  const moneyFields = [
+    [valoresNfse, "BaseCalculo"],
+    [valoresNfse, "ValorLiquidoNfse"],
+    [valoresServico, "ValorServicos"],
+    [valoresServico, "ValorDeducoes"],
+  ];
+  moneyFields.forEach(([parent, name]) => {
+    const value = one(parent, name).textContent?.trim() || "";
     if (!/^\d+\.\d{2}$/.test(value)) throw new Error(`Campo monetário ABRASF inválido: ${name}.`);
   });
   const allText = root.textContent || "";
