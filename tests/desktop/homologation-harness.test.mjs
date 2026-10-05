@@ -48,6 +48,17 @@ test("parses a PDF to Word homologation without embedding machine-specific paths
   assert.equal(options.timeoutMs, 45_000);
 });
 
+test("accepts PDF to ABRASF XML homologation", () => {
+  const options = parseHarnessArguments([
+    "--tool", "pdf-xml-abrasf",
+    "--input", "invoice.pdf",
+    "--output", "out",
+  ], { cwd: "C:/work" });
+
+  assert.equal(options.tool, "pdf-xml-abrasf");
+  assert.deepEqual(options.inputs, ["C:\\work\\invoice.pdf"]);
+});
+
 test("requires explicit signer text for visual signatures and never accepts PFX options", () => {
   assert.throws(
     () => parseHarnessArguments([
@@ -114,13 +125,16 @@ test("timeout invokes cleanup before rejecting", async () => {
   assert.equal(cleaned, true);
 });
 
-test("validates DOCX and PDF download signatures", async () => {
+test("validates DOCX, PDF and ABRASF XML download signatures", async () => {
   const root = await mkdtemp(join(tmpdir(), "docpronto-harness-test-"));
   const docx = join(root, "result.docx");
   const pdf = join(root, "signed.pdf");
+  const xml = join(root, "invoice.xml");
   await writeFile(docx, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x01]));
   await writeFile(pdf, Buffer.from("%PDF-1.7\nfixture"));
+  await writeFile(xml, '<?xml version="1.0"?><CompNfse xmlns="http://www.abrasf.org.br/nfse.xsd"><Nfse versao="2.04"/></CompNfse>');
 
   assert.equal((await validateOutput(docx, "pdf-word")).kind, "docx");
   assert.equal((await validateOutput(pdf, "visual-sign")).kind, "pdf");
+  assert.equal((await validateOutput(xml, "pdf-xml-abrasf")).kind, "xml");
 });
