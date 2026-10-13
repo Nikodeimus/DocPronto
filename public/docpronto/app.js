@@ -374,14 +374,15 @@ async function processFiles() {
       code: "TOOL_RUN_IN_PROGRESS",
       message: "A ferramenta iniciou a etapa principal."
     });
-    const outcome = await activeTool.action(selectedFiles);
+    const outcome = await activeTool.action(selectedFiles, { executionId });
     throwIfProcessingCancelled();
     showStatus(outcome?.message || "Pronto. O download foi iniciado.");
     recordToolDiagnostic("finish", activeTool, {
       ...diagnosticContext,
       retryable: false,
-      code: "TOOL_RUN_COMPLETED",
-      message: "Processamento concluído.",
+      level: outcome?.diagnostic?.level || "info",
+      code: outcome?.diagnostic?.code || "TOOL_RUN_COMPLETED",
+      message: outcome?.diagnostic?.message || "Processamento concluído.",
       durationMs: Math.round(performance.now() - startedAt)
     });
   } catch (error) {
@@ -2010,7 +2011,7 @@ async function ofxToSummaryPdf([file]) {
 const docProntoScriptUrl = document.currentScript?.src || window.location.href;
 const docProntoBaseUrl = new URL(".", docProntoScriptUrl);
 
-async function pdfToOfx(files) {
+async function pdfToOfx(files, context = {}) {
   const outputs = [];
   const usedNames = new Set();
   let queueCancelled = false;
@@ -2025,7 +2026,12 @@ async function pdfToOfx(files) {
     if (progressText) progressText.textContent = `${index + 1} de ${files.length} · ${file.name}`;
     try {
       const result = await extractTransactionsFromPdf(file);
-      if (!result.transactions.length) throw new Error("Nenhuma transação com data e valor foi encontrada.");
+      if (!result.transactions.length) {
+        throw Object.assign(
+          new Error("Nenhuma transação com data e valor foi encontrada."),
+          { code: "OFX_TRANSACTIONS_NOT_FOUND" }
+        );
+      }
       updateOfxQueueItem(index, "review", "Aguardando conferência");
       const reviewed = await reviewOfxData(result, { fileName: file.name, index, total: files.length });
       if (reviewed?.cancelQueue) {
@@ -2045,7 +2051,10 @@ async function pdfToOfx(files) {
       updateOfxQueueItem(index, "error", await reportApplicationError(error, {
         tool: "pdf-ofx",
         stage: "queue-item",
-        retryable: true
+        retryable: true,
+        executionId: context.executionId,
+        queuePosition: index + 1,
+        queueTotal: files.length
       }));
     }
     if (progress) progress.value = index + 1;
@@ -2059,8 +2068,50 @@ async function pdfToOfx(files) {
   }
   const failed = ofxQueueItems.filter(item => item.status === "error").length;
   const skipped = ofxQueueItems.filter(item => item.status === "skipped").length;
-  const detail = [failed ? `${failed} com erro` : "", skipped ? `${skipped} pulado${skipped === 1 ? "" : "s"}` : "", queueCancelled ? "fila cancelada" : ""].filter(Boolean).join(" · ");
-  return { message: outputs.length ? `${outputs.length} OFX${outputs.length === 1 ? "" : "s"} gerado${outputs.length === 1 ? "" : "s"}${detail ? ` · ${detail}` : ""}.` : `Fila concluída sem OFXs${detail ? ` · ${detail}` : ""}.` };
+  return createOfxQueueOutcome({ outputCount: outputs.length, failed, skipped, queueCancelled });
+}
+
+function createOfxQueueOutcome(options) {
+  const { outputCount, failed, skipped, queueCancelled } = options;
+  const generated = `${outputCount} OFX${outputCount === 1 ? "" : "s"} gerado${outputCount === 1 ? "" : "s"}`;
+  const detail = [
+    failed ? `${failed} com erro` : "",
+    skipped ? `${skipped} pulado${skipped === 1 ? "" : "s"}` : "",
+    queueCancelled ? "fila cancelada" : "",
+  ].filter(Boolean).join(" · ");
+  const message = outputCount
+    ? `${generated}${detail ? ` · ${detail}` : ""}.`
+    : `Fila concluída sem OFXs${detail ? ` · ${detail}` : ""}.`;
+
+  if (failed) {
+    const failureLabel = `${failed} PDF${failed === 1 ? "" : "s"} com erro`;
+    return {
+      message,
+      diagnostic: {
+        level: outputCount ? "warning" : "error",
+        code: outputCount ? "TOOL_RUN_COMPLETED_WITH_ERRORS" : "TOOL_RUN_FAILED",
+        message: outputCount
+          ? `Fila concluída: ${generated} e ${failureLabel}.`
+          : `Fila concluída sem OFXs: ${failureLabel}.`,
+      },
+    };
+  }
+
+  if (skipped || queueCancelled) {
+    return {
+      message,
+      diagnostic: {
+        level: "warning",
+        code: queueCancelled ? "TOOL_RUN_CANCELLED" : "TOOL_RUN_COMPLETED_WITH_SKIPS",
+        message,
+      },
+    };
+  }
+
+  return {
+    message,
+    diagnostic: { level: "info", code: "TOOL_RUN_COMPLETED", message: `${generated} sem falhas.` },
+  };
 }
 
 function updateOfxQueueItem(index, status, detail) {
