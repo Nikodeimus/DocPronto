@@ -40,6 +40,10 @@ const ERROR_MESSAGES = Object.freeze({
     summary: "Nenhum lançamento foi encontrado neste PDF.",
     action: "Confira se o arquivo contém lançamentos legíveis ou tente novamente com o OCR ativado.",
   },
+  OFX_METADATA_CONFIRMATION_REQUIRED: {
+    summary: "Banco e conta precisam ser confirmados.",
+    action: "Preencha os dados reais destacados na conferência e tente novamente.",
+  },
 });
 
 function isWindowsPathStart(text, index) {

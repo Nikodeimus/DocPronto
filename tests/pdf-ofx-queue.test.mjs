@@ -4,6 +4,20 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../public/docpronto/app.js", import.meta.url), "utf8");
+const styles = fs.readFileSync(new URL("../public/docpronto/styles.css", import.meta.url), "utf8");
+
+function extractFunction(name) {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) return null;
+  let depth = 0;
+  let opened = false;
+  for (let index = start; index < source.length; index += 1) {
+    if (source[index] === "{") { depth += 1; opened = true; }
+    if (source[index] === "}") depth -= 1;
+    if (opened && depth === 0) return source.slice(start, index + 1);
+  }
+  return null;
+}
 
 test("PDF para OFX aceita fila e empacota múltiplas saídas", () => {
   assert.match(source, /id: "pdf-ofx"[\s\S]*?multiple: true/);
@@ -53,4 +67,24 @@ test("falha da fila recebe codigo especifico e contexto da execucao", () => {
   assert.match(source, /executionId:\s*context\.executionId/);
   assert.match(source, /queuePosition:\s*index \+ 1/);
   assert.match(source, /activeTool\.action\(selectedFiles, \{ executionId \}\)/);
+});
+
+test("identificadores automaticos de PDF exigem confirmacao humana", () => {
+  const functionSource = extractFunction("isConfirmedOfxIdentifier");
+  assert.ok(functionSource, "função de confirmação de banco e conta não encontrada");
+  const context = vm.createContext({});
+  vm.runInContext(`${functionSource}; this.validate = isConfirmedOfxIdentifier;`, context);
+
+  assert.equal(context.validate(""), false);
+  assert.equal(context.validate("PDF"), false);
+  assert.equal(context.validate("PDF-A1B2C3"), false);
+  assert.equal(context.validate("SANTANDER"), true);
+  assert.equal(context.validate("CARTAO-9927"), true);
+  assert.match(source, /code:\s*"OFX_METADATA_CONFIRMATION_REQUIRED"/);
+});
+
+test("mensagem de erro da fila quebra linha sem ocultar o arquivo", () => {
+  assert.match(styles, /\.queue-state\s*\{[^}]*max-width:\s*320px/);
+  assert.match(styles, /\.queue-state\s*\{[^}]*white-space:\s*normal/);
+  assert.match(styles, /\.queue-state\s*\{[^}]*overflow-wrap:\s*anywhere/);
 });

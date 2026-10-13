@@ -2156,7 +2156,9 @@ async function reviewOfxData(result, context = {}) {
       dialog.close("cancel-queue");
     };
   }
-  metadata.innerHTML = `<label>Banco<input id="reviewBank" value="${escapeHtml(result.metadata.bankId)}" maxlength="32" required></label><label>Agência<input id="reviewAgency" value="${escapeHtml(result.metadata.agencyId || "")}" maxlength="20"></label><label>Conta<input id="reviewAccount" value="${escapeHtml(result.metadata.accountId)}" maxlength="40" required></label><label>Moeda<select id="reviewCurrency"><option>BRL</option><option>USD</option><option>EUR</option></select></label><label>Tipo<select id="reviewAccountType"><option value="CHECKING">Conta corrente</option><option value="SAVINGS">Poupança</option><option value="CREDITCARD">Cartão</option></select></label><label>Saldo final (opcional)<input id="reviewFinalBalance" type="number" step="0.01" value="${Number.isFinite(result.metadata.finalBalance) ? Number(result.metadata.finalBalance).toFixed(2) : ""}" placeholder="Não informado"></label>`;
+  const detectedBank = isConfirmedOfxIdentifier(result.metadata.bankId) ? result.metadata.bankId : "";
+  const detectedAccount = isConfirmedOfxIdentifier(result.metadata.accountId) ? result.metadata.accountId : "";
+  metadata.innerHTML = `<label>Banco<input id="reviewBank" value="${escapeHtml(detectedBank)}" maxlength="32" placeholder="Informe o banco" required></label><label>Agência<input id="reviewAgency" value="${escapeHtml(result.metadata.agencyId || "")}" maxlength="20"></label><label>Conta<input id="reviewAccount" value="${escapeHtml(detectedAccount)}" maxlength="40" placeholder="Informe a conta ou cartão" required></label><label>Moeda<select id="reviewCurrency"><option>BRL</option><option>USD</option><option>EUR</option></select></label><label>Tipo<select id="reviewAccountType"><option value="CHECKING">Conta corrente</option><option value="SAVINGS">Poupança</option><option value="CREDITCARD">Cartão</option></select></label><label>Saldo final (opcional)<input id="reviewFinalBalance" type="number" step="0.01" value="${Number.isFinite(result.metadata.finalBalance) ? Number(result.metadata.finalBalance).toFixed(2) : ""}" placeholder="Não informado"></label>`;
   document.querySelector("#reviewCurrency").value = result.metadata.currency || "BRL";
   document.querySelector("#reviewAccountType").value = result.metadata.creditCard ? "CREDITCARD" : result.metadata.accountType || "CHECKING";
   const rowHtml = (item = { date: "", memo: "", amount: null, type: "" }) => `<tr data-review-row><td><input class="review-use" type="checkbox" checked aria-label="Incluir lançamento"></td><td class="review-index"></td><td><input class="review-date" type="date" value="${escapeHtml(item.date || "")}"></td><td><input class="review-memo" value="${escapeHtml(item.memo || "")}" maxlength="255"></td><td><input class="review-credit credit-input" type="number" min="0" step="0.01" value="${item.amount !== null && item.type === "CREDIT" ? Math.abs(item.amount).toFixed(2) : ""}"></td><td><input class="review-debit debit-input" type="number" min="0" step="0.01" value="${item.amount !== null && item.type === "DEBIT" ? Math.abs(item.amount).toFixed(2) : ""}"></td><td><button class="review-delete" type="button" title="Excluir lançamento" aria-label="Excluir lançamento">×</button></td></tr>`;
@@ -2209,11 +2211,22 @@ async function reviewOfxData(result, context = {}) {
     summary.innerHTML = `<span>${selected.length} selecionados</span><span class="credit">Total de créditos: ${formatMoney(credits, currency)}</span><span class="debit">Total de débitos: ${formatMoney(debits, currency)}</span><span class="balance">Saldo líquido: ${formatMoney(credits - debits, currency)}</span>`;
     count.textContent = `${allRows.length} lançamentos`;
     if (!selected.length) errors += 1;
-    if (!document.querySelector("#reviewBank").value.trim() || !document.querySelector("#reviewAccount").value.trim()) errors += 1;
+    const bankInput = document.querySelector("#reviewBank");
+    const accountInput = document.querySelector("#reviewAccount");
+    const missingMetadata = [
+      [bankInput, "banco"],
+      [accountInput, "conta ou cartão"],
+    ].filter(([input]) => !isConfirmedOfxIdentifier(input.value));
+    for (const [input] of [[bankInput], [accountInput]]) {
+      const invalid = !isConfirmedOfxIdentifier(input.value);
+      input.classList.toggle("invalid", invalid);
+      input.setAttribute("aria-invalid", String(invalid));
+    }
+    errors += missingMetadata.length;
     const totalErrors = errors + reconciliation.length;
     errorCount.textContent = totalErrors ? `${totalErrors} ${totalErrors === 1 ? "erro" : "erros"}` : "";
     const hasReferenceTotals = expectedCredits !== null || expectedDebits !== null || initialBalance !== null || finalBalance !== null;
-    warning.textContent = errors ? "Existem linhas duplicadas ou incompletas, ou faltam banco/conta. Lançamentos de 0,00 são aceitos quando constam no extrato." : reconciliation.length ? `Conferência financeira pendente: ${reconciliation.join("; ")}.` : duplicateWarnings ? `${duplicateWarnings} ${duplicateWarnings === 1 ? "lançamento idêntico foi encontrado" : "lançamentos idênticos foram encontrados"}. Confira se são compras distintas antes de gerar o OFX.` : hasReferenceTotals ? "Valores conferidos com os totais disponíveis do extrato." : "Revise os lançamentos: o PDF não trouxe totais ou saldos suficientes para reconciliação automática.";
+    warning.textContent = missingMetadata.length ? `Preencha ${missingMetadata.map(([, label]) => label).join(" e ")} com os dados reais do extrato para gerar o OFX.` : errors ? "Existem linhas duplicadas ou incompletas. Lançamentos de 0,00 são aceitos quando constam no extrato." : reconciliation.length ? `Conferência financeira pendente: ${reconciliation.join("; ")}.` : duplicateWarnings ? `${duplicateWarnings} ${duplicateWarnings === 1 ? "lançamento idêntico foi encontrado" : "lançamentos idênticos foram encontrados"}. Confira se são compras distintas antes de gerar o OFX.` : hasReferenceTotals ? "Valores conferidos com os totais disponíveis do extrato." : "Revise os lançamentos: o PDF não trouxe totais ou saldos suficientes para reconciliação automática.";
     warning.classList.toggle("visible", totalErrors > 0 || duplicateWarnings > 0);
     confirmButton.disabled = totalErrors > 0;
   };
@@ -2250,9 +2263,19 @@ async function reviewOfxData(result, context = {}) {
   const accountType = document.querySelector("#reviewAccountType").value;
   const bankId = document.querySelector("#reviewBank").value.trim();
   const accountId = document.querySelector("#reviewAccount").value.trim();
-  if (!bankId || !accountId || /^PDF(?:-|$)/i.test(bankId) || /^PDF(?:-|$)/i.test(accountId)) throw new Error("Confirme banco e conta reais antes de gerar o OFX.");
+  if (!isConfirmedOfxIdentifier(bankId) || !isConfirmedOfxIdentifier(accountId)) {
+    throw Object.assign(
+      new Error("Confirme banco e conta reais antes de gerar o OFX."),
+      { code: "OFX_METADATA_CONFIRMATION_REQUIRED" }
+    );
+  }
   const finalBalanceRaw = document.querySelector("#reviewFinalBalance").value.trim();
   return { bankId, agencyId: document.querySelector("#reviewAgency").value.trim(), accountId, currency: document.querySelector("#reviewCurrency").value, accountType, creditCard: accountType === "CREDITCARD", finalBalance: finalBalanceRaw === "" ? null : Number(finalBalanceRaw), transactions };
+}
+
+function isConfirmedOfxIdentifier(value) {
+  const normalized = String(value || "").trim();
+  return Boolean(normalized) && !/^PDF(?:-|$)/i.test(normalized);
 }
 
 function parseOfxReviewAmount(creditRaw, debitRaw) {
