@@ -36,6 +36,10 @@ const ERROR_MESSAGES = Object.freeze({
     summary: "A operação local demorou mais do que o esperado.",
     action: "Feche outros programas pesados e tente novamente.",
   },
+  OFX_TRANSACTIONS_NOT_FOUND: {
+    summary: "Nenhum lançamento foi encontrado neste PDF.",
+    action: "Confira se o arquivo contém lançamentos legíveis ou tente novamente com o OCR ativado.",
+  },
 });
 
 function isWindowsPathStart(text, index) {
@@ -266,7 +270,13 @@ export function createErrorReporter({ isLab, record, consoleObj = console } = {}
         code: presentation.code,
         message: presentation.summary,
         technical,
-        metadata: { retryable: context.retryable === true, toolId: context.tool || "" },
+        metadata: {
+          retryable: context.retryable === true,
+          toolId: context.tool || "",
+          executionId: context.executionId,
+          queuePosition: context.queuePosition,
+          queueTotal: context.queueTotal,
+        },
       };
       await record?.(event);
       if (isLab) consoleObj?.error?.(sanitizeDiagnosticValue({
@@ -285,7 +295,7 @@ export function presentDiagnosticEvent(event = {}) {
   const safe = sanitizeDiagnosticValue(event);
   const stackLines = String(safe.technical?.stack || "").split("\n").map(line => line.trim());
   const location = safe.technical?.location || sourceLocation
-    || stackLines.find(line => /^at\s/i.test(line)) || "Local não informado";
+    || stackLines.find(line => /^at\s/i.test(line)) || null;
   return {
     id: safe.id || "",
     timestamp: safe.timestamp || "",
@@ -294,9 +304,11 @@ export function presentDiagnosticEvent(event = {}) {
     tool: safe.tool || "aplicativo",
     stage: safe.stage || "não informada",
     message: safe.message || "Evento sem resumo.",
-    cause: safe.technical?.cause || safe.technical?.message || safe.technical?.name || "Causa técnica não informada.",
-    location: sanitizeText(location),
+    cause: safe.technical?.cause || safe.technical?.message || safe.technical?.name || null,
+    location: location ? sanitizeText(location) : null,
     executionId: safe.metadata?.executionId || "",
+    queuePosition: Number.isInteger(safe.metadata?.queuePosition) ? safe.metadata.queuePosition : null,
+    queueTotal: Number.isInteger(safe.metadata?.queueTotal) ? safe.metadata.queueTotal : null,
     retryable: safe.metadata?.retryable === true,
     toolId: safe.metadata?.toolId || safe.tool || "",
     durationMs: Number.isFinite(safe.durationMs) ? safe.durationMs : null,
@@ -409,8 +421,11 @@ export function createLaboratoryController({ desktopApi, documentObj = document,
     setText(documentObj, details, "Resumo", item.message);
     setText(documentObj, details, "Ferramenta", item.tool);
     setText(documentObj, details, "Etapa", item.stage);
-    setText(documentObj, details, "Causa", item.cause);
-    setText(documentObj, details, "Local", item.location, "diagnostic-location");
+    if (item.queuePosition !== null) {
+      setText(documentObj, details, "Item da fila", `${item.queuePosition}${item.queueTotal ? ` de ${item.queueTotal}` : ""}`);
+    }
+    if (item.cause) setText(documentObj, details, "Causa", item.cause);
+    if (item.location) setText(documentObj, details, "Local", item.location, "diagnostic-location");
     if (item.durationMs !== null) setText(documentObj, details, "Duração", `${item.durationMs} ms`);
     const actions = documentObj.createElement("div");
     actions.className = "diagnostic-detail-actions";

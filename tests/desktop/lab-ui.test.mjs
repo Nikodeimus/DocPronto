@@ -207,6 +207,21 @@ test("presentDiagnosticEvent entrega codigo ferramenta etapa causa e local sem c
   assert.equal(JSON.stringify(presentation).includes("FATURA-9927.pdf"), false);
 });
 
+test("presentDiagnosticEvent nao inventa causa ou local para evento informativo", () => {
+  const presentation = presentDiagnosticEvent({
+    id: "evt-success",
+    level: "info",
+    code: "TOOL_RUN_COMPLETED",
+    tool: "pdf-ofx",
+    stage: "finish",
+    message: "Processamento concluído.",
+    technical: null,
+  });
+
+  assert.equal(presentation.cause, null);
+  assert.equal(presentation.location, null);
+});
+
 test("createStableErrorMessage limita o erro a resumo acao e codigo", () => {
   const result = createStableErrorMessage({
     code: "WORD_UNAVAILABLE",
@@ -444,6 +459,44 @@ test("createErrorReporter limita Estavel e entrega detalhes redigidos apenas ao 
   assert.equal(JSON.stringify(labEvents).includes("FATURA"), false);
   assert.equal(JSON.stringify(labConsole).includes("FATURA"), false);
   assert.match(labEvents[0].technical.message, /\[ARQUIVO REDIGIDO\]/);
+});
+
+test("createErrorReporter relaciona a falha ao lote e a posicao na fila", async () => {
+  const events = [];
+  const reporter = createErrorReporter({ isLab: true, record: async event => events.push(event), consoleObj: { error() {} } });
+
+  await reporter.report(new Error("Nenhum lançamento encontrado."), {
+    tool: "pdf-ofx",
+    stage: "queue-item",
+    executionId: "run-42",
+    queuePosition: 2,
+    queueTotal: 5,
+  });
+
+  assert.equal(events[0].metadata.executionId, "run-42");
+  assert.equal(events[0].metadata.queuePosition, 2);
+  assert.equal(events[0].metadata.queueTotal, 5);
+});
+
+test("detalhes de sucesso ocultam campos tecnicos inexistentes", async () => {
+  const harness = createControllerHarness({ events: [{
+    id: "success-1",
+    level: "info",
+    code: "TOOL_RUN_COMPLETED",
+    tool: "pdf-ofx",
+    stage: "finish",
+    message: "Processamento concluído.",
+    technical: null,
+    metadata: { executionId: "run-42", retryable: false, toolId: "pdf-ofx" },
+  }] });
+
+  createLaboratoryController(harness);
+  await harness.documentObj.getElementById("diagnosticsButton").dispatch("click");
+  await harness.documentObj.getElementById("diagnosticsList").children[0].dispatch("click");
+  const text = harness.documentObj.getElementById("diagnosticsDetails").textContent;
+
+  assert.doesNotMatch(text, /Causa/);
+  assert.doesNotMatch(text, /Local/);
 });
 
 test("createLaboratoryController exerce modal foco filtros detalhes copiar exportar limpar e retry", async () => {
