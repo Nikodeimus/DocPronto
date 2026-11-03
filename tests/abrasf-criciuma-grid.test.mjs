@@ -65,3 +65,17 @@ test("separa PIS, COFINS e CSLL do total de contribuições sociais retidas", ()
     { pis: 7.94, cofins: 36.67, inss: 0, ir: 0, csll: 12.22, other: 0 },
   );
 });
+
+test("não trata PIS e COFINS próprios como retenções quando o total retido é zero", () => {
+  const lines = [
+    [cell(27, "IRRF"), cell(143, "Contribuição Previdenciária - Retida"), cell(305, "Contribuições Sociais - Retidas")].join(" "),
+    [cell(27, "R$ 0.00"), cell(143, "-"), cell(305, "R$ 0.00")].join(" "),
+    [cell(27, "PIS-Débito Apuração Própria"), cell(143, "COFINS - Débito Apuração Própria")].join(" "),
+    [cell(27, "R$ 9.39"), cell(143, "R$ 43.23")].join(" "),
+  ];
+
+  assert.deepEqual(
+    { ...context.parseTaxes(lines) },
+    { pis: 0, cofins: 0, inss: 0, ir: 0, csll: 0, other: 0 },
+  );
+});

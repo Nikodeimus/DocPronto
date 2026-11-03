@@ -2385,7 +2385,7 @@ function parseSupportedNfse(rawLines, text) {
   const cleanLines = rawLines.map(line => stripLayoutMarkers(line).replace(/\s+/g, " ").trim()).filter(Boolean);
   if (/PREFEITURA MUNICIPAL DE BARUERI|barueri\.sp\.gov\.br\/nfe/i.test(text)) return parseBarueriNfse(cleanLines, text);
   if (/MUNIC[IÍ]PIO DE S[AÃ]O JOS[EÉ] DO RIO PRETO/i.test(text)) return parseRioPretoNfse(rawLines, text);
-  if (/DANFSEe?\s*v?1\.0|Chave de Acesso(?: Nacional)? da NFS-e|Munic[ií]pio de Novo Hamburgo/i.test(text)) return parseNationalNfse(rawLines, text);
+  if (/DANFSEe?\s*v?\d+(?:\.\d+)?|Chave de Acesso(?: Nacional)? da NFS-e|Munic[ií]pio de Novo Hamburgo/i.test(text)) return parseNationalNfse(rawLines, text);
   throw new Error("Município ou layout ainda não reconhecido. Envie uma NFS-e com texto selecionável para adicionarmos este padrão.");
 }
 
@@ -2430,22 +2430,24 @@ function parseRioPretoNfse(lines, text) {
 }
 
 function parseNationalNfse(lines, text) {
-  const isCriciuma = /Prefeitura Municipal de Crici[uú]ma/i.test(text);
+  const isCriciuma = /Prefeitura Municipal de Crici[uú]ma|Munic[ií]pio\s*:?\s*Crici[uú]ma\s*\/\s*SC/i.test(text);
   const isNovoHamburgo = /Munic[ií]pio de Novo Hamburgo/i.test(text);
   if (!isCriciuma && !isNovoHamburgo) throw new Error("O layout nacional foi identificado, mas o município emissor ainda não está mapeado.");
   const municipality = isCriciuma ? { code: "4204608", uf: "SC", name: "Criciúma" } : { code: "4313409", uf: "RS", name: "Novo Hamburgo" };
-  const providerSection = fiscalSection(text, /EMITENTE DA NFS-e/i, /TOMADOR DO SERVI[CÇ]O/i);
-  const customerSection = fiscalSection(text, /TOMADOR DO SERVI[CÇ]O/i, /(?:INTERMEDI[AÁ]RIO|SERVI[CÇ]O PRESTADO)/i);
+  const providerHeading = /(?:EMITENTE DA NFS-e|PRESTADOR\s*\/\s*FORNECEDOR)/i;
+  const customerHeading = /(?:TOMADOR DO SERVI[CÇ]O|TOMADOR\s*\/\s*ADQUIRENTE)/i;
+  const providerSection = fiscalSection(text, providerHeading, customerHeading);
+  const customerSection = fiscalSection(text, customerHeading, /(?:INTERMEDI[AÁ]RIO|DESTINAT[AÁ]RIO|SERVI[CÇ]O PRESTADO)/i);
   const serviceSection = fiscalSection(text, /SERVI[CÇ]O PRESTADO/i, /(?:^|\n)TRIBUTA[CÇ][AÃ]O MUNICIPAL(?:\n|$)|(?:^|\n)VALOR TOTAL DA NFS-e(?:\n|$)/im);
-  const provider = parseNationalParty(providerSection);
-  const customer = parseNationalParty(customerSection);
+  const provider = parseNationalParty(providerSection, fiscalLineSection(lines, providerHeading, customerHeading));
+  const customer = parseNationalParty(customerSection, fiscalLineSection(lines, customerHeading, /(?:INTERMEDI[AÁ]RIO|DESTINAT[AÁ]RIO|SERVI[CÇ]O PRESTADO)/i));
   const ocr = lines.some(line => /\uE000\d+\uE001/.test(line)) ? null : parseNationalOcrFields(text);
   const number = findValueAfterLabel(lines, /N[uú]mero da (?:NFS-e|Nota Fiscal)/i, /^\d{1,15}$/) || ocr?.number;
-  const auth = (text.match(/\bNFS\d{35,60}\b/) || [])[0] || findValueAfterLabel(lines, /C[oó]digo de Autenticidade/i, /^\d{20,70}$/) || ocr?.auth;
-  const issueRaw = findValueAfterLabel(lines, /Data e Hora da emiss[aã]o da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || findValueAfterLabel(lines, /Data e Hora da emiss[aã]o do DPS/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || ocr?.issueRaw;
+  const auth = (text.match(/\bNFS\d{35,60}\b/) || [])[0] || findValueAfterLabel(lines, /(?:C[oó]digo de Autenticidade|Chave de Acesso(?: Nacional)? da NFS-e)/i, /^\d{20,70}$/) || ocr?.auth;
+  const issueRaw = findValueAfterLabel(lines, /Data e Hora da emiss[aã]o da(?:\s+NFS-e)?/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || findValueAfterLabel(lines, /Data e Hora da emiss[aã]o do DPS/i, /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$/) || ocr?.issueRaw;
   const competenceRaw = findValueAfterLabel(lines, /Compet[eê]ncia da NFS-e/i, /^\d{2}\/\d{2}\/\d{4}$/) || ocr?.competenceRaw;
   const municipalGrid = isCriciuma ? (parseCriciumaMunicipalGrid(lines) || ocr?.municipal) : null;
-  const total = municipalGrid?.total ?? findFiscalLineValue(lines, /Valor do Servi[cç]o/i);
+  const total = municipalGrid?.total ?? findFiscalLineValue(lines, /Valor (?:do Servi[cç]o|da Opera[cç][aã]o\s*\/\s*Servi[cç]o)/i);
   const net = ocr?.net ?? findFiscalLineValue(lines, /Valor L[ií]quido(?: da NFS-e)?/i);
   let deductions = municipalGrid?.deductions ?? findFiscalLineValue(lines, /(?:Total Dedu[cç][oõ]es\/Redu[cç][oõ]es|Dedu[cç][oõ]es)/i, 0);
   const base = municipalGrid?.base ?? findFiscalLineValue(lines, /BC ISSQN|Base de C[aá]lculo/i, total - deductions);
@@ -2582,6 +2584,14 @@ function fiscalSection(text, startPattern, endPattern) {
   return endMatch && endMatch.index !== undefined ? rest.slice(0, startMatch[0].length + endMatch.index) : rest;
 }
 
+function fiscalLineSection(lines, startPattern, endPattern) {
+  const start = lines.findIndex(line => startPattern.test(stripLayoutMarkers(line)));
+  if (start < 0) return [];
+  const relativeEnd = lines.slice(start + 1).findIndex(line => endPattern.test(stripLayoutMarkers(line)));
+  const end = relativeEnd < 0 ? lines.length : start + 1 + relativeEnd;
+  return lines.slice(start, end);
+}
+
 function findValueAfterLabel(lines, label, valuePattern) {
   for (let index = 0; index < lines.length; index += 1) {
     const currentParts = splitLayoutCells(lines[index]);
@@ -2635,13 +2645,31 @@ function parseLabeledParty(section) {
   return { taxId, name, municipalRegistration, emails: email ? [email] : [], cep };
 }
 
-function parseNationalParty(section) {
+function parseNationalParty(section, layoutLines = []) {
   const taxId = extractFiscalTaxId(section);
   const lines = String(section || "").split("\n").map(value => value.trim()).filter(Boolean);
   const nameIndex = lines.findIndex(line => /Nome \/ Nome Empresarial/i.test(line));
   let name = "";
-  for (let index = nameIndex + 1; index < Math.min(lines.length, nameIndex + 4); index += 1) {
-    if (!/^(?:E-mail|Endere[cç]o|Munic[ií]pio|CEP)$/i.test(lines[index]) && lines[index].length > 3) { name = lines[index].replace(/\s{2,}.*$/, "").trim(); break; }
+  const layoutHeader = layoutLines.findIndex(line => splitLayoutCells(line).some(cell => /Nome \/ Nome Empresarial/i.test(cell.text)));
+  if (layoutHeader >= 0) {
+    const headerCell = splitLayoutCells(layoutLines[layoutHeader]).find(cell => /Nome \/ Nome Empresarial/i.test(cell.text));
+    for (const line of layoutLines.slice(layoutHeader + 1, layoutHeader + 4)) {
+      const nearest = [...splitLayoutCells(line)].sort((a, b) => Math.abs(a.x - headerCell.x) - Math.abs(b.x - headerCell.x))[0];
+      if (nearest && Math.abs(nearest.x - headerCell.x) <= 60 && nearest.text.length > 3 && !/^(?:Endere[cç]o|E-mail|Munic[ií]pio|CEP)$/i.test(nearest.text)) {
+        name = nearest.text.trim();
+        break;
+      }
+    }
+  }
+  for (let index = nameIndex + 1; !name && index < Math.min(lines.length, nameIndex + 4); index += 1) {
+    if (!/^(?:E-mail|Endere[cç]o|Munic[ií]pio|CEP)$/i.test(lines[index]) && lines[index].length > 3) {
+      name = lines[index]
+        .replace(/^(?:\d{2}[.]?\d{3}[.]?\d{3}[\/]?\d{4}[-]?\d{2}|\d{3}[.]?\d{3}[.]?\d{3}[-]?\d{2})\s*/, "")
+        .replace(/\s+[A-ZÀ-Ý][a-zà-ÿ]+(?:\s+(?:[A-Za-zÀ-ÿ]+))*\s*\/\s*[A-Z]{2}(?:\s+.*)?$/, "")
+        .replace(/\s{2,}.*$/, "")
+        .trim();
+      break;
+    }
   }
   if (!name) {
     const block = (String(section || "").match(/Nome\s*\/\s*Nome Empresarial\s+E-mail\s+([\s\S]*?)\s+Endere[cç]o/i) || [])[1] || "";
@@ -2742,8 +2770,8 @@ function parseCriciumaTaxes(lines) {
   const ir = value(/^IRRF$/i);
   const inss = value(/^Contribui[cç][aã]o Previdenci[aá]ria\s*-?\s*Retida$/i);
   const socialTotal = value(/^Contribui[cç][oõ]es Sociais\s*-?\s*Retidas$/i);
-  const pis = value(/^PIS\s*-?\s*D[eé]bito Apura[cç][aã]o Pr[oó]pria$/i);
-  const cofins = value(/^COFINS\s*-?\s*D[eé]bito Apura[cç][aã]o Pr[oó]pria$/i);
+  const pis = socialTotal > 0 ? value(/^PIS\s*-?\s*D[eé]bito Apura[cç][aã]o Pr[oó]pria$/i) : 0;
+  const cofins = socialTotal > 0 ? value(/^COFINS\s*-?\s*D[eé]bito Apura[cç][aã]o Pr[oó]pria$/i) : 0;
   const csll = roundFiscal(Math.max(0, socialTotal - pis - cofins));
   return { pis, cofins, inss, ir, csll, other: 0 };
 }
@@ -2793,7 +2821,9 @@ function parseBarueriNfse(lines, text) {
   const total = findLabeledFiscalMoney(lines, /VALOR TOTAL DA NOTA/i);
   const net = findFiscalMoneyNear(text, /Valor L[ií]quido/i);
   const provider = providerSection.replace(/^[\s\S]*?Prestador de Servi[cç]os/i, "").split("\n").map(value => value.trim()).find(value => value.length > 5 && !/^(?:CNPJ|CPF|ALAMEDA|RUA|CEP)/i.test(value)) || "";
-  const customer = customerSection.replace(/^[\s\S]*?Nome Tomador de Servi[cç]os/i, "").split("\n").map(value => value.trim()).find(value => value.length > 5 && !/^(?:CPF|CNPJ|Endere[cç]o|Complemento)/i.test(value)) || "";
+  const customer = (customerSection.replace(/^[\s\S]*?Nome Tomador de Servi[cç]os/i, "").split("\n").map(value => value.trim()).find(value => value.length > 5 && !/^(?:CPF|CNPJ|Endere[cç]o|Complemento)/i.test(value)) || "")
+    .replace(/\s+(?:\d{2}[.]?\d{3}[.]?\d{3}[\/]?\d{4}[-]?\d{2}|\d{3}[.]?\d{3}[.]?\d{3}[-]?\d{2})\s*$/, "")
+    .trim();
   const emails = [...new Set(text.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g) || [])];
   const description = extractBarueriDescription(lines);
   const issueDate = brDateToIso(dates[0]);
@@ -2817,9 +2847,9 @@ function parseBarueriNfse(lines, text) {
 function findBarueriInvoiceNumber(lines) {
   for (let index = 0; index < lines.length; index += 1) {
     if (!/N[úu]mero da Nota/i.test(lines[index])) continue;
-    const sample = lines.slice(index, index + 4).join(" ");
-    const match = sample.match(/\b0*(\d{4,7})\b/);
-    if (match) return match[1];
+    const sample = lines.slice(index, index + 4).map(stripLayoutMarkers).join(" ");
+    const matches = [...sample.matchAll(/(?:^|\s)0*(\d{4,10})(?=\s|$)/g)];
+    if (matches.length) return matches[matches.length - 1][1];
   }
   return "";
 }
