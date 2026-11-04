@@ -5,6 +5,7 @@ const MAX_ARCHIVE_SIZE = 12 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 5000;
 const MAX_ARCHIVE_EXPANDED_SIZE = 180 * 1024 * 1024;
 const MAX_OFX_QUEUE_FILES = 30;
+const MAX_ABRASF_BATCH_FILES = 30;
 const TOOL_LIBRARY_SOURCES = Object.freeze([
   "vendor/pdf-lib.min.js",
   "vendor/jszip.min.js",
@@ -34,9 +35,9 @@ const tools = [
   { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDFs, inclusive digitalizações, em texto editável no Word usando OCR.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "Em documentos escaneados, o OCR pode demorar alguns minutos. O modo de texto editável nunca insere a página como imagem.", action: pdfToWord },
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
   { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature },
-  { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta NFS-e de diferentes municípios em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: false, option: "pdf-xml-abrasf", warning: "O XML é reconstruído a partir do documento auxiliar e não substitui o arquivo fiscal original assinado pelo município.", action: pdfToAbrasfXml },
+  { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta várias NFS-e de diferentes municípios em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: true, option: "pdf-xml-abrasf", warning: "Os XMLs são reconstruídos a partir dos documentos auxiliares e não substituem os arquivos fiscais originais assinados pelos municípios.", action: pdfToAbrasfXml },
   { id: "ofx-dominio", number: "20", category: "financeiro", title: "Revisar OFX para Domínio", description: "Confira banco, conta, documentos e movimentações antes de gerar um OFX compatível com a Domínio.", accept: ".ofx", multiple: false, warning: "Possíveis duplicidades são destacadas para conferência antes da geração do novo arquivo.", action: reviewOfxForDominio },
-  { id: "xml-abrasf-review", number: "21", category: "documento", title: "Conferir XML ABRASF", description: "Revise dados, valores e retenções da NFS-e antes de importar o XML na Domínio.", accept: ".xml", multiple: false, warning: "O XML original não será alterado. Notas já salvas neste dispositivo são bloqueadas para evitar importação duplicada.", action: reviewAbrasfXmlForDominio }
+  { id: "xml-abrasf-review", number: "21", category: "documento", title: "Conferir XML ABRASF", description: "Revise várias NFS-e, seus valores e retenções antes de importar os XMLs na Domínio.", accept: ".xml", multiple: true, option: "xml-abrasf-review", warning: "Os XMLs originais não serão alterados. Notas já salvas neste dispositivo são bloqueadas para evitar importação duplicada.", action: reviewAbrasfXmlForDominio }
 ];
 
 const elements = {
@@ -215,7 +216,7 @@ function openTool(tool, trigger = document.activeElement) {
   document.querySelector("#acceptedTypes").textContent = `Aceita ${tool.accept.replaceAll(".", "").toUpperCase()} · máximo ${limit} por arquivo`;
   elements.fileInput.accept = tool.accept;
   elements.fileInput.multiple = tool.multiple;
-  elements.process.textContent = tool.id === "pdf-ofx" ? "Processar fila" : "Processar arquivos";
+  elements.process.textContent = ["pdf-ofx", "pdf-xml-abrasf", "xml-abrasf-review"].includes(tool.id) ? "Processar lote" : "Processar arquivos";
   elements.notice.textContent = tool.warning || "";
   elements.notice.classList.toggle("visible", Boolean(tool.warning));
   renderOptions(tool.option);
@@ -269,6 +270,9 @@ async function setFiles(files) {
       ? ofxQueueItems[index]
       : { file, status: "queued", detail: "Na fila" });
     if (combined.length > MAX_OFX_QUEUE_FILES) showStatus(`A fila aceita até ${MAX_OFX_QUEUE_FILES} PDFs por vez.`, true);
+  } else if (activeTool.id === "pdf-xml-abrasf" || activeTool.id === "xml-abrasf-review") {
+    selectedFiles = valid.slice(0, MAX_ABRASF_BATCH_FILES);
+    if (valid.length > MAX_ABRASF_BATCH_FILES) showStatus(`O lote aceita até ${MAX_ABRASF_BATCH_FILES} arquivos por vez.`, true);
   } else {
     selectedFiles = activeTool.multiple ? valid : valid.slice(0, 1);
   }
@@ -300,7 +304,8 @@ function renderOptions(type) {
     "word-pdf": `<label for="wordPdfMode">Modo de conversão</label><select id="wordPdfMode"><option value="online">Online — reconstrução visual completa (recomendado)</option><option value="office">Microsoft Word — fidelidade máxima (somente aplicativo local)</option></select><small>Fluxo reverso em etapas: leitura do Word, reconstrução das páginas, captura visual e auditoria do PDF.</small>`,
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — assinatura separada .p7s</option><option value="installed">Certificado instalado no Windows — PDF com assinatura embutida</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">Os certificados instalados são acessados diretamente pelo aplicativo DOCPronto para Windows. A chave privada permanece protegida pelo Windows e não é extraída.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar certificados</button></div><small>PDFs recebem assinatura digital embutida. Nos outros formatos, a assinatura é entregue como arquivo .p7s.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>O modo A1 local gera uma assinatura separada .p7s, inclusive para PDFs. A senha é usada somente na memória desta página.</small></div><small>Escolha o modo conforme o formato de assinatura que o sistema de destino aceita.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`,
-    "pdf-xml-abrasf": `<div class="notice visible">O motor reconhece layouts de Barueri, São José do Rio Preto e DANFSe/NFS-e Nacional, identifica prestador e tomador por seção, confere retenções e gera CompNfse ABRASF 2.04.</div><label><input id="abrasfStrictValidation" type="checkbox" checked> Bloquear o XML se os totais não fecharem</label><small>Municípios validados nesta versão: Barueri/SP, São José do Rio Preto/SP, Criciúma/SC e Novo Hamburgo/RS.</small>`
+    "pdf-xml-abrasf": `<div class="queue-meta"><span>Fila <strong>até ${MAX_ABRASF_BATCH_FILES} PDFs</strong></span><span>Saída <strong>ZIP com XMLs</strong></span></div><div class="notice visible">O motor reconhece layouts de Barueri, São José do Rio Preto e DANFSe/NFS-e Nacional, identifica prestador e tomador por seção, confere retenções e gera CompNfse ABRASF 2.04.</div><label><input id="abrasfStrictValidation" type="checkbox" checked> Bloquear XMLs cujos totais não fecharem</label><small>Municípios validados nesta versão: Barueri/SP, São José do Rio Preto/SP, Criciúma/SC e Novo Hamburgo/RS.</small>`,
+    "xml-abrasf-review": `<div class="queue-meta"><span>Fila <strong>até ${MAX_ABRASF_BATCH_FILES} XMLs</strong></span><span>Saída <strong>ZIP sem pastas</strong></span></div><small>Cada NFS-e será exibida para conferência. O ZIP manterá os XMLs originais na raiz.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
   if (type === "digital-sign") bindDigitalSignOptions();
@@ -410,7 +415,7 @@ async function processFiles() {
     document.querySelectorAll("[data-cancel]").forEach(button => { button.disabled = false; });
     elements.fileList.querySelectorAll(".file-remove").forEach(button => { button.hidden = false; });
     elements.process.disabled = false;
-    elements.process.textContent = activeTool?.id === "pdf-ofx" ? "Processar fila" : "Processar arquivos";
+    elements.process.textContent = ["pdf-ofx", "pdf-xml-abrasf", "xml-abrasf-review"].includes(activeTool?.id) ? "Processar lote" : "Processar arquivos";
   }
 }
 
@@ -2137,6 +2142,17 @@ function uniqueOfxFilename(sourceName, usedNames) {
   return filename;
 }
 
+function uniqueAbrasfFilename(preferredName, usedNames) {
+  const safe = sanitizeFilename(preferredName);
+  const extension = safe.toLowerCase().endsWith(".xml") ? ".xml" : "";
+  const base = extension ? safe.slice(0, -4) : safe;
+  let filename = `${base}${extension}`;
+  let suffix = 2;
+  while (usedNames.has(filename.toLowerCase())) filename = `${base}-${suffix++}${extension}`;
+  usedNames.add(filename.toLowerCase());
+  return filename;
+}
+
 async function reviewOfxData(result, context = {}) {
   const dialog = document.querySelector("#ofxReviewDialog");
   const metadata = document.querySelector("#ofxReviewMetadata");
@@ -2388,26 +2404,46 @@ function renderAbrasfXmlReview(invoice, review, duplicate, index = 0, total = 1)
   return dialog;
 }
 
-async function reviewAbrasfXmlForDominio([file]) {
-  const { buffer, text } = await decodeAbrasfXmlFile(file);
-  const invoices = parseAbrasfXmlDocuments(text);
+async function reviewAbrasfXmlForDominio(files) {
+  const parsedFiles = [];
+  for (const [fileIndex, file] of files.entries()) {
+    throwIfProcessingCancelled();
+    showStatus(`Lendo XML ${fileIndex + 1} de ${files.length}...`);
+    const { buffer, text } = await decodeAbrasfXmlFile(file);
+    const invoices = parseAbrasfXmlDocuments(text);
+    parsedFiles.push({ file, buffer, invoices });
+  }
   const history = new Set(readAbrasfReviewHistory().map(entry => entry.fingerprint));
-  const currentFile = new Set();
+  const currentBatch = new Set();
   const fingerprints = [];
-  for (const [index, invoice] of invoices.entries()) {
-    const review = validateAbrasfXmlReview(invoice);
-    const fingerprint = abrasfInvoiceFingerprint(invoice);
-    const duplicate = history.has(fingerprint) || currentFile.has(fingerprint);
-    const dialog = renderAbrasfXmlReview(invoice, review, duplicate, index, invoices.length);
-    const result = await new Promise(resolve => dialog.addEventListener("close", () => resolve(dialog.returnValue), { once: true }));
-    if (result !== "confirm") return "Conferência cancelada; o XML não foi salvo.";
-    if (duplicate || review.errors.length) throw new Error("O XML possui campos críticos ou corresponde a uma NFS-e já salva.");
-    currentFile.add(fingerprint);
-    fingerprints.push(fingerprint);
+  const totalInvoices = parsedFiles.reduce((sum, item) => sum + item.invoices.length, 0);
+  let invoiceIndex = 0;
+  for (const [fileIndex, item] of parsedFiles.entries()) {
+    for (const invoice of item.invoices) {
+      const review = validateAbrasfXmlReview(invoice);
+      const fingerprint = abrasfInvoiceFingerprint(invoice);
+      const duplicate = history.has(fingerprint) || currentBatch.has(fingerprint);
+      const dialog = renderAbrasfXmlReview(invoice, review, duplicate, invoiceIndex, totalInvoices);
+      document.querySelector("#abrasfXmlReviewContext").textContent = `Arquivo ${fileIndex + 1} de ${files.length} · nota ${invoiceIndex + 1} de ${totalInvoices}. Confira antes de continuar.`;
+      const result = await new Promise(resolve => dialog.addEventListener("close", () => resolve(dialog.returnValue), { once: true }));
+      if (result !== "confirm") return "Conferência cancelada; nenhum XML do lote foi salvo.";
+      if (duplicate || review.errors.length) throw new Error("O lote possui campos críticos ou uma NFS-e já salva.");
+      currentBatch.add(fingerprint);
+      fingerprints.push(fingerprint);
+      invoiceIndex += 1;
+    }
   }
   rememberAbrasfInvoice(fingerprints);
-  download(buffer, `${baseName(file.name)}-conferido.xml`, file.type || "application/xml");
-  return invoices.length > 1 ? `${invoices.length} NFS-e conferidas; o lote XML foi preservado para importação na Domínio.` : "XML ABRASF conferido e preservado para importação na Domínio.";
+  if (parsedFiles.length === 1) {
+    const item = parsedFiles[0];
+    download(item.buffer, `${baseName(item.file.name)}-conferido.xml`, item.file.type || "application/xml");
+  } else {
+    const zip = new JSZip();
+    const usedNames = new Set();
+    parsedFiles.forEach(item => zip.file(uniqueAbrasfFilename(`${baseName(item.file.name)}-conferido.xml`, usedNames), item.buffer));
+    download(await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" }), "xml-abrasf-conferidos.zip", "application/zip");
+  }
+  return { message: `${totalInvoices} NFS-e conferida${totalInvoices === 1 ? "" : "s"}; ${parsedFiles.length} XML${parsedFiles.length === 1 ? " foi preservado" : "s foram preservados"} para importação na Domínio.` };
 }
 
 function isConfirmedOfxIdentifier(value) {
@@ -2476,8 +2512,46 @@ async function extractTextFromPdf(file, reportProgress = false) {
   return pages;
 }
 
-async function pdfToAbrasfXml([file]) {
-  showStatus("Lendo e classificando a NFS-e...");
+async function pdfToAbrasfXml(files, context = {}) {
+  const outputs = [];
+  const failures = [];
+  const usedNames = new Set();
+  for (const [index, file] of files.entries()) {
+    throwIfProcessingCancelled();
+    showStatus(`Convertendo nota ${index + 1} de ${files.length}...`);
+    try {
+      const result = await convertPdfToAbrasfXml(file);
+      outputs.push({
+        filename: uniqueAbrasfFilename(`NFSe-${result.invoice.number}-ABRASF.xml`, usedNames),
+        data: result.xml,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError" || processingAbortController?.signal.aborted) throw error;
+      failures.push(error);
+      recordToolDiagnostic("queue-item", activeTool, {
+        executionId: context.executionId,
+        level: "error",
+        code: error?.code || "ABRASF_BATCH_ITEM_FAILED",
+        message: "Uma NFS-e do lote não pôde ser convertida.",
+        queuePosition: index + 1,
+        queueTotal: files.length,
+        retryable: true,
+      });
+    }
+  }
+  if (!outputs.length) throw failures[0] || new Error("Nenhum XML ABRASF foi gerado.");
+  if (outputs.length === 1 && files.length === 1) {
+    download(outputs[0].data, outputs[0].filename, "application/xml;charset=utf-8");
+  } else {
+    const zip = new JSZip();
+    outputs.forEach(output => zip.file(output.filename, output.data));
+    download(await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" }), "xml-abrasf-convertidos.zip", "application/zip");
+  }
+  const message = `${outputs.length} XML${outputs.length === 1 ? "" : "s"} gerado${outputs.length === 1 ? "" : "s"}${failures.length ? `; ${failures.length} nota${failures.length === 1 ? "" : "s"} com erro` : ""}.`;
+  return failures.length ? { message, diagnostic: { level: "warning", code: "ABRASF_BATCH_PARTIAL", message } } : { message };
+}
+
+async function convertPdfToAbrasfXml(file) {
   const pages = await extractTextFromPdf(file, true);
   let rawLines = pages.flat();
   if (!rawLines.some(line => stripLayoutMarkers(line).trim())) {
@@ -2497,7 +2571,7 @@ async function pdfToAbrasfXml([file]) {
   const parsed = new DOMParser().parseFromString(xml, "application/xml");
   if (parsed.querySelector("parsererror")) throw new Error("O XML ABRASF gerado não passou na validação de sintaxe.");
   validateAbrasf204Document(parsed);
-  download(xml, `NFSe-${invoice.number}-ABRASF.xml`, "application/xml;charset=utf-8");
+  return { invoice, xml };
 }
 
 function detectNfseCancellation(text) {

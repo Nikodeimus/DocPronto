@@ -18,7 +18,7 @@ test("a conferência preserva o XML e bloqueia uma nota já salva", () => {
   assert.match(app, /function reviewAbrasfXmlForDominio\(/);
   assert.match(app, /Esta NFS-e já foi salva/);
   assert.match(app, /const invoices = parseAbrasfXmlDocuments\(text\)/);
-  assert.match(app, /for \(const \[index, invoice\] of invoices\.entries\(\)\)/);
+  assert.match(app, /for \(const invoice of item\.invoices\)/);
   assert.doesNotMatch(app, /entries\.slice\(0, 500\)/);
   assert.match(html, /id="abrasfXmlReviewDialog"[^>]+aria-describedby="abrasfXmlReviewIssues"/);
 });
