@@ -35,7 +35,8 @@ const tools = [
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
   { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature },
   { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta NFS-e de diferentes municípios em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: false, option: "pdf-xml-abrasf", warning: "O XML é reconstruído a partir do documento auxiliar e não substitui o arquivo fiscal original assinado pelo município.", action: pdfToAbrasfXml },
-  { id: "ofx-dominio", number: "20", category: "financeiro", title: "Revisar OFX para Domínio", description: "Confira banco, conta, documentos e movimentações antes de gerar um OFX compatível com a Domínio.", accept: ".ofx", multiple: false, warning: "Possíveis duplicidades são destacadas para conferência antes da geração do novo arquivo.", action: reviewOfxForDominio }
+  { id: "ofx-dominio", number: "20", category: "financeiro", title: "Revisar OFX para Domínio", description: "Confira banco, conta, documentos e movimentações antes de gerar um OFX compatível com a Domínio.", accept: ".ofx", multiple: false, warning: "Possíveis duplicidades são destacadas para conferência antes da geração do novo arquivo.", action: reviewOfxForDominio },
+  { id: "xml-abrasf-review", number: "21", category: "documento", title: "Conferir XML ABRASF", description: "Revise dados, valores e retenções da NFS-e antes de importar o XML na Domínio.", accept: ".xml", multiple: false, warning: "O XML original não será alterado. Notas já salvas neste dispositivo são bloqueadas para evitar importação duplicada.", action: reviewAbrasfXmlForDominio }
 ];
 
 const elements = {
@@ -2309,6 +2310,106 @@ async function reviewOfxForDominio([file]) {
   return "OFX conferido e preparado para importação na Domínio.";
 }
 
+const ABRASF_REVIEW_HISTORY_KEY = "docpronto:abrasf-reviewed:v1";
+
+function readAbrasfReviewHistory() {
+  let raw;
+  try {
+    raw = localStorage.getItem(ABRASF_REVIEW_HISTORY_KEY);
+  } catch {
+    throw createSafeParserError("ABRASF_HISTORY_UNAVAILABLE", "Não foi possível consultar o histórico local de NFS-e. A operação foi bloqueada para evitar duplicidade.");
+  }
+  if (raw === null) return [];
+  try {
+    const entries = JSON.parse(raw);
+    if (!Array.isArray(entries)) throw new Error("invalid history");
+    return entries.filter(entry => typeof entry?.fingerprint === "string");
+  } catch {
+    throw createSafeParserError("ABRASF_HISTORY_INVALID", "O histórico local de NFS-e está inconsistente. A operação foi bloqueada para evitar duplicidade.");
+  }
+}
+
+function rememberAbrasfInvoice(fingerprints) {
+  const incoming = new Set(Array.isArray(fingerprints) ? fingerprints : [fingerprints]);
+  const entries = readAbrasfReviewHistory().filter(entry => !incoming.has(entry.fingerprint));
+  const savedAt = new Date().toISOString();
+  const updated = [...incoming].map(fingerprint => ({ fingerprint, savedAt })).concat(entries);
+  try {
+    localStorage.setItem(ABRASF_REVIEW_HISTORY_KEY, JSON.stringify(updated));
+  } catch {
+    throw createSafeParserError("ABRASF_HISTORY_WRITE_FAILED", "Não foi possível gravar o histórico local de NFS-e. O XML não foi salvo para evitar duplicidade futura.");
+  }
+  const confirmed = new Set(readAbrasfReviewHistory().map(entry => entry.fingerprint));
+  if ([...incoming].some(fingerprint => !confirmed.has(fingerprint))) throw createSafeParserError("ABRASF_HISTORY_WRITE_FAILED", "Não foi possível confirmar o histórico local de NFS-e. O XML não foi salvo.");
+}
+
+async function decodeAbrasfXmlFile(file) {
+  const buffer = await file.arrayBuffer();
+  const header = new TextDecoder("windows-1252").decode(buffer.slice(0, Math.min(buffer.byteLength, 300)));
+  const encoding = (header.match(/encoding\s*=\s*["']([^"']+)/i) || [])[1] || "utf-8";
+  const latin = /(?:iso-8859-1|windows-1252|cp1252)/i.test(encoding);
+  return { buffer, text: new TextDecoder(latin ? "windows-1252" : "utf-8").decode(buffer) };
+}
+
+function abrasfReviewValue(value, type = "text") {
+  if (type === "money") return Number.isFinite(value) ? value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }) : "Não informado";
+  if (type === "rate") return Number.isFinite(value) ? `${(value * 100).toLocaleString("pt-BR", { maximumFractionDigits: 4 })}%` : "Não informada";
+  return String(value || "Não informado");
+}
+
+function renderAbrasfXmlReview(invoice, review, duplicate, index = 0, total = 1) {
+  const dialog = document.querySelector("#abrasfXmlReviewDialog");
+  document.querySelector("#abrasfXmlReviewContext").textContent = total > 1 ? `Nota ${index + 1} de ${total}. Confira os campos encontrados antes de continuar.` : "Confira os campos encontrados no XML original antes de salvá-lo para importação.";
+  const fields = [
+    ["Número", invoice.number], ["Emissão", invoice.issueDate], ["Competência", invoice.competence], ["Código de verificação", invoice.auth],
+    ["Prestador", invoice.provider.name], ["CPF/CNPJ do prestador", invoice.provider.taxId], ["Tomador", invoice.customer.name], ["CPF/CNPJ do tomador", invoice.customer.taxId],
+    ["Código do serviço", invoice.serviceCode], ["Município", invoice.municipalityCode], ["Versão ABRASF", invoice.version], ["Namespace", invoice.namespace],
+  ];
+  document.querySelector("#abrasfXmlReviewFields").innerHTML = fields.map(([label, value]) => `<div><dt>${escapeHtml(String(label))}</dt><dd>${escapeHtml(abrasfReviewValue(value))}</dd></div>`).join("");
+  document.querySelector("#abrasfXmlReviewDescription").textContent = invoice.description || "Não informada";
+  const values = [
+    ["Serviços", invoice.values.services], ["Deduções", invoice.values.deductions], ["Base de cálculo", invoice.values.base], ["Alíquota", invoice.values.rate, "rate"],
+    ["ISS", invoice.values.iss], ["Valor líquido", invoice.values.net], ["PIS", invoice.retentions.pis], ["COFINS", invoice.retentions.cofins],
+    ["INSS", invoice.retentions.inss], ["IR", invoice.retentions.ir], ["CSLL", invoice.retentions.csll], ["Outras retenções", invoice.retentions.other],
+  ];
+  document.querySelector("#abrasfXmlReviewValues").innerHTML = values.map(([label, value, type]) => `<div><dt>${escapeHtml(String(label))}</dt><dd>${escapeHtml(abrasfReviewValue(value, type || "money"))}</dd></div>`).join("");
+  const issues = [
+    ...review.errors.map(message => `<li class="error">${escapeHtml(String(message))}</li>`),
+    ...review.warnings.map(message => `<li class="warning">${escapeHtml(String(message))}</li>`),
+  ];
+  if (duplicate) issues.unshift('<li class="error">Esta NFS-e já foi salva neste dispositivo e foi bloqueada para evitar importação duplicada.</li>');
+  document.querySelector("#abrasfXmlReviewIssues").innerHTML = issues.length ? `<ul>${issues.join("")}</ul>` : "<p>Campos principais e totais conferidos. Revise os dados antes de salvar.</p>";
+  const confirm = document.querySelector("#abrasfXmlReviewConfirm");
+  confirm.disabled = duplicate || review.errors.length > 0;
+  document.querySelector("#abrasfXmlReviewStatus").textContent = confirm.disabled ? "Corrija o XML de origem antes de salvar." : review.warnings.length ? `${review.warnings.length} aviso(s) para conferir.` : "Pronto para salvar.";
+  dialog.returnValue = "";
+  dialog.showModal();
+  requestAnimationFrame(() => (confirm.disabled ? document.querySelector("#abrasfXmlReviewIssues") : confirm).focus());
+  return dialog;
+}
+
+async function reviewAbrasfXmlForDominio([file]) {
+  const { buffer, text } = await decodeAbrasfXmlFile(file);
+  const invoices = parseAbrasfXmlDocuments(text);
+  const history = new Set(readAbrasfReviewHistory().map(entry => entry.fingerprint));
+  const currentFile = new Set();
+  const fingerprints = [];
+  for (const [index, invoice] of invoices.entries()) {
+    const review = validateAbrasfXmlReview(invoice);
+    const fingerprint = abrasfInvoiceFingerprint(invoice);
+    const duplicate = history.has(fingerprint) || currentFile.has(fingerprint);
+    const dialog = renderAbrasfXmlReview(invoice, review, duplicate, index, invoices.length);
+    const result = await new Promise(resolve => dialog.addEventListener("close", () => resolve(dialog.returnValue), { once: true }));
+    if (result !== "confirm") return "Conferência cancelada; o XML não foi salvo.";
+    if (duplicate || review.errors.length) throw new Error("O XML possui campos críticos ou corresponde a uma NFS-e já salva.");
+    currentFile.add(fingerprint);
+    fingerprints.push(fingerprint);
+  }
+  rememberAbrasfInvoice(fingerprints);
+  download(buffer, `${baseName(file.name)}-conferido.xml`, file.type || "application/xml");
+  return invoices.length > 1 ? `${invoices.length} NFS-e conferidas; o lote XML foi preservado para importação na Domínio.` : "XML ABRASF conferido e preservado para importação na Domínio.";
+}
+
 function isConfirmedOfxIdentifier(value) {
   const normalized = String(value || "").trim();
   return Boolean(normalized) && !/^PDF(?:-|$)/i.test(normalized);
@@ -3044,6 +3145,181 @@ function validateAbrasf204Document(documentNode) {
   if (/\b(?:NaN|undefined|null)\b/i.test(allText)) throw new Error("O XML contém campo não identificado e foi bloqueado antes do download.");
   const ids = [...root.querySelectorAll("[Id]")].map(node => node.getAttribute("Id"));
   if (new Set(ids).size !== ids.length) throw new Error("O XML contém identificadores duplicados.");
+}
+
+function xmlDirectChild(parent, name) {
+  return Array.from(parent?.childNodes || []).find(node => node.nodeType === 1 && node.localName === name) || null;
+}
+
+function xmlFirstDescendant(parent, names) {
+  for (const name of Array.isArray(names) ? names : [names]) {
+    const namespaced = parent?.getElementsByTagNameNS?.("*", name);
+    if (namespaced?.length) return namespaced[0];
+    const plain = parent?.getElementsByTagName?.(name);
+    if (plain?.length) return plain[0];
+  }
+  return null;
+}
+
+function xmlNodeText(node) {
+  return String(node?.textContent || "").trim();
+}
+
+function parseAbrasfXmlMoney(value) {
+  const text = String(value ?? "").trim().replace(/\s/g, "");
+  if (!text) return NaN;
+  const decimalComma = text.lastIndexOf(",") > text.lastIndexOf(".");
+  const normalized = decimalComma ? text.replace(/\./g, "").replace(",", ".") : text.replace(/,/g, "");
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function normalizeAbrasfXmlDate(value) {
+  const text = String(value || "").trim();
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const brazilian = text.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  return brazilian ? `${brazilian[3]}-${brazilian[2]}-${brazilian[1]}` : "";
+}
+
+function parseAbrasfXmlParty(primaryNode, identityNode = primaryNode) {
+  const taxId = xmlNodeText(xmlFirstDescendant(identityNode, ["Cnpj", "Cpf"])) || xmlNodeText(xmlFirstDescendant(primaryNode, ["Cnpj", "Cpf"]));
+  return {
+    taxId: onlyDigits(taxId),
+    name: xmlNodeText(xmlFirstDescendant(primaryNode, ["RazaoSocial", "NomeFantasia", "Nome"])),
+    municipalRegistration: xmlNodeText(xmlFirstDescendant(identityNode, "InscricaoMunicipal")) || xmlNodeText(xmlFirstDescendant(primaryNode, "InscricaoMunicipal")),
+  };
+}
+
+function parseAbrasfXmlDocument(xmlText) {
+  const invoices = parseAbrasfXmlDocuments(xmlText);
+  if (invoices.length > 1) throw new Error("O XML contém mais de uma NFS-e. Use a ferramenta de conferência para revisar o lote completo.");
+  return invoices[0];
+}
+
+function parseAbrasfXmlDocuments(xmlText) {
+  const documentNode = new DOMParser().parseFromString(String(xmlText || ""), "application/xml");
+  const parserError = xmlFirstDescendant(documentNode, "parsererror");
+  if (!documentNode?.documentElement || parserError) throw new Error("O arquivo XML está vazio ou possui sintaxe inválida.");
+  const invoices = documentNode.getElementsByTagNameNS?.("*", "InfNfse") || documentNode.getElementsByTagName("InfNfse");
+  if (!invoices.length) throw new Error("O XML não contém uma NFS-e reconhecível.");
+  return Array.from(invoices).map(infNfse => parseAbrasfXmlInvoiceNode(infNfse, documentNode));
+}
+
+function parseAbrasfXmlInvoiceNode(infNfse, documentNode) {
+  const namespace = String(infNfse.namespaceURI || documentNode.documentElement.namespaceURI || "");
+  const hasAbrasfMarker = Boolean(xmlFirstDescendant(infNfse, ["ExigibilidadeISS", "NaturezaOperacao"]));
+  const hasAbrasfStructure = Boolean(xmlFirstDescendant(infNfse, "Servico") && xmlFirstDescendant(infNfse, ["Prestador", "PrestadorServico"]) && xmlFirstDescendant(infNfse, "TomadorServico"));
+  if (!/abrasf\.org\.br\/nfse/i.test(namespace) && !hasAbrasfMarker && !hasAbrasfStructure) throw new Error("O XML não foi identificado como NFS-e no padrão ABRASF.");
+  let nfse = infNfse.parentNode;
+  while (nfse && nfse.localName !== "Nfse") nfse = nfse.parentNode;
+  let invoiceScope = infNfse;
+  while (invoiceScope.parentNode && invoiceScope.localName !== "CompNfse") invoiceScope = invoiceScope.parentNode;
+  const version = String(nfse?.getAttribute?.("versao") || documentNode.documentElement.getAttribute?.("versao") || "não informada").trim();
+  const declaration = xmlFirstDescendant(infNfse, "InfDeclaracaoPrestacaoServico");
+  const service = xmlFirstDescendant(declaration || infNfse, "Servico") || xmlFirstDescendant(infNfse, "Servico");
+  const serviceValues = xmlFirstDescendant(service, "Valores");
+  const invoiceValues = xmlDirectChild(infNfse, "ValoresNfse") || xmlFirstDescendant(infNfse, "ValoresNfse");
+  const declarationProvider = xmlFirstDescendant(declaration, "Prestador");
+  const renderedProvider = xmlDirectChild(infNfse, "PrestadorServico") || xmlFirstDescendant(infNfse, "PrestadorServico");
+  const customer = xmlFirstDescendant(declaration || infNfse, "TomadorServico") || xmlFirstDescendant(infNfse, "TomadorServico");
+  const textFrom = (parents, names) => {
+    for (const parent of parents) {
+      const value = xmlNodeText(xmlFirstDescendant(parent, names));
+      if (value) return value;
+    }
+    return "";
+  };
+  const moneyFrom = names => parseAbrasfXmlMoney(textFrom([serviceValues, invoiceValues], names));
+  const issueDate = normalizeAbrasfXmlDate(xmlNodeText(xmlDirectChild(infNfse, "DataEmissao")) || textFrom([infNfse], "DataEmissao"));
+  const parsedRate = moneyFrom("Aliquota");
+  const parsedBase = moneyFrom("BaseCalculo");
+  const parsedIss = moneyFrom("ValorIss");
+  let normalizedRate = parsedRate;
+  if (Number.isFinite(parsedRate) && Number.isFinite(parsedBase) && parsedBase > 0 && Number.isFinite(parsedIss)) {
+    const directDifference = Math.abs(roundFiscal(parsedBase * parsedRate) - parsedIss);
+    const percentageDifference = Math.abs(roundFiscal(parsedBase * parsedRate / 100) - parsedIss);
+    if (percentageDifference < directDifference) normalizedRate = parsedRate / 100;
+  } else if (/^1(?:\.|$)/.test(version) && Number.isFinite(parsedRate) && parsedRate >= 1) {
+    normalizedRate = parsedRate / 100;
+  }
+  const retainedCode = textFrom([service], "IssRetido").toLowerCase();
+  const statusCode = xmlNodeText(xmlDirectChild(infNfse, "Status")).toLowerCase();
+
+  return {
+    version,
+    namespace,
+    number: xmlNodeText(xmlDirectChild(infNfse, "Numero")) || textFrom([infNfse], "Numero"),
+    auth: xmlNodeText(xmlDirectChild(infNfse, "CodigoVerificacao")) || textFrom([infNfse], "CodigoVerificacao"),
+    issueDate,
+    competence: normalizeAbrasfXmlDate(textFrom([declaration, infNfse], "Competencia")) || issueDate,
+    provider: parseAbrasfXmlParty(renderedProvider || declarationProvider, declarationProvider || renderedProvider),
+    customer: parseAbrasfXmlParty(customer),
+    description: textFrom([service, infNfse], ["Discriminacao", "DescricaoCodigoTributacaoMunicipio"]),
+    serviceCode: textFrom([service], ["ItemListaServico", "CodigoTributacaoMunicipio", "CodigoNbs"]),
+    municipalityCode: textFrom([service, infNfse], ["CodigoMunicipio", "MunicipioIncidencia"]),
+    values: {
+      services: moneyFrom("ValorServicos"),
+      deductions: moneyFrom("ValorDeducoes"),
+      base: parsedBase,
+      rate: normalizedRate,
+      iss: parsedIss,
+      net: moneyFrom("ValorLiquidoNfse"),
+      discountConditional: moneyFrom("DescontoCondicionado"),
+      discountUnconditional: moneyFrom("DescontoIncondicionado"),
+    },
+    retentions: {
+      pis: moneyFrom("ValorPis"),
+      cofins: moneyFrom("ValorCofins"),
+      inss: moneyFrom("ValorInss"),
+      ir: moneyFrom(["ValorIr", "ValorIrrf"]),
+      csll: moneyFrom("ValorCsll"),
+      other: moneyFrom("OutrasRetencoes"),
+    },
+    issRetained: /^(?:1|true|s|sim)$/.test(retainedCode),
+    cancelled: Boolean(xmlFirstDescendant(invoiceScope, "NfseCancelamento")) || /^(?:2|cancelad[oa]?)$/.test(statusCode),
+  };
+}
+
+function validateAbrasfXmlReview(invoice) {
+  const errors = [];
+  const warnings = [];
+  if (!invoice?.number) errors.push("Número da NFS-e ausente.");
+  if (!invoice?.issueDate) errors.push("Data de emissão ausente ou inválida.");
+  if (![11, 14].includes(onlyDigits(invoice?.provider?.taxId).length)) errors.push("CPF/CNPJ do prestador ausente ou inválido.");
+  if (![11, 14].includes(onlyDigits(invoice?.customer?.taxId).length)) errors.push("CPF/CNPJ do tomador ausente ou inválido.");
+  if (!invoice?.description) errors.push("Descrição do serviço ausente.");
+  if (!Number.isFinite(invoice?.values?.services) || invoice.values.services < 0) errors.push("Valor dos serviços ausente ou inválido.");
+  if (invoice?.cancelled) errors.push("A NFS-e está cancelada e não pode ser salva para importação.");
+  if (!invoice?.auth) warnings.push("Código de verificação não informado pelo layout.");
+  if (!invoice?.provider?.name) warnings.push("Razão social do prestador ausente.");
+  if (!invoice?.customer?.name) warnings.push("Razão social do tomador ausente.");
+  if (!invoice?.serviceCode) warnings.push("Código do serviço ausente.");
+  if (!invoice?.municipalityCode) warnings.push("Código do município ausente.");
+  if (invoice?.version === "não informada") warnings.push("Versão ABRASF não informada no XML.");
+
+  const values = invoice?.values || {};
+  if (!Number.isFinite(values.base)) warnings.push("Base de cálculo não informada.");
+  if (!Number.isFinite(values.rate)) warnings.push("Alíquota não informada.");
+  if (!Number.isFinite(values.iss)) warnings.push("Valor do ISS não informado.");
+  if (!Number.isFinite(values.net)) warnings.push("Valor líquido não informado.");
+  if (Number.isFinite(values.base) && Number.isFinite(values.rate) && Number.isFinite(values.iss)) {
+    const expectedIss = roundFiscal(values.base * values.rate);
+    if (Math.abs(expectedIss - values.iss) > 0.02) warnings.push("O ISS não confere com a base e a alíquota informadas.");
+  }
+  if (Number.isFinite(values.services) && Number.isFinite(values.net)) {
+    const retained = Object.values(invoice.retentions || {}).reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+    const discounts = [values.discountConditional, values.discountUnconditional].reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+    const expectedNet = roundFiscal(values.services - retained - discounts - (invoice.issRetained && Number.isFinite(values.iss) ? values.iss : 0));
+    if (Math.abs(expectedNet - values.net) > 0.02) warnings.push("O valor líquido não confere com serviços, descontos e retenções.");
+  }
+  return { errors, warnings };
+}
+
+function abrasfInvoiceFingerprint(invoice) {
+  const number = String(invoice?.number || "").trim().replace(/^0+(?=\d)/, "");
+  const identity = `${onlyDigits(invoice?.provider?.taxId)}|${onlyDigits(invoice?.provider?.municipalRegistration)}|${onlyDigits(invoice?.municipalityCode)}|${number}`;
+  return `NFSE-${simpleHash(identity)}-${simpleHash([...identity].reverse().join(""))}`;
 }
 
 function buildAbrasfCompNfse(invoice) {

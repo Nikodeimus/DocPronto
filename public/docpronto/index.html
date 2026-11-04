@@ -198,6 +198,32 @@
     </form>
   </dialog>
 
+  <dialog id="abrasfXmlReviewDialog" aria-labelledby="abrasfXmlReviewTitle" aria-describedby="abrasfXmlReviewIssues" aria-modal="true" class="review-dialog abrasf-review-dialog">
+    <form method="dialog" class="dialog-shell review-shell">
+      <button class="close-button" value="cancel" aria-label="Fechar">×</button>
+      <div class="dialog-heading">
+        <span class="tool-number">XML</span>
+        <div>
+          <p class="eyebrow">NFS-E ABRASF PARA DOMÍNIO</p>
+          <h2 id="abrasfXmlReviewTitle">Conferir nota fiscal</h2>
+          <p id="abrasfXmlReviewContext">Confira os campos encontrados no XML original antes de salvá-lo para importação.</p>
+        </div>
+      </div>
+      <div id="abrasfXmlReviewIssues" class="abrasf-review-issues" role="alert" aria-live="assertive" tabindex="-1"></div>
+      <h3>Identificação</h3>
+      <dl id="abrasfXmlReviewFields" class="abrasf-review-grid"></dl>
+      <h3>Descrição do serviço</h3>
+      <p id="abrasfXmlReviewDescription" class="abrasf-review-description"></p>
+      <h3>Valores e retenções</h3>
+      <dl id="abrasfXmlReviewValues" class="abrasf-review-grid abrasf-review-values"></dl>
+      <div class="dialog-actions">
+        <button class="secondary-button" value="cancel">Cancelar</button>
+        <span id="abrasfXmlReviewStatus" class="review-error-count"></span>
+        <button class="primary-button" value="confirm" id="abrasfXmlReviewConfirm">Salvar XML conferido</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="diagnosticsPanel" aria-labelledby="diagnosticsTitle" aria-modal="true" class="diagnostics-dialog">
     <div class="diagnostics-shell">
       <header class="diagnostics-header">
