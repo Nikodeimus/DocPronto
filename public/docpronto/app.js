@@ -34,7 +34,8 @@ const tools = [
   { id: "pdf-word", number: "16", category: "documento", title: "PDF para Word", description: "Converta PDFs, inclusive digitalizações, em texto editável no Word usando OCR.", accept: ".pdf", multiple: false, option: "pdf-word", warning: "Em documentos escaneados, o OCR pode demorar alguns minutos. O modo de texto editável nunca insere a página como imagem.", action: pdfToWord },
   { id: "digital-sign", number: "17", category: "documento", title: "Assinatura digital com certificado", description: "Assine com certificado disponível no Windows ou arquivo A1.", accept: ".pdf,.docx,.xlsx,.txt,.csv,.ofx,.xml,.jpg,.jpeg,.png", multiple: false, option: "digital-sign", warning: "A validade depende do certificado, da cadeia de confiança e do software usado para validar o documento.", action: signWithDigitalCertificate },
   { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature },
-  { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta NFS-e de diferentes municípios em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: false, option: "pdf-xml-abrasf", warning: "O XML é reconstruído a partir do documento auxiliar e não substitui o arquivo fiscal original assinado pelo município.", action: pdfToAbrasfXml }
+  { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta NFS-e de diferentes municípios em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: false, option: "pdf-xml-abrasf", warning: "O XML é reconstruído a partir do documento auxiliar e não substitui o arquivo fiscal original assinado pelo município.", action: pdfToAbrasfXml },
+  { id: "ofx-dominio", number: "20", category: "financeiro", title: "Revisar OFX para Domínio", description: "Confira banco, conta, documentos e movimentações antes de gerar um OFX compatível com a Domínio.", accept: ".ofx", multiple: false, warning: "Possíveis duplicidades são destacadas para conferência antes da geração do novo arquivo.", action: reviewOfxForDominio }
 ];
 
 const elements = {
@@ -2043,7 +2044,7 @@ async function pdfToOfx(files, context = {}) {
         updateOfxQueueItem(index, "skipped", "Pulado");
       } else {
         const filename = uniqueOfxFilename(file.name, usedNames);
-        outputs.push({ filename, data: new TextEncoder().encode(buildOfx(reviewed)) });
+        outputs.push({ filename, data: buildOfx(reviewed) });
         updateOfxQueueItem(index, "done", "OFX pronto");
       }
     } catch (error) {
@@ -2148,6 +2149,10 @@ async function reviewOfxData(result, context = {}) {
   const cancelButton = document.querySelector("#ofxReviewCancel");
   const cancelQueueButton = document.querySelector("#ofxReviewCancelQueue");
   const reviewContext = document.querySelector("#ofxReviewContext");
+  const reviewEyebrow = document.querySelector("#ofxReviewEyebrow");
+  const reviewTitle = document.querySelector("#ofxReviewTitle");
+  if (reviewEyebrow) reviewEyebrow.textContent = context.mode === "dominio" ? "OFX PARA DOMÍNIO" : "PDF PARA OFX";
+  if (reviewTitle) reviewTitle.textContent = context.mode === "dominio" ? "Conferir OFX bancário" : "Revisar lançamentos";
   if (reviewContext) reviewContext.textContent = context.fileName ? `${context.index + 1} de ${context.total} · ${context.fileName}` : "Confira e edite os lançamentos extraídos antes de gerar o arquivo.";
   if (cancelButton) cancelButton.textContent = context.total > 1 ? "Pular este PDF" : "Cancelar";
   if (cancelQueueButton) {
@@ -2161,7 +2166,7 @@ async function reviewOfxData(result, context = {}) {
   metadata.innerHTML = `<label>Banco<input id="reviewBank" value="${escapeHtml(detectedBank)}" maxlength="32" placeholder="Informe o banco" required></label><label>Agência<input id="reviewAgency" value="${escapeHtml(result.metadata.agencyId || "")}" maxlength="20"></label><label>Conta<input id="reviewAccount" value="${escapeHtml(detectedAccount)}" maxlength="40" placeholder="Informe a conta ou cartão" required></label><label>Moeda<select id="reviewCurrency"><option>BRL</option><option>USD</option><option>EUR</option></select></label><label>Tipo<select id="reviewAccountType"><option value="CHECKING">Conta corrente</option><option value="SAVINGS">Poupança</option><option value="CREDITCARD">Cartão</option></select></label><label>Saldo final (opcional)<input id="reviewFinalBalance" type="number" step="0.01" value="${Number.isFinite(result.metadata.finalBalance) ? Number(result.metadata.finalBalance).toFixed(2) : ""}" placeholder="Não informado"></label>`;
   document.querySelector("#reviewCurrency").value = result.metadata.currency || "BRL";
   document.querySelector("#reviewAccountType").value = result.metadata.creditCard ? "CREDITCARD" : result.metadata.accountType || "CHECKING";
-  const rowHtml = (item = { date: "", memo: "", amount: null, type: "" }) => `<tr data-review-row><td><input class="review-use" type="checkbox" checked aria-label="Incluir lançamento"></td><td class="review-index"></td><td><input class="review-date" type="date" value="${escapeHtml(item.date || "")}"></td><td><input class="review-memo" value="${escapeHtml(item.memo || "")}" maxlength="255"></td><td><input class="review-credit credit-input" type="number" min="0" step="0.01" value="${item.amount !== null && item.type === "CREDIT" ? Math.abs(item.amount).toFixed(2) : ""}"></td><td><input class="review-debit debit-input" type="number" min="0" step="0.01" value="${item.amount !== null && item.type === "DEBIT" ? Math.abs(item.amount).toFixed(2) : ""}"></td><td><button class="review-delete" type="button" title="Excluir lançamento" aria-label="Excluir lançamento">×</button></td></tr>`;
+  const rowHtml = (item = { date: "", document: "", memo: "", amount: null, type: "" }) => `<tr data-review-row><td><input class="review-use" type="checkbox" checked aria-label="Incluir lançamento"></td><td class="review-index"></td><td><input class="review-date" type="date" value="${escapeHtml(item.date || "")}"></td><td><input class="review-document" value="${escapeHtml(item.document || item.checkNumber || "")}" maxlength="32" placeholder="Automático" title="Documento do lançamento; quando vazio, o DOCPronto gera uma sequência compatível."></td><td><input class="review-memo" value="${escapeHtml(item.memo || "")}" maxlength="255"></td><td><input class="review-credit credit-input" type="number" min="0" step="0.01" value="${item.amount !== null && item.type === "CREDIT" ? Math.abs(item.amount).toFixed(2) : ""}"></td><td><input class="review-debit debit-input" type="number" min="0" step="0.01" value="${item.amount !== null && item.type === "DEBIT" ? Math.abs(item.amount).toFixed(2) : ""}"></td><td><button class="review-delete" type="button" title="Excluir lançamento" aria-label="Excluir lançamento">×</button></td></tr>`;
   rows.innerHTML = result.transactions.map(rowHtml).join("");
   search.value = "";
   const update = () => {
@@ -2173,6 +2178,7 @@ async function reviewOfxData(result, context = {}) {
     allRows.forEach((row, index) => {
       row.querySelector(".review-index").textContent = index + 1;
       const date = row.querySelector(".review-date").value;
+      const documentNumber = row.querySelector(".review-document").value.trim();
       const memo = row.querySelector(".review-memo").value.trim();
       const creditRaw = row.querySelector(".review-credit").value.trim();
       const debitRaw = row.querySelector(".review-debit").value.trim();
@@ -2182,7 +2188,7 @@ async function reviewOfxData(result, context = {}) {
       const debitSet = debitRaw !== "";
       const enabled = row.querySelector(".review-use").checked;
       const direction = debitSet ? "DEBIT" : "CREDIT";
-      const key = `${date}|${memo.toLowerCase()}|${direction}|${credit}|${debit}`;
+      const key = `${date}|${documentNumber.toLowerCase()}|${memo.toLowerCase()}|${direction}|${credit}|${debit}`;
       const duplicate = enabled && seen.has(key);
       if (enabled) seen.add(key);
       const blockingDuplicate = duplicate && !result.metadata.creditCard;
@@ -2192,7 +2198,7 @@ async function reviewOfxData(result, context = {}) {
       row.title = duplicate ? "Possível lançamento duplicado." : "";
       if (duplicate && result.metadata.creditCard) duplicateWarnings += 1;
       if (invalid) errors += 1;
-      const searchable = `${date} ${memo} ${credit} ${debit}`.toLowerCase();
+      const searchable = `${date} ${documentNumber} ${memo} ${credit} ${debit}`.toLowerCase();
       row.classList.toggle("filtered", Boolean(query) && !searchable.includes(query));
     });
     const selected = allRows.filter(row => row.querySelector(".review-use").checked);
@@ -2252,12 +2258,13 @@ async function reviewOfxData(result, context = {}) {
   if (value !== "confirm") return null;
   const transactions = [...rows.querySelectorAll("[data-review-row]")].filter(row => row.querySelector(".review-use").checked).map(row => {
     const date = row.querySelector(".review-date").value;
+    const documentNumber = row.querySelector(".review-document").value.trim();
     const memo = row.querySelector(".review-memo").value.trim();
     const creditRaw = row.querySelector(".review-credit").value.trim();
     const debitRaw = row.querySelector(".review-debit").value.trim();
     const parsedAmount = parseOfxReviewAmount(creditRaw, debitRaw);
     if (!isValidIsoDate(date) || !memo || !parsedAmount) throw new Error("Corrija os lançamentos destacados antes de gerar o OFX.");
-    return { date, memo, ...parsedAmount };
+    return { date, document: documentNumber, memo, ...parsedAmount };
   });
   if (!transactions.length) throw new Error("Selecione ao menos um lançamento para gerar o OFX.");
   const accountType = document.querySelector("#reviewAccountType").value;
@@ -2271,6 +2278,35 @@ async function reviewOfxData(result, context = {}) {
   }
   const finalBalanceRaw = document.querySelector("#reviewFinalBalance").value.trim();
   return { bankId, agencyId: document.querySelector("#reviewAgency").value.trim(), accountId, currency: document.querySelector("#reviewCurrency").value, accountType, creditCard: accountType === "CREDITCARD", finalBalance: finalBalanceRaw === "" ? null : Number(finalBalanceRaw), transactions };
+}
+
+async function reviewOfxForDominio([file]) {
+  const statement = parseOfx(await readOfxText(file));
+  const result = {
+    metadata: {
+      bankId: statement.bankId,
+      agencyId: statement.agencyId,
+      accountId: statement.accountId,
+      accountType: statement.accountType || "CHECKING",
+      creditCard: statement.creditCard,
+      currency: statement.currency || "BRL",
+      finalBalance: statement.balance,
+      expectedCredits: null,
+      expectedDebits: null,
+      initialBalance: null,
+    },
+    transactions: statement.transactions.map((item, index) => ({
+      date: item.date,
+      document: item.checkNumber || "",
+      memo: item.memo || item.name || `Lançamento ${index + 1}`,
+      amount: item.amount,
+      type: item.amount < 0 ? "DEBIT" : "CREDIT",
+    })),
+  };
+  const reviewed = await reviewOfxData(result, { fileName: file.name, index: 0, total: 1, mode: "dominio" });
+  if (!reviewed) return "Revisão cancelada.";
+  download(buildOfx(reviewed), `${baseName(file.name)}-dominio.ofx`, "application/x-ofx");
+  return "OFX conferido e preparado para importação na Domínio.";
 }
 
 function isConfirmedOfxIdentifier(value) {
@@ -3463,15 +3499,19 @@ function buildOfx({ bankId, agencyId, accountId, accountType, currency, transact
   const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
   const now = new Date();
   const generatedAt = formatOfxTimestamp(now);
-  const transactionXml = sorted.map(transaction => `
+  const transactionXml = sorted.map((transaction, index) => {
+    const documentNumber = String(transaction.document || transaction.checkNumber || index + 1).trim().slice(0, 32);
+    return `
           <STMTTRN>
             <TRNTYPE>${transaction.type}</TRNTYPE>
             <DTPOSTED>${transaction.date.replaceAll("-", "")}120000[-3:BRT]</DTPOSTED>
             <TRNAMT>${transaction.amount.toFixed(2)}</TRNAMT>
-            <FITID>${escapeXml(`PDF-${simpleHash(`${bankId}|${accountId}|${transaction.date}|${transaction.amount.toFixed(2)}|${transaction.memo.trim().toLowerCase()}`)}`)}</FITID>
+            <FITID>${escapeXml(`DOC-${simpleHash(`${bankId}|${accountId}|${transaction.date}|${transaction.amount.toFixed(2)}|${documentNumber}|${transaction.memo.trim().toLowerCase()}|${index}`)}`)}</FITID>
+            <CHECKNUM>${escapeXml(documentNumber)}</CHECKNUM>
             <NAME>${escapeXml(transaction.memo.slice(0, 32))}</NAME>
             <MEMO>${escapeXml(transaction.memo)}</MEMO>
-          </STMTTRN>`).join("");
+          </STMTTRN>`;
+  }).join("");
   const accountBlock = creditCard
     ? `<CCACCTFROM><ACCTID>${escapeXml(accountId)}</ACCTID></CCACCTFROM>`
     : `<BANKACCTFROM><BANKID>${escapeXml(bankId)}</BANKID>${agencyId ? `<BRANCHID>${escapeXml(agencyId)}</BRANCHID>` : ""}<ACCTID>${escapeXml(accountId)}</ACCTID><ACCTTYPE>${accountType}</ACCTTYPE></BANKACCTFROM>`;
@@ -3479,12 +3519,12 @@ function buildOfx({ bankId, agencyId, accountId, accountType, currency, transact
   const statementOpen = creditCard ? "<CCSTMTRS>" : "<STMTRS>";
   const statementClose = creditCard ? "</CCSTMTRS>" : "</STMTRS>";
   const messageClose = creditCard ? "</CCSTMTTRNRS></CREDITCARDMSGSRSV1>" : "</STMTTRNRS></BANKMSGSRSV1>";
-  return `OFXHEADER:100
+  const text = `OFXHEADER:100
 DATA:OFXSGML
 VERSION:102
 SECURITY:NONE
-ENCODING:UTF-8
-CHARSET:NONE
+ENCODING:USASCII
+CHARSET:1252
 COMPRESSION:NONE
 OLDFILEUID:NONE
 NEWFILEUID:NONE
@@ -3511,6 +3551,17 @@ NEWFILEUID:NONE
       ${statementClose}
   ${messageClose}
 </OFX>`;
+  const windows1252 = new Map([
+    [0x20ac, 0x80], [0x201a, 0x82], [0x0192, 0x83], [0x201e, 0x84], [0x2026, 0x85], [0x2020, 0x86], [0x2021, 0x87],
+    [0x02c6, 0x88], [0x2030, 0x89], [0x0160, 0x8a], [0x2039, 0x8b], [0x0152, 0x8c], [0x017d, 0x8e], [0x2018, 0x91],
+    [0x2019, 0x92], [0x201c, 0x93], [0x201d, 0x94], [0x2022, 0x95], [0x2013, 0x96], [0x2014, 0x97], [0x02dc, 0x98],
+    [0x2122, 0x99], [0x0161, 0x9a], [0x203a, 0x9b], [0x0153, 0x9c], [0x017e, 0x9e], [0x0178, 0x9f],
+  ]);
+  return Uint8Array.from([...text].map(character => {
+    const code = character.codePointAt(0);
+    if (code <= 0x7f || (code >= 0xa0 && code <= 0xff)) return code;
+    return windows1252.get(code) ?? 0x3f;
+  }));
 }
 
 function formatOfxTimestamp(date) {
@@ -3559,8 +3610,10 @@ function parseOfx(rawText) {
   }
   return {
     bankId: ofxTag(statementContent, "BANKID") || ofxTag(content, "ORG"),
+    agencyId: ofxTag(statementContent, "BRANCHID"),
     accountId: ofxTag(statementContent, "ACCTID") || ofxTag(statementContent, "ACCTKEY"),
     accountType: ofxTag(statementContent, "ACCTTYPE"),
+    creditCard: /<CCSTMTRS>/i.test(statementContent),
     currency: ofxTag(statementContent, "CURDEF") || "BRL",
     startDate: normalizeOfxDate(ofxTag(statementContent, "DTSTART")) || transactions[0].date,
     endDate: normalizeOfxDate(ofxTag(statementContent, "DTEND")) || transactions[transactions.length - 1].date,
