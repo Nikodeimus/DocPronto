@@ -61,7 +61,7 @@ function codedError(code, message, status = 400, cause) {
 }
 
 function isPublicAsset(name) {
-  return ["index.html", "startup.js", "app.js", "lab-ui.mjs", "styles.css"].includes(name)
+  return ["index.html", "startup.js", "app.js", "lab-ui.mjs", "pdfa.mjs", "styles.css"].includes(name)
     || /^vendor\/(?:[a-zA-Z0-9_-]+(?:\.worker)?(?:\.min)?\.(?:js|mjs)|tesseract-core\/[a-zA-Z0-9_.-]+\.(?:js|wasm))$/.test(name);
 }
 

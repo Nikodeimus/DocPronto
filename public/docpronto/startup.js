@@ -18,6 +18,9 @@ const startupTools = [
   ["digital-sign", "17", "documento", "Assinatura digital com certificado", "Assine com certificado disponível no Windows ou arquivo A1."],
   ["visual-sign", "18", "documento", "Inserir assinatura visual", "Adicione nome e aparência de assinatura a um PDF."],
   ["pdf-xml-abrasf", "19", "documento", "PDF para XML ABRASF", "Converta NFS-e de diferentes municípios em XML ABRASF 2.04 para importação contábil."],
+  ["ofx-dominio", "20", "financeiro", "Revisar OFX para Domínio", "Confira banco, conta, documentos e movimentações antes de gerar um OFX compatível com a Domínio."],
+  ["xml-abrasf-review", "21", "documento", "Conferir XML ABRASF", "Revise várias NFS-e, seus valores e retenções antes de importar os XMLs na Domínio."],
+  ["pdf-pdfa", "22", "pdf", "PDF para PDF/A", "Converta um PDF em PDF/A-2b para arquivamento de longo prazo."],
 ].map(([id, number, category, title, description]) => ({ id, number, category, title, description }));
 
 const startupElements = {

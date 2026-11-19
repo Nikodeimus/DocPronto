@@ -1,11 +1,14 @@
 /* global PDFLib, JSZip, forge, docx, html2canvas */
 
+import { assertPdfARasterBudget, markDocumentAsPdfA2b, validatePdfA2b } from "./pdfa.mjs";
+
 const MAX_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_ARCHIVE_SIZE = 12 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 5000;
 const MAX_ARCHIVE_EXPANDED_SIZE = 180 * 1024 * 1024;
 const MAX_OFX_QUEUE_FILES = 30;
 const MAX_ABRASF_BATCH_FILES = 30;
+const MAX_PDFA_OUTPUT_SIZE = 80 * 1024 * 1024;
 const TOOL_LIBRARY_SOURCES = Object.freeze([
   "vendor/pdf-lib.min.js",
   "vendor/jszip.min.js",
@@ -37,7 +40,8 @@ const tools = [
   { id: "visual-sign", number: "18", category: "documento", title: "Inserir assinatura visual", description: "Adicione nome e aparência de assinatura a um PDF.", accept: ".pdf", multiple: false, option: "visual-sign", warning: "Esta opção apenas insere uma aparência visual. Ela não equivale a assinatura digital certificada.", action: insertVisualSignature },
   { id: "pdf-xml-abrasf", number: "19", category: "documento", title: "PDF para XML ABRASF", description: "Converta várias NFS-e de diferentes municípios em XML ABRASF 2.04 para importação contábil.", accept: ".pdf", multiple: true, option: "pdf-xml-abrasf", warning: "Os XMLs são reconstruídos a partir dos documentos auxiliares e não substituem os arquivos fiscais originais assinados pelos municípios.", action: pdfToAbrasfXml },
   { id: "ofx-dominio", number: "20", category: "financeiro", title: "Revisar OFX para Domínio", description: "Confira banco, conta, documentos e movimentações antes de gerar um OFX compatível com a Domínio.", accept: ".ofx", multiple: false, warning: "Possíveis duplicidades são destacadas para conferência antes da geração do novo arquivo.", action: reviewOfxForDominio },
-  { id: "xml-abrasf-review", number: "21", category: "documento", title: "Conferir XML ABRASF", description: "Revise várias NFS-e, seus valores e retenções antes de importar os XMLs na Domínio.", accept: ".xml", multiple: true, option: "xml-abrasf-review", warning: "Os XMLs originais não serão alterados. Notas já salvas neste dispositivo são bloqueadas para evitar importação duplicada.", action: reviewAbrasfXmlForDominio }
+  { id: "xml-abrasf-review", number: "21", category: "documento", title: "Conferir XML ABRASF", description: "Revise várias NFS-e, seus valores e retenções antes de importar os XMLs na Domínio.", accept: ".xml", multiple: true, option: "xml-abrasf-review", warning: "Os XMLs originais não serão alterados. Notas já salvas neste dispositivo são bloqueadas para evitar importação duplicada.", action: reviewAbrasfXmlForDominio },
+  { id: "pdf-pdfa", number: "22", category: "pdf", title: "PDF para PDF/A", description: "Converta um PDF em PDF/A-2b para arquivamento de longo prazo.", accept: ".pdf", multiple: false, option: "pdf-pdfa", warning: "A conversão preserva a aparência das páginas, mas o texto pesquisável pode ser removido. Assinaturas digitais existentes serão invalidadas.", action: pdfToPdfA }
 ];
 
 const elements = {
@@ -305,7 +309,8 @@ function renderOptions(type) {
     "digital-sign": `<label for="signatureMode">Origem do certificado</label><select id="signatureMode"><option value="certificate">Arquivo A1 (.pfx/.p12) — assinatura separada .p7s</option><option value="installed">Certificado instalado no Windows — PDF com assinatura embutida</option></select><div class="sign-mode-panel" data-sign-mode="installed" hidden><div class="notice visible">Os certificados instalados são acessados diretamente pelo aplicativo DOCPronto para Windows. A chave privada permanece protegida pelo Windows e não é extraída.</div><label for="certificateSearch">Buscar certificado</label><input id="certificateSearch" type="search" placeholder="Nome ou validade"><label for="windowsCertificate">Certificado instalado</label><div class="inline-option"><select id="windowsCertificate"><option value="">Clique em carregar certificados</option></select><button class="secondary-button compact-button" type="button" id="loadWindowsCertificates">Carregar certificados</button></div><small>PDFs recebem assinatura digital embutida. Nos outros formatos, a assinatura é entregue como arquivo .p7s.</small></div><div class="sign-mode-panel" data-sign-mode="certificate"><label for="certificateFile">Certificado A1 (.pfx ou .p12)</label><input id="certificateFile" type="file" accept=".pfx,.p12,application/x-pkcs12"><label for="certificatePassword">Senha do arquivo A1</label><input id="certificatePassword" type="password" autocomplete="off" placeholder="Senha do A1"><small>O modo A1 local gera uma assinatura separada .p7s, inclusive para PDFs. A senha é usada somente na memória desta página.</small></div><small>Escolha o modo conforme o formato de assinatura que o sistema de destino aceita.</small>`,
     "visual-sign": `<label for="writtenSignature">Nome que aparecerá no PDF</label><input id="writtenSignature" maxlength="90" autocomplete="name" placeholder="Ex.: Altair Heitor Martins Palin"><small>Na próxima etapa, escolha a página e a posição da aparência visual.</small>`,
     "pdf-xml-abrasf": `<div class="queue-meta"><span>Fila <strong>até ${MAX_ABRASF_BATCH_FILES} PDFs</strong></span><span>Saída <strong>ZIP com XMLs</strong></span></div><div class="notice visible">O motor reconhece layouts de Barueri, São José do Rio Preto e DANFSe/NFS-e Nacional, identifica prestador e tomador por seção, confere retenções e gera CompNfse ABRASF 2.04.</div><label><input id="abrasfStrictValidation" type="checkbox" checked> Bloquear XMLs cujos totais não fecharem</label><small>Municípios validados nesta versão: Barueri/SP, São José do Rio Preto/SP, Criciúma/SC e Novo Hamburgo/RS.</small>`,
-    "xml-abrasf-review": `<div class="queue-meta"><span>Fila <strong>até ${MAX_ABRASF_BATCH_FILES} XMLs</strong></span><span>Saída <strong>ZIP sem pastas</strong></span></div><small>Cada NFS-e será exibida para conferência. O ZIP manterá os XMLs originais na raiz.</small>`
+    "xml-abrasf-review": `<div class="queue-meta"><span>Fila <strong>até ${MAX_ABRASF_BATCH_FILES} XMLs</strong></span><span>Saída <strong>ZIP sem pastas</strong></span></div><small>Cada NFS-e será exibida para conferência. O ZIP manterá os XMLs originais na raiz.</small>`,
+    "pdf-pdfa": `<label for="pdfaResolution">Qualidade para arquivamento</label><select id="pdfaResolution"><option value="150">Padrão — 150 DPI</option><option value="200">Alta — 200 DPI</option><option value="300">Máxima — 300 DPI</option></select><small>Saída PDF/A-2b com aparência preservada. Resoluções maiores aumentam o tempo e o tamanho do arquivo.</small>`
   };
   elements.options.innerHTML = templates[type] || "";
   if (type === "digital-sign") bindDigitalSignOptions();
@@ -451,6 +456,87 @@ async function mergePdfs(files) {
     pages.forEach(page => output.addPage(page));
   }
   download(await output.save(), "pdfs-unidos.pdf", "application/pdf");
+}
+
+async function pdfToPdfA([file]) {
+  const requestedDpi = Number(document.querySelector("#pdfaResolution")?.value || 150);
+  const dpi = [150, 200, 300].includes(requestedDpi) ? requestedDpi : 150;
+  const pdfjs = await loadPdfJs();
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(await file.arrayBuffer()),
+    isEvalSupported: false,
+  });
+  const source = await loadingTask.promise;
+  const pageCount = source.numPages;
+  assertPdfARasterBudget({ pageCount, pagePixels: 0, totalPixels: 0 });
+  const output = await PDFLib.PDFDocument.create();
+  let totalPixels = 0;
+  try {
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      throwIfProcessingCancelled();
+      showStatus(`Preparando página ${pageNumber} de ${pageCount} em PDF/A-2b...`);
+      const sourcePage = await source.getPage(pageNumber);
+      const pageSize = sourcePage.getViewport({ scale: 1 });
+      const viewport = sourcePage.getViewport({ scale: dpi / 72 });
+      const pagePixels = Math.ceil(viewport.width) * Math.ceil(viewport.height);
+      totalPixels += pagePixels;
+      assertPdfARasterBudget({ pageCount, pagePixels, totalPixels });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.ceil(viewport.width));
+      canvas.height = Math.max(1, Math.ceil(viewport.height));
+      const context = canvas.getContext("2d", { alpha: false });
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      const renderTask = sourcePage.render({ canvasContext: context, viewport });
+      const signal = processingAbortController?.signal;
+      const cancelRender = () => renderTask.cancel();
+      signal?.addEventListener("abort", cancelRender, { once: true });
+      try {
+        await renderTask.promise;
+      } catch (error) {
+        if (signal?.aborted) throw Object.assign(new Error("Processamento cancelado."), { name: "AbortError" });
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", cancelRender);
+      }
+      throwIfProcessingCancelled();
+      const imageBlob = await new Promise((resolve, reject) => canvas.toBlob(
+        blob => blob ? resolve(blob) : reject(Object.assign(
+          new Error("Não foi possível renderizar uma página para PDF/A."),
+          { code: "PDFA_PAGE_RENDER_FAILED" },
+        )),
+        "image/jpeg",
+        0.94,
+      ));
+      const image = await output.embedJpg(new Uint8Array(await imageBlob.arrayBuffer()));
+      const outputPage = output.addPage([pageSize.width, pageSize.height]);
+      outputPage.drawImage(image, { x: 0, y: 0, width: pageSize.width, height: pageSize.height });
+      sourcePage.cleanup();
+      canvas.width = 1;
+      canvas.height = 1;
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+
+  markDocumentAsPdfA2b(output, PDFLib, {
+    title: `${baseName(file.name)} - PDF/A-2b`,
+    createdAt: new Date(),
+  });
+  showStatus("Validando a estrutura de arquivamento do PDF/A-2b...");
+  const bytes = await output.save({ useObjectStreams: false });
+  if (bytes.length > MAX_PDFA_OUTPUT_SIZE) {
+    throw Object.assign(
+      new Error("O PDF/A gerado excede 80 MB. Escolha um DPI menor ou divida o documento."),
+      { code: "PDFA_OUTPUT_TOO_LARGE" },
+    );
+  }
+  const report = await validatePdfA2b(bytes, PDFLib, { expectedPageCount: pageCount });
+  download(bytes, `${baseName(file.name)}-pdfa-2b.pdf`, "application/pdf");
+  return {
+    message: `PDF/A-2b criado com estrutura conferida: ${report.pageCount} página${report.pageCount === 1 ? "" : "s"}.`,
+    diagnostic: { code: "PDFA_CREATED", message: "PDF/A-2b criado com estrutura conferida localmente." },
+  };
 }
 
 async function extractPdf([file]) {
